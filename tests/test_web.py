@@ -55,7 +55,13 @@ class RoutesTest(WebTestBase):
     def test_index_is_served(self):
         code, body = self.get("/")
         self.assertEqual(code, 200)
-        self.assertIn(b"<", body)
+        page = body.decode()
+        self.assertIn("<!doctype html", page.lower())
+        # No build step and no CDN: everything the page needs is in the file.
+        self.assertNotIn("<script src=", page)
+        self.assertNotIn("cdn.", page)
+        self.assertIn("/api/events", page)
+        self.assertIn("#fd7c33", page.lower())  # the brand accent is actually used
 
     def test_logo_is_served(self):
         code, body = self.get("/logo.png")
