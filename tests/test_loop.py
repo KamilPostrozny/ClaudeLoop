@@ -1,8 +1,13 @@
+import asyncio
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+from claudeloop import loop
+from claudeloop.config import Config
 from claudeloop.loop import (
     RESET_PAD_S,
     Fail,
@@ -13,6 +18,8 @@ from claudeloop.loop import (
     read_result,
     total_cost,
 )
+from claudeloop.source import FileSource, task_id
+from claudeloop.state import State
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -109,6 +116,91 @@ class TotalCostTest(unittest.TestCase):
 
     def test_no_result_event_is_zero(self):
         self.assertEqual(total_cost([]), 0.0)
+
+
+class MainLoopTest(unittest.TestCase):
+    """End to end against the fake CLI, including one rate-limit recovery."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n- [ ] second thing\n")
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_LIMIT_FLAG", None)
+
+    def test_runs_every_task_and_checks_it_off(self):
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertEqual(self.tasks.read_text(), "- [x] first thing\n- [x] second thing\n")
+
+    def test_records_status_and_cost(self):
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        state = State(self.cfg.home / "state.db")
+        rows = state.db.execute("SELECT * FROM tasks ORDER BY started_at").fetchall()
+        self.assertEqual([row["status"] for row in rows], ["done", "done"])
+        self.assertEqual([row["summary"] for row in rows], ["fake work", "fake work"])
+        self.assertAlmostEqual(rows[0]["cost_usd"], 0.5)
+
+    def test_recovers_from_a_rate_limit_and_finishes_the_task(self):
+        flag = self.tmp / "limit.flag"
+        flag.write_text("")
+        os.environ["FAKE_LIMIT_FLAG"] = str(flag)
+        self.tasks.write_text("- [ ] first thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
+        state = State(self.cfg.home / "state.db")
+        runs = state.db.execute("SELECT * FROM runs ORDER BY id").fetchall()
+        self.assertEqual(len(runs), 2, "expected one limited run and one resume")
+        self.assertEqual(runs[0]["exit_reason"], "Resume")
+        self.assertEqual(runs[1]["exit_reason"], "ReadResult")
+        # The resume must reuse the session, not start a fresh one.
+        self.assertEqual(runs[0]["session_id"], runs[1]["session_id"])
+
+    def test_gives_up_after_max_resumes_and_marks_for_attention(self):
+        # A CLI that never writes a result: every invocation is a nudge.
+        fake = self.tmp / "bin" / "claude"
+        fake.write_text('#!/usr/bin/env bash\necho \'{"type":"result"}\'\n')
+        fake.chmod(0o755)
+        self.tasks.write_text("- [ ] doomed thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [!] doomed thing\n")
+        state = State(self.cfg.home / "state.db")
+        row = state.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("no_result", row["summary"])
+        runs = state.db.execute("SELECT COUNT(*) AS n FROM runs").fetchone()
+        self.assertEqual(runs["n"], self.cfg.max_resumes + 1)
+
+    def test_stale_result_from_a_previous_attempt_is_discarded(self):
+        stale = self.cfg.home / "runs" / task_id("first thing")
+        stale.mkdir(parents=True)
+        (stale / "result.json").write_text('{"status": "failed", "summary": "old news"}')
+        self.tasks.write_text("- [ ] first thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        state = State(self.cfg.home / "state.db")
+        row = state.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["summary"], "fake work")
 
 
 if __name__ == "__main__":
