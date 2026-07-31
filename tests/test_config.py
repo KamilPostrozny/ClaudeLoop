@@ -106,6 +106,17 @@ class WebConfigTest(unittest.TestCase):
                 home=self.tmp / "home",
             )
 
+    def test_a_non_ascii_token_is_refused_at_load(self):
+        # secrets.compare_digest, used to check web_token on every request,
+        # requires ASCII-only str and raises TypeError otherwise. Catching
+        # this here means a bad config fails loudly once at startup instead
+        # of on every single request forever.
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write('web_token = "pässwort"\n'), home=self.tmp / "home"
+            )
+        self.assertIn("web_token", str(caught.exception))
+
     def test_loopback_without_a_token_is_fine(self):
         for host in ("127.0.0.1", "localhost", "::1"):
             cfg = load_config(

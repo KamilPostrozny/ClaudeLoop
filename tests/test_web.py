@@ -19,6 +19,7 @@ SSE_SETTLE_S = 1.5  # comfortably longer than web.SSE_POLL_S
 
 class WebTestBase(unittest.TestCase):
     token = ""
+    web_host = "127.0.0.1"
 
     def setUp(self):
         status.reset()
@@ -30,7 +31,7 @@ class WebTestBase(unittest.TestCase):
             repo=self.tmp / "repo",
             tasks_file=self.tasks,
             home=self.tmp / "home",
-            web_host="127.0.0.1",
+            web_host=self.web_host,
             web_port=0,
             web_token=self.token,
         )
@@ -220,6 +221,37 @@ class HostHeaderTest(WebTestBase):
 
     def test_the_right_host_with_the_wrong_port_is_rejected(self):
         self.assertEqual(self._request(f"127.0.0.1:{self.server.server_port + 1}"), 403)
+
+    def test_a_non_numeric_port_is_rejected_not_raised(self):
+        # urlparse(...).port raises ValueError on "abc"; that used to escape
+        # _host_allowed as an uncaught exception instead of a plain 403.
+        self.assertEqual(self._request("localhost:abc"), 403)
+
+    def test_an_out_of_range_port_is_rejected_not_raised(self):
+        # Same ValueError, from a port outside 0-65535.
+        self.assertEqual(self._request("127.0.0.1:99999"), 403)
+
+
+class WildcardHostHeaderTest(WebTestBase):
+    # web_host = "0.0.0.0" means the token (config.py refuses to start
+    # otherwise) is the guard, not Host -- a real remote client's Host names
+    # its own address, never the wildcard, so Host can't be compared against
+    # a single allowed value the way it is for a specific bind.
+    web_host = "0.0.0.0"
+
+    def _request(self, host_header: str) -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/api/state", headers={"Host": host_header})
+        response = conn.getresponse()
+        response.read()
+        return response.status
+
+    def test_any_host_at_the_right_port_is_accepted(self):
+        self.assertEqual(self._request(f"192.168.1.5:{self.server.server_port}"), 200)
+
+    def test_the_wrong_port_is_still_rejected(self):
+        self.assertEqual(self._request(f"192.168.1.5:{self.server.server_port + 1}"), 403)
 
 
 class ReadLogTest(unittest.TestCase):

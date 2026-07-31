@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import status as status_module
-from .config import LOOPBACK_HOSTS, Config
+from .config import LOOPBACK_HOSTS, WILDCARD_HOSTS, Config
 from .render import render_event
 from .source import FileSource
 
@@ -249,11 +249,24 @@ class Handler(BaseHTTPRequestHandler):
         started with. This is the only thing standing between an arbitrary
         website and /api/state at the loopback default, where web_token is
         empty by design.
+
+        A wildcard bind (0.0.0.0 or ::) has no single hostname to compare
+        Host against -- every real client's Host names its own IP, not the
+        wildcard. config.py already refuses to start a wildcard bind without
+        web_token set, so the token is the guard there; this just still
+        checks the port, since that costs nothing and catches a stray
+        request landing on the wrong listener.
         """
         cfg = self.server.cfg
         parsed = urlparse(f"//{self.headers.get('Host', '')}")
+        try:
+            port_ok = parsed.port == self.server.server_port
+        except ValueError:  # e.g. "Host: localhost:abc" or a port out of range
+            return False
+        if cfg.web_host in WILDCARD_HOSTS:
+            return port_ok
         allowed_hosts = LOOPBACK_HOSTS if cfg.web_host in LOOPBACK_HOSTS else (cfg.web_host,)
-        return parsed.hostname in allowed_hosts and parsed.port == self.server.server_port
+        return parsed.hostname in allowed_hosts and port_ok
 
     def _authorized(self, query: str) -> bool:
         expected = self.server.cfg.web_token
