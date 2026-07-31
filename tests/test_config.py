@@ -65,5 +65,54 @@ class ConfigTest(unittest.TestCase):
             Config(repo=Path("/a"), tasks_file=Path("/b")).model = "x"
 
 
+class WebConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def write(self, extra: str = "") -> Path:
+        path = self.tmp / "config.toml"
+        path.write_text(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n' + extra
+        )
+        return path
+
+    def test_web_defaults_are_loopback(self):
+        cfg = load_config(self.write(), home=self.tmp / "home")
+        self.assertEqual(cfg.web_host, "127.0.0.1")
+        self.assertEqual(cfg.web_port, 8765)
+        self.assertEqual(cfg.web_token, "")
+
+    def test_web_values_are_read(self):
+        cfg = load_config(
+            self.write('web_host = "0.0.0.0"\nweb_port = 9000\nweb_token = "s3cret"\n'),
+            home=self.tmp / "home",
+        )
+        self.assertEqual(cfg.web_host, "0.0.0.0")
+        self.assertEqual(cfg.web_port, 9000)
+        self.assertEqual(cfg.web_token, "s3cret")
+
+    def test_non_loopback_without_a_token_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('web_host = "0.0.0.0"\n'), home=self.tmp / "home")
+        self.assertIn("web_token", str(caught.exception))
+
+    def test_non_loopback_with_a_blank_token_is_refused(self):
+        with self.assertRaises(ValueError):
+            load_config(
+                self.write('web_host = "192.168.1.5"\nweb_token = "   "\n'),
+                home=self.tmp / "home",
+            )
+
+    def test_loopback_without_a_token_is_fine(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            cfg = load_config(
+                self.write(f'web_host = "{host}"\n'), home=self.tmp / "home"
+            )
+            self.assertEqual(cfg.web_host, host)
+
+
 if __name__ == "__main__":
     unittest.main()
