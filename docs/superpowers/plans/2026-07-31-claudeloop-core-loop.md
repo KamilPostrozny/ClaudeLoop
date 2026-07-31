@@ -60,7 +60,7 @@ The spec's `session.py` command line includes `--include-partial-messages`. This
 ```bash
 mkdir -p claudeloop tests
 touch claudeloop/__init__.py tests/__init__.py
-printf '__pycache__/\n*.pyc\n' > .gitignore
+printf '__pycache__/\n*.pyc\n.superpowers/\n' > .gitignore
 ```
 
 - [ ] **Step 2: Write the failing tests**

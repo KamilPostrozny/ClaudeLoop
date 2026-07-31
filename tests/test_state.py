@@ -1,0 +1,120 @@
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from claudeloop.state import State
+
+
+class StateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "nested" / "state.db")
+
+    def test_creates_parent_directory(self):
+        self.assertTrue((self.tmp / "nested" / "state.db").exists())
+
+    def test_task_round_trip(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        row = self.state.task("abc")
+        self.assertEqual(row["status"], "running")
+        self.assertEqual(row["text"], "do it")
+        self.assertIsNotNone(row["started_at"])
+        self.assertIsNone(row["finished_at"])
+
+        self.state.finish_task("abc", "done", "worked fine", 1.25)
+        row = self.state.task("abc")
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["summary"], "worked fine")
+        self.assertAlmostEqual(row["cost_usd"], 1.25)
+        self.assertIsNotNone(row["finished_at"])
+
+    def test_finish_task_stores_the_question(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "blocked", "stuck", 0.0, "which currency?")
+        row = self.state.task("abc")
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["question"], "which currency?")
+
+    def test_finish_task_question_defaults_to_none(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "done", "worked fine", 1.25)
+        self.assertIsNone(self.state.task("abc")["question"])
+
+    def test_reopening_marks_orphaned_running_tasks_interrupted(self):
+        # No clean shutdown path ever leaves a row at 'running': it can only
+        # mean the previous process died mid-task.
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        reopened = State(self.tmp / "nested" / "state.db")
+        self.assertEqual(reopened.task("abc")["status"], "interrupted")
+
+    def test_reopening_does_not_touch_finished_tasks(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "done", "worked fine", 1.25)
+        reopened = State(self.tmp / "nested" / "state.db")
+        self.assertEqual(reopened.task("abc")["status"], "done")
+
+    def test_rerunning_a_task_replaces_the_previous_row(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "failed", "nope", 0.0)
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.assertEqual(self.state.task("abc")["status"], "running")
+
+    def test_run_round_trip(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        first = self.state.start_run("abc", "uuid-1", 0)
+        second = self.state.start_run("abc", "uuid-1", 1)
+        self.assertNotEqual(first, second)
+
+        self.state.finish_run(first, "Resume")
+        row = self.state.db.execute(
+            "SELECT * FROM runs WHERE id=?", (first,)
+        ).fetchone()
+        self.assertEqual(row["exit_reason"], "Resume")
+        self.assertEqual(row["resume_count"], 0)
+        self.assertIsNotNone(row["ended_at"])
+
+    def test_unknown_task_is_none(self):
+        self.assertIsNone(self.state.task("missing"))
+
+    def test_opening_a_pre_migration_database_adds_the_question_column(self):
+        # Simulates a state.db created before `question` was added to
+        # SCHEMA: CREATE TABLE IF NOT EXISTS is a no-op against it, so
+        # without the guarded ALTER TABLE every finish_task() call would
+        # raise "no such column: question" on a database this old.
+        path = self.tmp / "pre-migration.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id          TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                source_ref  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                started_at  REAL,
+                finished_at REAL,
+                summary     TEXT,
+                cost_usd    REAL
+            );
+            """
+        )
+        conn.close()
+
+        state = State(path)
+        columns = {row[1] for row in state.db.execute("PRAGMA table_info(tasks)")}
+        self.assertIn("question", columns)
+
+        state.start_task("abc", "file", "- [ ] do it", "do it")
+        state.finish_task("abc", "blocked", "stuck", 0.0, "which currency?")
+        self.assertEqual(state.task("abc")["question"], "which currency?")
+
+    def test_reopening_an_existing_database_keeps_rows(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        reopened = State(self.tmp / "nested" / "state.db")
+        self.assertEqual(reopened.task("abc")["text"], "do it")
+
+
+if __name__ == "__main__":
+    unittest.main()

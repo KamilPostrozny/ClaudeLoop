@@ -155,14 +155,22 @@ Single process. Four units, each independently testable.
 Reads `~/.claudeloop/config.toml` via `tomllib`. Never writes it.
 
 ```toml
-repo        = "/home/kamil/Projects/assimo"
-tasks_file  = "/home/kamil/Projects/assimo/.claudeloop-tasks.md"
-model       = "opus"
-max_resumes = 20
+repo              = "/home/kamil/Projects/assimo"
+tasks_file        = "/home/kamil/Projects/assimo/.claudeloop-tasks.md"
+model             = "opus"
+max_resumes       = 20
+max_waits         = 200
+session_timeout_s = 14400
 ```
 
-`max_resumes` bounds nudges and rate-limit resumes together, so a task that
-cannot terminate fails instead of looping forever.
+`max_resumes` bounds plain nudges — invocations that exit with no result and
+no blocking rate limit, i.e. made no progress on their own. `max_waits` bounds
+quota waits separately, with a much larger default: waiting out a real rate
+limit is progress, not stalling, so a task that is purely waiting on quota
+must not be discarded just because it has been resumed many times.
+`session_timeout_s` bounds a single invocation: a wedged `claude` is killed
+and its exit treated as a plain nudge rather than parking the orchestrator
+forever.
 
 ### `source.py`
 
@@ -229,18 +237,23 @@ The state machine, expressed as a pure function so it can be tested against
 recorded event streams without spawning anything:
 
 ```python
-def decide(events, result_exists, resume_count, max_resumes) -> Action
+def decide(events, result_exists, resume_count, max_resumes, wait_count, max_waits) -> Action
 ```
 
 `events` is the stream from the invocation that just exited, not the task's
 whole history — a rate-limit event from an earlier attempt must not re-trigger
 a wait after a later attempt exits for a different reason.
 
+Nudges and quota waits are bounded by separate counters, since a wait is not a
+failure to make progress — only a nudge is. A task can be resumed by quota
+waits alone far longer than `max_resumes` would otherwise allow.
+
 | Condition | Action |
 |---|---|
 | result file exists | `Finish(status from file)` |
-| last `rate_limit_event` **of the run that just exited** has `status != "allowed"` | `WaitUntil(resetsAt + 30s)` then resume |
-| `resume_count < max_resumes` | `Resume("Continue.")` |
+| last `rate_limit_event` **of the run that just exited** has `status != "allowed"`, and `wait_count < max_waits` | `WaitUntil(resetsAt + 30s)` then resume |
+| blocking rate limit, but `wait_count >= max_waits` | `Finish("failed", reason="no_result")` |
+| no blocking rate limit, and `resume_count < max_resumes` | `Resume("Continue.")` |
 | otherwise | `Finish("failed", reason="no_result")` |
 
 The result file is checked first, so a session that finished its work and then
@@ -252,13 +265,24 @@ the API.
 
 Process-level failures — a non-zero exit with no result file and no blocking
 rate-limit event — fall through to the nudge path and are bounded by
-`max_resumes`.
+`max_resumes`. A blocking rate-limit event instead increments `wait_count` and
+is bounded by the separate, much larger `max_waits`.
+
+The database records which kind of resume happened — `RateLimited` for a wait,
+`Nudge` otherwise — rather than the Python class name, so wall time spent
+waiting on quota is a queryable fact rather than something to reverse out of
+`Resume` rows after the fact.
+
+A still-running invocation is bounded too: `session.run` kills the process
+after `session_timeout_s` (default four hours) and returns whatever partial
+events it collected, which `decide` then treats like any other clean-ish exit
+with no result and no blocking rate limit — a plain nudge.
 
 ### `state.py`
 
 `sqlite3` at `~/.claudeloop/state.db`.
 
-- `tasks(id, source, source_ref, text, status, created_at, started_at, finished_at, summary, cost_usd)`
+- `tasks(id, source, source_ref, text, status, created_at, started_at, finished_at, summary, cost_usd, question)`
 - `runs(id, task_id, session_id, started_at, ended_at, exit_reason, resume_count)`
 
 Completions, summaries, cost, and exit reasons only. The raw event stream stays
@@ -310,6 +334,34 @@ Recorded now so S1 does not build anything that forecloses them.
 - **Secrets.** `CLOUDFLARE_API_TOKEN`, `~/.config/assimo/e2e.env`, and the
   Stripe and BaseLinker test credentials must be present in the container or
   the repo's verification phase cannot pass.
+
+## Verified against the live CLI
+
+Run on 2026-07-31 against a scratch repository, `model = "haiku"`, one trivial
+task, using the real `claude` binary. Every assumption the design rests on held:
+
+- **`resetsAt` is a unix timestamp in seconds.** Captured live as `1785516000`
+  = 2026-07-31 18:40 local, a real five-hour window boundary. The
+  `rate_limit_event` message is present on the `-p --output-format stream-json
+  --verbose` stream exactly as the design assumes, including while the quota is
+  fine (`"status": "allowed"`).
+- **`--session-id <uuid>` is honoured.** Every event in the stream carried the
+  UUID the orchestrator minted, not one the CLI chose.
+- **`--resume <uuid>` reattaches that session, and `--append-system-prompt`
+  survives the resume.** A follow-up `"Continue."` turn answered in terms of
+  the completed task ("No more tasks. LICENSE file committed. Work complete."),
+  which is only possible if both the conversation and the injected protocol
+  were still in force.
+- **The session writes `$CLAUDELOOP_RESULT` unprompted by anything but the
+  protocol paragraph**, and `total_cost_usd` is present on the `result` event
+  ($0.045 for the run), so recorded cost is real rather than silently zero.
+- The task was checked off, the work was committed in the target repository,
+  and the database recorded `done` with `exit_reason = ReadResult`.
+
+Not exercised live: recovery from an actually-blocking rate limit. Forcing a
+real quota exhaustion was out of proportion to the check; the blocking branch
+is covered by unit tests against a captured event, and the resume mechanism it
+depends on is verified above.
 
 ## Verification
 
