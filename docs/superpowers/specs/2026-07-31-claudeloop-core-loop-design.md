@@ -335,6 +335,34 @@ Recorded now so S1 does not build anything that forecloses them.
   Stripe and BaseLinker test credentials must be present in the container or
   the repo's verification phase cannot pass.
 
+## Verified against the live CLI
+
+Run on 2026-07-31 against a scratch repository, `model = "haiku"`, one trivial
+task, using the real `claude` binary. Every assumption the design rests on held:
+
+- **`resetsAt` is a unix timestamp in seconds.** Captured live as `1785516000`
+  = 2026-07-31 18:40 local, a real five-hour window boundary. The
+  `rate_limit_event` message is present on the `-p --output-format stream-json
+  --verbose` stream exactly as the design assumes, including while the quota is
+  fine (`"status": "allowed"`).
+- **`--session-id <uuid>` is honoured.** Every event in the stream carried the
+  UUID the orchestrator minted, not one the CLI chose.
+- **`--resume <uuid>` reattaches that session, and `--append-system-prompt`
+  survives the resume.** A follow-up `"Continue."` turn answered in terms of
+  the completed task ("No more tasks. LICENSE file committed. Work complete."),
+  which is only possible if both the conversation and the injected protocol
+  were still in force.
+- **The session writes `$CLAUDELOOP_RESULT` unprompted by anything but the
+  protocol paragraph**, and `total_cost_usd` is present on the `result` event
+  ($0.045 for the run), so recorded cost is real rather than silently zero.
+- The task was checked off, the work was committed in the target repository,
+  and the database recorded `done` with `exit_reason = ReadResult`.
+
+Not exercised live: recovery from an actually-blocking rate limit. Forcing a
+real quota exhaustion was out of proportion to the check; the blocking branch
+is covered by unit tests against a captured event, and the resume mechanism it
+depends on is verified above.
+
 ## Verification
 
 One `test_loop.py`, standard-library `unittest`, no framework.
