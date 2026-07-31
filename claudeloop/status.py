@@ -4,6 +4,24 @@ The loop *replaces* `current` with a new frozen instance on every transition;
 the web thread reads the reference. An atomic reference swap needs no lock and
 cannot tear: a reader sees either the old snapshot whole or the new one whole.
 Per-field assignment on a shared mutable object would not give that.
+
+That covers readers. Writing is safe today for a narrower reason: exactly one
+thread -- the loop -- ever calls set_status(). set_status() is a
+read-modify-write (read `current`, dataclasses.replace() it, write the
+result back), and a read-modify-write is atomic only under a single writer.
+The moment a second writer exists (a human answering a `blocked` task's
+question from the web thread, say), two concurrent calls can each read the
+same `current`, compute their own replace(), and the second write silently
+clobbers the first's changes. That needs an actual lock; nothing here
+provides one.
+
+One more thing this buys readers, and doesn't: `api_state()` binds one
+reference to `current` and reads every field off that single snapshot, so
+`status` in the `/api/state` payload is internally consistent -- it never
+mixes fields from two different Status instances. But the payload as a
+whole is not a consistent snapshot: `pending` and `completed` are read from
+the task file and the database *after* `status` is captured, so they can
+describe a slightly earlier or later moment than `status` does.
 """
 
 from __future__ import annotations

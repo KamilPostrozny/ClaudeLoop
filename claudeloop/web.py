@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import status as status_module
-from .config import Config
+from .config import LOOPBACK_HOSTS, Config
 from .render import render_event
 from .source import FileSource
 
@@ -31,8 +31,12 @@ TASK_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 it reaches the disk. This is a traversal guard, not tidiness."""
 
 STALE_AFTER_S = 90
-"""The loop refreshes the heartbeat at least every POLL_S (30s) even when
-idle, so three missed refreshes means it is not running."""
+"""A dedicated asyncio task inside main_loop refreshes status.heartbeat every
+~10s (see loop.HEARTBEAT_S), independent of any task state transition -- so
+it keeps advancing through a running session (up to session_timeout_s, 4h by
+default) or a quota sleep (up to MAX_WAIT_S, 8 days), both long awaits with
+no transition of their own. Three missed refreshes past that cadence means
+the event loop itself has stopped spinning, not just that nothing changed."""
 
 RECENT_TASKS = 50
 TASK_LOG_ENTRIES = 2000
@@ -40,6 +44,13 @@ TASK_LOG_ENTRIES = 2000
 SSE_POLL_S = 0.5
 REPLAY_ENTRIES = 200
 PING_S = 15
+
+TAIL_CAP_BYTES = 8 * 1024 * 1024
+"""Read at most this many trailing bytes of an event log, however large the
+file has grown over a multi-day run. Comfortably covers REPLAY_ENTRIES /
+TASK_LOG_ENTRIES worth of ordinary events; a run with unusually large tool
+output in its tail entries simply gets fewer of them replayed, rather than
+the orchestrator's own process running out of memory to serve a viewer."""
 
 
 def _connect(cfg: Config) -> sqlite3.Connection | None:
@@ -56,18 +67,59 @@ def _connect(cfg: Config) -> sqlite3.Connection | None:
     return db
 
 
+def _cut(data: bytes) -> tuple[bytes, int]:
+    """`data` up to its last complete line, and how many bytes that is.
+
+    A write caught mid-line (the loop appends while this reads) must be left
+    for the next read rather than rendered as a broken entry.
+    """
+    cut = data.rfind(b"\n") + 1
+    return data[:cut], cut
+
+
+def _tail(path: Path, cap: int) -> tuple[bytes, int]:
+    """Up to the last `cap` bytes of `path`, cut to whole lines.
+
+    Seeks from the end instead of reading the file whole: an events.jsonl
+    appended to for days can run into the hundreds of MB, and a full read
+    (worse, two -- one for the cut copy) is memory the orchestrator's own
+    process cannot spare just to serve a dashboard viewer. A line the seek
+    lands inside is dropped -- it belongs to data further back than the cap
+    reaches, or is one giant line the cap can't hold either way -- rather
+    than rendered as a broken fragment.
+
+    Returns the whole-line bytes and the file offset just past them.
+    """
+    with open(path, "rb") as handle:
+        size = handle.seek(0, 2)
+        start = max(0, size - cap)
+        handle.seek(start)
+        data = handle.read()
+    if start:
+        nl = data.find(b"\n")
+        if nl == -1:
+            return b"", size  # the one held-back line alone exceeds the cap
+        data = data[nl + 1 :]
+        start += nl + 1
+    data, cut = _cut(data)
+    return data, start + cut
+
+
+def _render(data: bytes) -> list[dict]:
+    """Rendered entries for whole lines already cut by `_cut`/`_tail`."""
+    entries: list[dict] = []
+    for raw in data.splitlines():
+        entries.extend(render_line(raw))
+    return entries
+
+
 def read_log(path: Path, limit: int) -> list[dict]:
     """The last `limit` rendered entries of an event log."""
-    entries: list[dict] = []
     try:
-        with open(path, "rb") as handle:
-            for raw in handle:
-                entries.extend(render_line(raw))
+        data, _ = _tail(path, TAIL_CAP_BYTES)
     except OSError:
         return []
-    # ponytail: reads the whole log to keep its tail. Seek backwards from the
-    # end if run logs ever get big enough for that to matter.
-    return entries[-limit:]
+    return _render(data)[-limit:]
 
 
 def render_line(raw: bytes) -> list[dict]:
@@ -111,6 +163,7 @@ def api_state(cfg: Config) -> dict:
         "pending": [
             {"id": task.id, "text": task.text}
             for task in FileSource(cfg.tasks_file).pending()
+            if task.id != snapshot.task_id
         ],
         "completed": completed,
         "now": time.time(),
@@ -147,11 +200,21 @@ def api_task(cfg: Config, task_id: str) -> dict | None:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ClaudeLoop"
+    timeout = 65
+    """The page polls over keep-alive every 3s and SSE writes a ping every
+    PING_S; either way a live peer generates traffic well inside this. A
+    socket that never triggers it is a half-open TCP connection (the phone
+    left wifi mid-idle, no FIN, no RST) that would otherwise park this
+    thread -- and its fd -- for the life of the process. Without a timeout,
+    StreamRequestHandler.setup() never calls settimeout() at all."""
 
     def log_message(self, fmt, *args):  # the stdlib default spams stderr
         log.debug("%s %s", self.address_string(), fmt % args)
 
     def do_GET(self) -> None:
+        if not self._host_allowed():
+            self._json(403, {"error": "bad host"})
+            return
         parsed = urlparse(self.path)
         if not self._authorized(parsed.query):
             self._json(403, {"error": "bad or missing token"})
@@ -161,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/":
             self._file(STATIC / "index.html", "text/html; charset=utf-8")
         elif route in ("/logo.png", "/favicon.ico"):
-            self._file(STATIC / "logo.png", "image/png")
+            self._file(STATIC / "logo.png", "image/png", cache=True)
         elif route == "/api/state":
             self._json(200, api_state(cfg))
         elif route == "/api/events":
@@ -175,28 +238,54 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def _host_allowed(self) -> bool:
+        """Reject a Host header that does not name this server.
+
+        Defends against DNS rebinding: a page open in a browser on this same
+        machine can point an attacker-controlled hostname at 127.0.0.1, and
+        the browser will still send that hostname in Host when it lands on
+        this socket -- same-origin policy does not help, since as far as the
+        browser is concerned every request still goes to the origin it
+        started with. This is the only thing standing between an arbitrary
+        website and /api/state at the loopback default, where web_token is
+        empty by design.
+        """
+        cfg = self.server.cfg
+        parsed = urlparse(f"//{self.headers.get('Host', '')}")
+        allowed_hosts = LOOPBACK_HOSTS if cfg.web_host in LOOPBACK_HOSTS else (cfg.web_host,)
+        return parsed.hostname in allowed_hosts and parsed.port == self.server.server_port
+
     def _authorized(self, query: str) -> bool:
         expected = self.server.cfg.web_token
         if not expected:
             return True
         given = (parse_qs(query).get("token") or [""])[0]
+        # compare_digest requires ASCII-only str arguments; parse_qs happily
+        # decodes a non-ASCII query value, and that mismatch used to escape
+        # as an uncaught TypeError instead of a plain 403.
+        if not given.isascii():
+            return False
         return secrets.compare_digest(given, expected)
 
     def _json(self, code: int, payload: dict) -> None:
         self._body(code, "application/json", json.dumps(payload, default=str).encode())
 
-    def _file(self, path: Path, content_type: str) -> None:
+    def _file(self, path: Path, content_type: str, cache: bool = False) -> None:
         try:
             data = path.read_bytes()
         except OSError:
             self._json(404, {"error": "not found"})
             return
-        self._body(200, content_type, data)
+        self._body(200, content_type, data, cache=cache)
 
-    def _body(self, code: int, content_type: str, data: bytes) -> None:
+    def _body(self, code: int, content_type: str, data: bytes, cache: bool = False) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        if cache:
+            # The logo is a multi-MB asset served to a phone on every load;
+            # it never changes at runtime, so it is worth paying for once.
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.end_headers()
         self.wfile.write(data)
 
@@ -208,8 +297,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self._pump()
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # the viewer closed the tab; EventSource will reconnect
+        except OSError:
+            # The viewer disconnected -- closed the tab (BrokenPipeError),
+            # reset the connection (ConnectionResetError), or, most often,
+            # just walked out of wifi range with no FIN and no RST, which
+            # surfaces here as a plain TimeoutError on the next write.
+            # EventSource will reconnect either way.
+            pass
         self.close_connection = True
 
     def _pump(self) -> None:
@@ -225,6 +319,13 @@ class Handler(BaseHTTPRequestHandler):
         while True:
             live = status_module.current.run_dir
             if live != run_dir:
+                if run_dir is not None:
+                    # The loop can flip run_dir to None within milliseconds
+                    # of the task finishing -- well inside one poll -- so
+                    # whatever the run wrote since the last drain (closing
+                    # prose, the cost/duration line) has to be flushed here
+                    # or it is never seen at all.
+                    self._drain(run_dir / "events.jsonl", offset)
                 run_dir = live
                 offset = 0
                 if run_dir is not None:
@@ -235,7 +336,7 @@ class Handler(BaseHTTPRequestHandler):
             now = time.time()
             if now - last_ping > PING_S:
                 # Writing is how a departed viewer is noticed: the write
-                # raises BrokenPipeError and the pump ends.
+                # raises OSError and the pump ends.
                 self._sse({"kind": "ping"})
                 last_ping = now
             time.sleep(SSE_POLL_S)
@@ -244,25 +345,19 @@ class Handler(BaseHTTPRequestHandler):
         """Emit up to REPLAY_ENTRIES existing lines; return the offset to
         resume tailing from.
 
-        Reads the file once and derives both the replayed entries and the
-        offset from that single snapshot, cut to the last complete line --
-        the same rule _drain applies. A second, later stat() call here would
-        race with a concurrent append (the run may already be writing): a
-        line that lands between the read and the stat would be counted in
-        the offset without ever having been read, and so would be silently
-        skipped by both the replay and the first _drain pass.
+        Bounded to the last TAIL_CAP_BYTES of the file (see `_tail`) rather
+        than reading it whole: a multi-day run's events.jsonl only grows, and
+        a full read here -- worse, two, one for the cut copy -- is exactly
+        the kind of thing that must never be able to OOM the process this
+        dashboard is supposed to be watching, not threatening.
         """
         try:
-            data = path.read_bytes()
+            data, offset = _tail(path, TAIL_CAP_BYTES)
         except OSError:
             return 0
-        cut = data.rfind(b"\n") + 1
-        entries: list[dict] = []
-        for raw in data[:cut].splitlines():
-            entries.extend(render_line(raw))
-        for entry in entries[-REPLAY_ENTRIES:]:
+        for entry in _render(data)[-REPLAY_ENTRIES:]:
             self._sse(entry)
-        return cut
+        return offset
 
     def _drain(self, path: Path, offset: int) -> int:
         """Emit every whole line past `offset`; return the new offset."""
@@ -274,14 +369,13 @@ class Handler(BaseHTTPRequestHandler):
             return offset
         with open(path, "rb") as handle:
             handle.seek(offset)
-            data = handle.read()
+            raw = handle.read()
         # The loop appends while this reads, so a read can land mid-line.
         # Advance only to the last newline and leave the remainder for the
         # next pass.
-        cut = data.rfind(b"\n") + 1
-        for raw in data[:cut].splitlines():
-            for entry in render_line(raw):
-                self._sse(entry)
+        data, cut = _cut(raw)
+        for entry in _render(data):
+            self._sse(entry)
         return offset + cut
 
     def _sse(self, entry: dict) -> None:

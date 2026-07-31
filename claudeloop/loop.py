@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -159,6 +160,27 @@ fresh while nothing is running."""
 
 log = logging.getLogger("claudeloop")
 
+HEARTBEAT_S = 10
+"""How often the background heartbeat task refreshes status.heartbeat.
+
+set_status() only fires on a state *transition* -- task start, once per
+attempt, a quota transition, the idle poll -- and there is none while
+`await session.run(...)` runs (up to session_timeout_s, 4h by default) or
+while `await asyncio.sleep(delay)` waits out a quota (up to MAX_WAIT_S, 8
+days). Both are long real-time awaits with no transition in between, so
+without a task that fires independently of them, web.STALE_AFTER_S (90s)
+trips during every normal run and the dashboard shows a dead loop that is
+working fine.
+"""
+
+
+async def _heartbeat() -> None:
+    """Prove the event loop is still spinning, independent of any task
+    state. This is what web.STALE_AFTER_S actually measures."""
+    while True:
+        await asyncio.sleep(HEARTBEAT_S)
+        status_module.set_status()
+
 
 def sleep_delay(wait_until: float) -> float:
     """Seconds to sleep until `wait_until`, clamped to MAX_WAIT_S.
@@ -259,47 +281,77 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
     """
     state = State(cfg.home / "state.db")
     source = FileSource(cfg.tasks_file)
-    while True:
-        pending = source.pending()
-        if not pending:
-            if once:
+    heartbeat = asyncio.create_task(_heartbeat())
+    try:
+        while True:
+            pending = source.pending()
+            if not pending:
+                if once:
+                    status_module.set_status(**IDLE_FIELDS)
+                    return
                 status_module.set_status(**IDLE_FIELDS)
-                return
-            status_module.set_status(**IDLE_FIELDS)
-            await asyncio.sleep(POLL_S)
-            continue
-        # Re-read after every task: the file may have been edited meanwhile.
-        task = pending[0]
-        try:
-            await run_task(cfg, state, source, task)
-        except Exception as error:
-            # A crash here (claude missing from PATH, ENOSPC on events.jsonl,
-            # a fork failing under memory pressure, ...) is an environment
-            # fault, not a task verdict. Deliberately no source.mark: marking
-            # it `- [!]` would burn through the whole task list in seconds if
-            # the fault is permanent. Recorded as failed so the row doesn't
-            # stay stuck at 'running', then retried slowly rather than taking
-            # the whole process down.
-            log.exception("task %s crashed outside the session state machine", task.id)
-            status_module.set_status(state="error", last_error=str(error))
+                await asyncio.sleep(POLL_S)
+                continue
+            # Re-read after every task: the file may have been edited meanwhile.
+            task = pending[0]
             try:
-                # The run row opened before the crash would otherwise sit
-                # with ended_at/exit_reason NULL forever.
-                state.db.execute(
-                    "UPDATE runs SET ended_at=?, exit_reason='Crash'"
-                    " WHERE task_id=? AND ended_at IS NULL",
-                    (time.time(), task.id),
-                )
-                state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
-            except Exception:
-                # Recording a crash must never itself be able to crash the
-                # loop -- an unattended run has to survive even a state.db
-                # write that fails (e.g. a schema this process's migration
-                # didn't handle).
-                log.exception("task %s: failed to record crash in state.db", task.id)
-            if once:
-                return
-            await asyncio.sleep(POLL_S)
+                await run_task(cfg, state, source, task)
+            except Exception as error:
+                # A crash here (claude missing from PATH, ENOSPC on events.jsonl,
+                # a fork failing under memory pressure, ...) is an environment
+                # fault, not a task verdict. Deliberately no source.mark: marking
+                # it `- [!]` would burn through the whole task list in seconds if
+                # the fault is permanent. Recorded as failed so the row doesn't
+                # stay stuck at 'running', then retried slowly rather than taking
+                # the whole process down.
+                log.exception("task %s crashed outside the session state machine", task.id)
+                status_module.set_status(state="error", last_error=str(error))
+                try:
+                    # The run row opened before the crash would otherwise sit
+                    # with ended_at/exit_reason NULL forever.
+                    state.db.execute(
+                        "UPDATE runs SET ended_at=?, exit_reason='Crash'"
+                        " WHERE task_id=? AND ended_at IS NULL",
+                        (time.time(), task.id),
+                    )
+                    state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
+                except Exception:
+                    # Recording a crash must never itself be able to crash the
+                    # loop -- an unattended run has to survive even a state.db
+                    # write that fails (e.g. a schema this process's migration
+                    # didn't handle).
+                    log.exception("task %s: failed to record crash in state.db", task.id)
+                if once:
+                    return
+                await asyncio.sleep(POLL_S)
+    finally:
+        # Never leak the heartbeat task past this function -- once=True is
+        # used from tests, and a task still scheduled after the event loop
+        # that owns it stops would print an "unhandled exception" warning at
+        # best and pin the fixture's asyncio loop open at worst.
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+
+
+def _serve_dashboard(cfg: Config) -> None:
+    """Start the dashboard, but never let it stop the loop from starting.
+
+    A stale process, a leftover container, or anything else already holding
+    web_port raises OSError from bind(). The observer must not be able to
+    prevent the observed thing from running at all -- so this is caught here
+    and only logged, and the loop starts either way.
+    """
+    try:
+        web.serve(cfg)
+    except OSError as error:
+        log.warning(
+            "dashboard could not bind %s:%s (%s) -- probably something else is"
+            " already using that port; continuing without the web UI",
+            cfg.web_host,
+            cfg.web_port,
+            error,
+        )
 
 
 def main() -> None:
@@ -312,5 +364,5 @@ def main() -> None:
         )
     # After the config validates, so a non-loopback bind with no token fails
     # before anything is listening.
-    web.serve(cfg)
+    _serve_dashboard(cfg)
     asyncio.run(main_loop(cfg))
