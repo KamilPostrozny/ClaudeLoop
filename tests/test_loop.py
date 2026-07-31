@@ -291,5 +291,79 @@ class MainLoopTest(unittest.TestCase):
         return str(empty)
 
 
+class StatusWiringTest(unittest.TestCase):
+    """Same fixture as MainLoopTest, deliberately duplicated rather than
+    inherited: subclassing a TestCase re-runs every one of the parent's tests,
+    which here means re-running seven subprocess-driven cases for nothing."""
+
+    def setUp(self):
+        from claudeloop import status
+
+        status.reset()
+        self.status = status
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n- [ ] second thing\n")
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_LIMIT_FLAG", None)
+
+    def test_the_loop_ends_idle_with_the_task_fields_cleared(self):
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertEqual(self.status.current.state, "idle")
+        self.assertIsNone(self.status.current.task_id)
+        self.assertIsNone(self.status.current.run_dir)
+        self.assertIsNone(self.status.current.session_id)
+
+    def test_the_heartbeat_is_fresh_after_a_run(self):
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertAlmostEqual(self.status.current.heartbeat, time.time(), delta=5)
+
+    def test_the_quota_reading_is_captured_from_the_stream(self):
+        flag = self.tmp / "limit.flag"
+        flag.write_text("")
+        os.environ["FAKE_LIMIT_FLAG"] = str(flag)
+        self.tasks.write_text("- [ ] first thing\n")
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertIsNotNone(self.status.current.rate_limit)
+        self.assertEqual(self.status.current.rate_limit["rateLimitType"], "five_hour")
+
+    def test_a_crash_is_recorded_as_the_error_state(self):
+        os.environ["PATH"] = "/nonexistent"
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertEqual(self.status.current.state, "error")
+        self.assertIn("claude", self.status.current.last_error or "")
+
+
+class LatestRateLimitTest(unittest.TestCase):
+    def test_returns_the_last_one(self):
+        events = [
+            {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}},
+            {"type": "rate_limit_event", "rate_limit_info": {"status": "rejected"}},
+        ]
+        self.assertEqual(loop.latest_rate_limit(events)["status"], "rejected")
+
+    def test_none_when_absent_or_malformed(self):
+        self.assertIsNone(loop.latest_rate_limit([]))
+        self.assertIsNone(loop.latest_rate_limit([{"type": "result"}]))
+        self.assertIsNone(
+            loop.latest_rate_limit([{"type": "rate_limit_event", "rate_limit_info": "nope"}])
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import session
+from . import status as status_module
+from . import web
 from .config import DEFAULT_CONFIG, Config, load_config
 from .source import FileSource, Task, TaskSource
 from .state import State
@@ -67,6 +69,15 @@ def blocking_reset(events: list[dict]) -> float | None:
             return float(info.get("resetsAt"))
         except (TypeError, ValueError):
             return time.time() + FALLBACK_WAIT_S
+    return None
+
+
+def latest_rate_limit(events: list[dict]) -> dict | None:
+    """The most recent quota reading in a run, for the dashboard's gauge."""
+    for event in reversed(events):
+        if event.get("type") == "rate_limit_event":
+            info = event.get("rate_limit_info")
+            return info if isinstance(info, dict) else None
     return None
 
 
@@ -132,6 +143,20 @@ POLL_S = 30
 """How long to idle when the task list is empty, so appended tasks get picked
 up without a restart."""
 
+IDLE_FIELDS = {
+    "state": "idle",
+    "task_id": None,
+    "task_text": None,
+    "run_dir": None,
+    "session_id": None,
+    "started_at": None,
+    "wait_until": None,
+}
+"""set_status carries unnamed fields over, so going idle has to clear the
+task fields explicitly or the dashboard shows a task that finished an hour
+ago. Reasserted on every idle poll, which is also what keeps the heartbeat
+fresh while nothing is running."""
+
 log = logging.getLogger("claudeloop")
 
 
@@ -155,6 +180,17 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     session_id = str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
     log.info("task %s starting: %s", task.id, task.text)
+    status_module.set_status(
+        state="running",
+        task_id=task.id,
+        task_text=task.text,
+        run_dir=run_dir,
+        session_id=session_id,
+        attempt=0,
+        started_at=time.time(),
+        wait_until=None,
+        last_error=None,
+    )
 
     resume_count = 0  # plain nudges: no result, no rate limit
     wait_count = 0  # quota waits: bounded separately, see decide()
@@ -162,6 +198,7 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     while True:
         attempt = resume_count + wait_count
         run_id = state.start_run(task.id, session_id, attempt)
+        status_module.set_status(state="running", attempt=attempt, wait_until=None)
         events = await session.run(
             cfg,
             run_dir,
@@ -172,6 +209,9 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
         # session.run returns only this invocation's events, so cost has to
         # accumulate here rather than being read once at the end.
         cost += total_cost(events)
+        quota = latest_rate_limit(events)
+        if quota is not None:
+            status_module.set_status(rate_limit=quota)
         action = decide(
             events,
             result_path.exists(),
@@ -197,7 +237,9 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
         if action.wait_until:
             delay = sleep_delay(action.wait_until)
             log.info("task %s rate limited, sleeping %.0fs", task.id, delay)
+            status_module.set_status(state="waiting", wait_until=action.wait_until)
             await asyncio.sleep(delay)
+            status_module.set_status(state="running", wait_until=None)
             wait_count += 1
         else:
             resume_count += 1
@@ -221,7 +263,9 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
         pending = source.pending()
         if not pending:
             if once:
+                status_module.set_status(**IDLE_FIELDS)
                 return
+            status_module.set_status(**IDLE_FIELDS)
             await asyncio.sleep(POLL_S)
             continue
         # Re-read after every task: the file may have been edited meanwhile.
@@ -237,6 +281,7 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
             # stay stuck at 'running', then retried slowly rather than taking
             # the whole process down.
             log.exception("task %s crashed outside the session state machine", task.id)
+            status_module.set_status(state="error", last_error=str(error))
             try:
                 # The run row opened before the crash would otherwise sit
                 # with ended_at/exit_reason NULL forever.
@@ -265,4 +310,7 @@ def main() -> None:
         raise SystemExit(
             f"no config file at {DEFAULT_CONFIG} -- see README.md to set one up"
         )
+    # After the config validates, so a non-loopback bind with no token fails
+    # before anything is listening.
+    web.serve(cfg)
     asyncio.run(main_loop(cfg))
