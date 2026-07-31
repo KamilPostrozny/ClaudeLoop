@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"53b506d2-bc68-4d0f-a7ed-d35a2ff50b47","model":"claude-opus-5"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1785516000,"rateLimitType":"five_hour"},"session_id":"53b506d2-bc68-4d0f-a7ed-d35a2ff50b47"}
+{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","total_cost_usd":0.0248249,"result":"ok","session_id":"53b506d2-bc68-4d0f-a7ed-d35a2ff50b47"}
