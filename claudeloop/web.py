@@ -37,6 +37,10 @@ idle, so three missed refreshes means it is not running."""
 RECENT_TASKS = 50
 TASK_LOG_ENTRIES = 2000
 
+SSE_POLL_S = 0.5
+REPLAY_ENTRIES = 200
+PING_S = 15
+
 
 def _connect(cfg: Config) -> sqlite3.Connection | None:
     """A read-only connection of this request's own.
@@ -160,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
             self._file(STATIC / "logo.png", "image/png")
         elif route == "/api/state":
             self._json(200, api_state(cfg))
+        elif route == "/api/events":
+            self._stream_events()
         elif route.startswith("/api/tasks/"):
             payload = api_task(cfg, route[len("/api/tasks/") :])
             if payload is None:
@@ -193,6 +199,73 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _stream_events(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self._pump()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the viewer closed the tab; EventSource will reconnect
+        self.close_connection = True
+
+    def _pump(self) -> None:
+        """Follow whichever run is current, forever.
+
+        One loop covers idle, an active run, and a switch between runs. An
+        early return on idle would make EventSource reconnect immediately and
+        hammer the server.
+        """
+        run_dir = None
+        offset = 0
+        last_ping = 0.0
+        while True:
+            live = status_module.current.run_dir
+            if live != run_dir:
+                run_dir = live
+                offset = 0
+                if run_dir is not None:
+                    path = run_dir / "events.jsonl"
+                    self._sse({"kind": "run", "task_id": run_dir.name})
+                    for entry in read_log(path, REPLAY_ENTRIES):
+                        self._sse(entry)
+                    offset = path.stat().st_size if path.exists() else 0
+            if run_dir is not None:
+                offset = self._drain(run_dir / "events.jsonl", offset)
+            now = time.time()
+            if now - last_ping > PING_S:
+                # Writing is how a departed viewer is noticed: the write
+                # raises BrokenPipeError and the pump ends.
+                self._sse({"kind": "ping"})
+                last_ping = now
+            time.sleep(SSE_POLL_S)
+
+    def _drain(self, path: Path, offset: int) -> int:
+        """Emit every whole line past `offset`; return the new offset."""
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return offset
+        if size <= offset:
+            return offset
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read()
+        # The loop appends while this reads, so a read can land mid-line.
+        # Advance only to the last newline and leave the remainder for the
+        # next pass.
+        cut = data.rfind(b"\n") + 1
+        for raw in data[:cut].splitlines():
+            for entry in render_line(raw):
+                self._sse(entry)
+        return offset + cut
+
+    def _sse(self, entry: dict) -> None:
+        self.wfile.write(f"data: {json.dumps(entry, default=str)}\n\n".encode())
+        self.wfile.flush()
 
 
 class _Server(ThreadingHTTPServer):

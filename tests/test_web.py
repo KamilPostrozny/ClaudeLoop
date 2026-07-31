@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -9,6 +10,8 @@ from pathlib import Path
 from claudeloop import status, web
 from claudeloop.config import Config
 from claudeloop.state import State
+
+SSE_SETTLE_S = 1.5  # comfortably longer than web.SSE_POLL_S
 
 
 class WebTestBase(unittest.TestCase):
@@ -161,6 +164,98 @@ class ReadLogTest(unittest.TestCase):
         )
         entries = web.read_log(path, 3)
         self.assertEqual([e["text"] for e in entries], ["7", "8", "9"])
+
+
+class SseTest(WebTestBase):
+    def read_entries(self, count: int, timeout: float = 10.0) -> list[dict]:
+        """Read SSE `data:` payloads until `count` of them arrive."""
+        entries: list[dict] = []
+        deadline = time.time() + timeout
+        response = urllib.request.urlopen(self.base + "/api/events", timeout=timeout)
+        self.addCleanup(response.close)
+        while len(entries) < count and time.time() < deadline:
+            line = response.readline()
+            if not line:
+                break
+            if line.startswith(b"data: "):
+                entries.append(json.loads(line[len(b"data: ") :]))
+        return entries
+
+    def start_run(self, task_id: str = "0123456789abcdef") -> Path:
+        run_dir = self.cfg.home / "runs" / task_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / "events.jsonl"
+        path.write_text(
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}\n'
+        )
+        status.set_status(state="running", task_id=task_id, run_dir=run_dir)
+        return path
+
+    def test_an_idle_loop_still_gets_a_keepalive(self):
+        entries = self.read_entries(1)
+        self.assertEqual(entries[0]["kind"], "ping")
+
+    def test_the_existing_log_is_replayed_on_connect(self):
+        self.start_run()
+        entries = self.read_entries(2)
+        self.assertEqual(entries[0]["kind"], "run")
+        self.assertEqual(entries[1], {"kind": "text", "text": "first"})
+
+    def test_a_line_appended_after_connect_arrives(self):
+        path = self.start_run()
+        entries: list[dict] = []
+        response = urllib.request.urlopen(self.base + "/api/events", timeout=10)
+        self.addCleanup(response.close)
+        deadline = time.time() + 10
+        appended = False
+        while time.time() < deadline:
+            if not appended and len(entries) >= 2:
+                with open(path, "a") as handle:
+                    handle.write(
+                        '{"type":"assistant","message":'
+                        '{"content":[{"type":"text","text":"second"}]}}\n'
+                    )
+                appended = True
+            line = response.readline()
+            if line.startswith(b"data: "):
+                entry = json.loads(line[len(b"data: ") :])
+                entries.append(entry)
+                if entry.get("text") == "second":
+                    return
+        self.fail(f"appended line never arrived; got {entries}")
+
+    def test_a_partial_trailing_line_is_not_consumed_early(self):
+        path = self.start_run()
+        response = urllib.request.urlopen(self.base + "/api/events", timeout=10)
+        self.addCleanup(response.close)
+
+        def next_entry():
+            while True:
+                line = response.readline()
+                if not line:
+                    self.fail("stream ended early")
+                if line.startswith(b"data: "):
+                    return json.loads(line[len(b"data: ") :])
+
+        # Drain the replay first: the run already has one line in it, and its
+        # entry would otherwise look exactly like a leaked partial.
+        self.assertEqual(next_entry()["kind"], "run")
+        self.assertEqual(next_entry()["text"], "first")
+
+        with open(path, "a") as handle:
+            handle.write('{"type":"assistant","message":{"content":[{"type":"text",')
+            handle.flush()
+            time.sleep(SSE_SETTLE_S)  # give the pump a chance to read the fragment
+            handle.write('"text":"whole"}]}}\n')
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            entry = next_entry()
+            if entry.get("kind") == "ping":
+                continue
+            self.assertEqual(entry.get("text"), "whole", f"partial line leaked: {entry}")
+            return
+        self.fail("the completed line never arrived")
 
 
 if __name__ == "__main__":
