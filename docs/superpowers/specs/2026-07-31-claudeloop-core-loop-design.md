@@ -282,7 +282,7 @@ with no result and no blocking rate limit — a plain nudge.
 
 `sqlite3` at `~/.claudeloop/state.db`.
 
-- `tasks(id, source, source_ref, text, status, created_at, started_at, finished_at, summary, cost_usd)`
+- `tasks(id, source, source_ref, text, status, created_at, started_at, finished_at, summary, cost_usd, question)`
 - `runs(id, task_id, session_id, started_at, ended_at, exit_reason, resume_count)`
 
 Completions, summaries, cost, and exit reasons only. The raw event stream stays

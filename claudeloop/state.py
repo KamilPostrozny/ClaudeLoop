@@ -42,6 +42,14 @@ class State:
         # WAL so S2's web UI can read while the loop writes.
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        # CREATE TABLE IF NOT EXISTS is a no-op against a database created
+        # before `question` was added to SCHEMA, so it needs its own
+        # migration. Guarded because it's a straight error on a database
+        # that already has the column.
+        try:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN question TEXT")
+        except sqlite3.OperationalError:
+            pass
         # A 'running' row can only mean the previous process died mid-task
         # (crash, SIGKILL, power loss): nothing else leaves it in that state.
         # Left alone it would misreport as in-progress forever.

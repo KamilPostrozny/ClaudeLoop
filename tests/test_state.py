@@ -77,6 +77,39 @@ class StateTest(unittest.TestCase):
     def test_unknown_task_is_none(self):
         self.assertIsNone(self.state.task("missing"))
 
+    def test_opening_a_pre_migration_database_adds_the_question_column(self):
+        # Simulates a state.db created before `question` was added to
+        # SCHEMA: CREATE TABLE IF NOT EXISTS is a no-op against it, so
+        # without the guarded ALTER TABLE every finish_task() call would
+        # raise "no such column: question" on a database this old.
+        path = self.tmp / "pre-migration.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id          TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                source_ref  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                started_at  REAL,
+                finished_at REAL,
+                summary     TEXT,
+                cost_usd    REAL
+            );
+            """
+        )
+        conn.close()
+
+        state = State(path)
+        columns = {row[1] for row in state.db.execute("PRAGMA table_info(tasks)")}
+        self.assertIn("question", columns)
+
+        state.start_task("abc", "file", "- [ ] do it", "do it")
+        state.finish_task("abc", "blocked", "stuck", 0.0, "which currency?")
+        self.assertEqual(state.task("abc")["question"], "which currency?")
+
     def test_reopening_an_existing_database_keeps_rows(self):
         self.state.start_task("abc", "file", "- [ ] do it", "do it")
         reopened = State(self.tmp / "nested" / "state.db")

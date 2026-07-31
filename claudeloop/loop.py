@@ -237,7 +237,21 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
             # stay stuck at 'running', then retried slowly rather than taking
             # the whole process down.
             log.exception("task %s crashed outside the session state machine", task.id)
-            state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
+            try:
+                # The run row opened before the crash would otherwise sit
+                # with ended_at/exit_reason NULL forever.
+                state.db.execute(
+                    "UPDATE runs SET ended_at=?, exit_reason='Crash'"
+                    " WHERE task_id=? AND ended_at IS NULL",
+                    (time.time(), task.id),
+                )
+                state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
+            except Exception:
+                # Recording a crash must never itself be able to crash the
+                # loop -- an unattended run has to survive even a state.db
+                # write that fails (e.g. a schema this process's migration
+                # didn't handle).
+                log.exception("task %s: failed to record crash in state.db", task.id)
             if once:
                 return
             await asyncio.sleep(POLL_S)
