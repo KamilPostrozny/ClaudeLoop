@@ -150,6 +150,45 @@ class RenderOtherTest(unittest.TestCase):
         self.assertEqual(render_event({"type": "assistant", "message": {"content": "nope"}}), [])
         self.assertEqual(render_event({"type": "user", "message": {"content": [None, 3]}}), [])
 
+    def test_message_field_that_is_not_a_dict_does_not_raise(self):
+        entries = render_event({"type": "assistant", "message": "oops"})
+        self.assertEqual(entries, [])
+
+    def test_message_field_as_list_does_not_raise(self):
+        entries = render_event({"type": "assistant", "message": []})
+        self.assertEqual(entries, [])
+
+    def test_message_field_as_int_does_not_raise(self):
+        entries = render_event({"type": "assistant", "message": 123})
+        self.assertEqual(entries, [])
+
+    def test_result_event_with_non_numeric_cost_does_not_raise(self):
+        entries = render_event({"type": "result", "total_cost_usd": "oops"})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "done")
+        self.assertEqual(entries[0]["cost"], 0.0)
+
+    def test_result_event_with_non_numeric_duration_does_not_raise(self):
+        entries = render_event({"type": "result", "duration_ms": "x"})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "done")
+        self.assertEqual(entries[0]["duration_ms"], 0)
+
+    def test_result_event_with_both_non_numeric_does_not_raise(self):
+        entries = render_event({"type": "result", "total_cost_usd": "oops", "duration_ms": "x"})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "done")
+        self.assertEqual(entries[0]["cost"], 0.0)
+        self.assertEqual(entries[0]["duration_ms"], 0)
+
+    def test_result_event_with_list_cost_does_not_raise(self):
+        entries = render_event({"type": "result", "total_cost_usd": [1, 2, 3]})
+        self.assertEqual(entries[0]["cost"], 0.0)
+
+    def test_result_event_with_dict_duration_does_not_raise(self):
+        entries = render_event({"type": "result", "duration_ms": {"x": 1}})
+        self.assertEqual(entries[0]["duration_ms"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

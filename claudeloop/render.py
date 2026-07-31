@@ -20,6 +20,20 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _to_float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _to_int(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _tool_summary(tool_input) -> str:
     if not isinstance(tool_input, dict):
         return ""
@@ -70,7 +84,8 @@ def _user_block(block: dict) -> dict | None:
 
 
 def _blocks(event: dict, render_block) -> list[dict]:
-    content = (event.get("message") or {}).get("content")
+    msg = event.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
     if not isinstance(content, list):
         return []
     entries = []
@@ -97,8 +112,8 @@ def render_event(event: dict) -> list[dict]:
         return [
             {
                 "kind": "done",
-                "cost": float(event.get("total_cost_usd") or 0.0),
-                "duration_ms": int(event.get("duration_ms") or 0),
+                "cost": _to_float(event.get("total_cost_usd") or 0.0),
+                "duration_ms": _to_int(event.get("duration_ms") or 0),
                 "subtype": str(event.get("subtype") or ""),
             }
         ]
