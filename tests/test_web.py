@@ -1,14 +1,17 @@
+import http.client
 import json
 import sqlite3
 import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from claudeloop import status, web
 from claudeloop.config import Config
+from claudeloop.source import task_id
 from claudeloop.state import State
 
 SSE_SETTLE_S = 1.5  # comfortably longer than web.SSE_POLL_S
@@ -42,7 +45,7 @@ class WebTestBase(unittest.TestCase):
     def get(self, path: str, token: str | None = None):
         url = self.base + path
         if token is not None:
-            url += ("&" if "?" in path else "?") + f"token={token}"
+            url += ("&" if "?" in path else "?") + "token=" + urllib.parse.quote(token)
         with urllib.request.urlopen(url, timeout=5) as response:
             return response.status, response.read()
 
@@ -73,6 +76,28 @@ class RoutesTest(WebTestBase):
             self.get("/nope")
         self.assertEqual(caught.exception.code, 404)
 
+    def test_the_logo_is_cached_long_lived(self):
+        # It's 1.66MB served to a phone on every page load; worth paying for
+        # once rather than every 3s poll cycle's page load.
+        with urllib.request.urlopen(self.base + "/logo.png", timeout=5) as response:
+            cache_control = response.headers.get("Cache-Control", "")
+        self.assertIn("max-age", cache_control)
+
+    def test_the_index_page_is_not_cached(self):
+        with urllib.request.urlopen(self.base + "/", timeout=5) as response:
+            self.assertIsNone(response.headers.get("Cache-Control"))
+
+    def test_the_status_vocabulary_matches_what_the_database_produces(self):
+        # state.py's tasks.status can be done/failed/blocked/interrupted;
+        # the page used to only know question (dead -- never produced) and
+        # was silent on blocked and interrupted.
+        page = self.get("/")[1].decode()
+        self.assertIn('data-status="blocked"', page)
+        self.assertIn('data-status="interrupted"', page)
+        self.assertNotIn('data-status="question"', page)
+        self.assertIn("blocked:", page)
+        self.assertIn("interrupted:", page)
+
 
 class StateRouteTest(WebTestBase):
     def test_reports_the_current_snapshot(self):
@@ -90,6 +115,13 @@ class StateRouteTest(WebTestBase):
     def test_pending_comes_from_the_task_file(self):
         payload = self.get_json("/api/state")
         self.assertEqual([t["text"] for t in payload["pending"]], ["first thing"])
+
+    def test_the_running_task_is_not_listed_as_pending(self):
+        # Otherwise the same task shows as both in-flight (the beacon) and
+        # queued (position 01), and inflates "Pending N" for the whole run.
+        status.set_status(state="running", task_id=task_id("first thing"))
+        payload = self.get_json("/api/state")
+        self.assertEqual(payload["pending"], [])
 
     def test_completed_comes_from_the_database(self):
         state = State(self.cfg.home / "state.db")
@@ -159,6 +191,36 @@ class TokenTest(WebTestBase):
             self.get("/api/state", token="wrong")
         self.assertEqual(caught.exception.code, 403)
 
+    def test_a_non_ascii_token_is_refused_not_raised(self):
+        # secrets.compare_digest requires ASCII-only str; parse_qs happily
+        # decodes a non-ASCII query value, which used to escape as an
+        # uncaught TypeError instead of a plain 403.
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/state", token="é")
+        self.assertEqual(caught.exception.code, 403)
+
+
+class HostHeaderTest(WebTestBase):
+    def _request(self, host_header: str) -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/api/state", headers={"Host": host_header})
+        response = conn.getresponse()
+        response.read()
+        return response.status
+
+    def test_the_configured_host_and_port_are_accepted(self):
+        self.assertEqual(self._request(f"127.0.0.1:{self.server.server_port}"), 200)
+
+    def test_a_rebound_hostname_is_rejected(self):
+        # The scenario this defends: a page open in a browser on this same
+        # machine gets DNS-rebound so "evil.example" resolves to 127.0.0.1.
+        # The browser still sends the hostname it started with in Host.
+        self.assertEqual(self._request(f"evil.example:{self.server.server_port}"), 403)
+
+    def test_the_right_host_with_the_wrong_port_is_rejected(self):
+        self.assertEqual(self._request(f"127.0.0.1:{self.server.server_port + 1}"), 403)
+
 
 class ReadLogTest(unittest.TestCase):
     def test_a_missing_file_is_empty(self):
@@ -174,6 +236,68 @@ class ReadLogTest(unittest.TestCase):
         )
         entries = web.read_log(path, 3)
         self.assertEqual([e["text"] for e in entries], ["7", "8", "9"])
+
+    def test_a_log_far_larger_than_the_cap_still_yields_the_correct_tail(self):
+        # Regression for the full-file read this used to do: with a cap far
+        # smaller than the file, the seek is forced to land inside a line,
+        # and the result must still be exactly the trailing entries -- no
+        # broken/partial entry from the line the seek cut into.
+        path = Path(tempfile.mkdtemp()) / "events.jsonl"
+        path.write_text(
+            "".join(
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"%d"}]}}\n' % i
+                for i in range(500)
+            )
+        )
+        old_cap = web.TAIL_CAP_BYTES
+        web.TAIL_CAP_BYTES = 500  # ~7 lines' worth; file is ~37KB
+        try:
+            entries = web.read_log(path, 5)
+        finally:
+            web.TAIL_CAP_BYTES = old_cap
+        self.assertEqual([e["text"] for e in entries], ["495", "496", "497", "498", "499"])
+
+
+class TailTest(unittest.TestCase):
+    """web._tail is the primitive both read_log and _replay lean on to avoid
+    reading a multi-day event log whole just to serve its last few entries."""
+
+    def test_a_cap_larger_than_the_file_reads_it_whole(self):
+        path = Path(tempfile.mkdtemp()) / "log.jsonl"
+        path.write_bytes(b"a\nb\nc\n")
+        data, offset = web._tail(path, 1_000_000)
+        self.assertEqual(data, b"a\nb\nc\n")
+        self.assertEqual(offset, 6)
+
+    def test_a_trailing_partial_line_is_left_for_the_next_read(self):
+        path = Path(tempfile.mkdtemp()) / "log.jsonl"
+        path.write_bytes(b"a\nb\npartial")
+        data, offset = web._tail(path, 1_000_000)
+        self.assertEqual(data, b"a\nb\n")
+        self.assertEqual(offset, 4)
+
+    def test_seeking_into_the_middle_of_a_line_drops_only_that_fragment(self):
+        path = Path(tempfile.mkdtemp()) / "log.jsonl"
+        path.write_bytes(b"".join(b"line-%03d\n" % i for i in range(100)))  # 9 bytes/line
+        data, offset = web._tail(path, 50)
+        self.assertEqual(offset, path.stat().st_size)  # file ends mid-newline, cleanly
+        lines = data.splitlines()
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertTrue(line.startswith(b"line-"), f"broken fragment leaked: {line!r}")
+        # The last line is always whole and present.
+        self.assertEqual(lines[-1], b"line-099")
+
+    def test_a_single_line_longer_than_the_cap_yields_nothing_usable(self):
+        path = Path(tempfile.mkdtemp()) / "log.jsonl"
+        path.write_bytes(b"x" * 1000)  # one giant line, no newline anywhere
+        data, offset = web._tail(path, 100)
+        self.assertEqual(data, b"")
+        self.assertEqual(offset, 1000)
+
+    def test_a_missing_file_raises_oserror(self):
+        with self.assertRaises(OSError):
+            web._tail(Path("/nonexistent/events.jsonl"), 100)
 
 
 class SseTest(WebTestBase):
@@ -266,6 +390,44 @@ class SseTest(WebTestBase):
             self.assertEqual(entry.get("text"), "whole", f"partial line leaked: {entry}")
             return
         self.fail("the completed line never arrived")
+
+    def test_the_tail_of_a_finished_run_is_not_dropped(self):
+        # main_loop clears run_dir to None within milliseconds of a task
+        # finishing -- well inside one 0.5s poll -- so the pump used to skip
+        # draining the last write entirely: the closing prose and the
+        # cost/duration line were simply never seen.
+        path = self.start_run()
+        response = urllib.request.urlopen(self.base + "/api/events", timeout=10)
+        self.addCleanup(response.close)
+
+        def next_entry():
+            while True:
+                line = response.readline()
+                if not line:
+                    self.fail("stream ended early")
+                if line.startswith(b"data: "):
+                    return json.loads(line[len(b"data: ") :])
+
+        self.assertEqual(next_entry()["kind"], "run")
+        self.assertEqual(next_entry()["text"], "first")
+
+        # Write the closing line and flip run_dir to None back to back, with
+        # no sleep -- reproducing the finish happening inside one poll tick.
+        with open(path, "a") as handle:
+            handle.write(
+                '{"type":"assistant","message":'
+                '{"content":[{"type":"text","text":"final"}]}}\n'
+            )
+        status.set_status(run_dir=None)
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            entry = next_entry()
+            if entry.get("kind") == "ping":
+                continue
+            self.assertEqual(entry.get("text"), "final", f"the closing line was dropped: {entry}")
+            return
+        self.fail("the closing line never arrived")
 
 
 if __name__ == "__main__":

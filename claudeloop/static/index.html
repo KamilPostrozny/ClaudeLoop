@@ -338,8 +338,9 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 }
 .done-item[data-status="done"] .mark { color: var(--ok); }
 .done-item[data-status="failed"] .mark,
-.done-item[data-status="error"] .mark { color: var(--bad); }
-.done-item[data-status="question"] .mark { color: var(--warn); }
+.done-item[data-status="error"] .mark,
+.done-item[data-status="interrupted"] .mark { color: var(--bad); }
+.done-item[data-status="blocked"] .mark { color: var(--warn); }
 .done-title { flex: 1; font-size: 14px; overflow-wrap: anywhere; }
 .done-cost {
   flex: none; font: 400 12px/1.5 var(--mono);
@@ -591,13 +592,30 @@ const card = $("status");
 let snap = null;       // the last status object, for the one-second ticker
 let quotaWindow = null; // {resets, from}: the span the meter measures against
 
-// The subscription's own window names, in seconds. Only these exist today;
-// anything else degrades to the first-seen fallback below.
+// The subscription's own window names, in seconds. Only these exist today.
 const WINDOWS = {
   five_hour: 5 * 3600,
   weekly: 7 * 86400,
   opus_weekly: 7 * 86400,
 };
+
+// The meter needs a denominator and the payload carries only a reset time,
+// so the window's start comes from subtracting its length back off the
+// reset. An unknown name has no length to subtract, so this collapses to
+// `resets` itself -- span is zero and the meter renders empty (the
+// Math.max(1, ...) in tick() below stops that from dividing by zero)
+// rather than guessing a length.
+function quotaFrom(resets, type) {
+  return resets - (WINDOWS[type] || 0);
+}
+
+// Self-check, quota-window math only: cheap enough to leave in, delete if
+// WINDOWS or quotaFrom's contract ever changes on purpose. The page has no
+// test framework and isn't getting one for this.
+console.assert(quotaFrom(1000, "five_hour") === 1000 - 5 * 3600, "five_hour window math changed");
+console.assert(quotaFrom(1000, "weekly") === 1000 - 7 * 86400, "weekly window math changed");
+console.assert(quotaFrom(1000, "opus_weekly") === 1000 - 7 * 86400, "opus_weekly window math changed");
+console.assert(quotaFrom(1000, "some_unknown_type") === 1000, "unknown window should collapse to resets");
 
 const LABELS = {
   running: "Running",
@@ -640,11 +658,7 @@ function renderStatus(s) {
   if (resets) {
     const type = String(limit.rateLimitType || limit.status || "quota");
     if (!quotaWindow || quotaWindow.resets !== resets) {
-      // The meter needs a denominator and the payload carries only a reset
-      // time, so the window comes from the limit's own name. An unknown name
-      // falls back to first-seen, which starts the track empty rather than
-      // inventing a length.
-      quotaWindow = { resets, from: resets - (WINDOWS[type] || 0) || now() };
+      quotaWindow = { resets, from: quotaFrom(resets, type) };
     }
     $("quota-type").textContent = type.replace(/_/g, " ") + " limit";
   } else {
@@ -696,7 +710,7 @@ function renderPending(items) {
   });
 }
 
-const MARKS = { done: "✓", failed: "×", error: "×", question: "?" };
+const MARKS = { done: "✓", failed: "×", error: "×", blocked: "?", interrupted: "!" };
 const REASON_CLASS = { RateLimited: "limited", Fail: "failed", Crash: "failed" };
 let completedKey = "";
 

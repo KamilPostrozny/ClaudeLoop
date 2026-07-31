@@ -2,12 +2,13 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-from claudeloop import loop
+from claudeloop import loop, status
 from claudeloop.config import Config
 from claudeloop.loop import (
     FALLBACK_WAIT_S,
@@ -363,6 +364,103 @@ class LatestRateLimitTest(unittest.TestCase):
         self.assertIsNone(
             loop.latest_rate_limit([{"type": "rate_limit_event", "rate_limit_info": "nope"}])
         )
+
+
+class HeartbeatTest(unittest.TestCase):
+    """set_status() only moves on a state transition, and there is none for
+    the whole span of `await session.run(...)` (up to session_timeout_s, 4h
+    by default) or `await asyncio.sleep(delay)` (up to MAX_WAIT_S, 8 days).
+    The background heartbeat task exists to keep status.heartbeat fresh
+    through exactly those spans. Reproduced with HEARTBEAT_S monkeypatched
+    small and a fake CLI slow enough to outlast it, rather than waiting out
+    the real multi-hour/multi-day windows.
+    """
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] slow thing\n")
+        self.cfg = Config(repo=self.tmp / "repo", tasks_file=self.tasks, home=self.tmp / "home")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        slow = bin_dir / "claude"
+        slow.write_text(
+            "#!/usr/bin/env bash\n"
+            "sleep 0.6\n"
+            "printf '%s' '{\"status\":\"done\",\"summary\":\"ok\"}' > \"$CLAUDELOOP_RESULT\"\n"
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
+        )
+        slow.chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+        self.old_heartbeat_s = loop.HEARTBEAT_S
+        loop.HEARTBEAT_S = 0.1
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        loop.HEARTBEAT_S = self.old_heartbeat_s
+
+    def test_the_heartbeat_does_not_go_stale_while_a_session_runs(self):
+        stale_after = 0.3  # shorter than the fake session's 0.6s sleep
+
+        async def watch():
+            task = asyncio.create_task(loop.main_loop(self.cfg, once=True))
+            seen_running = False
+            went_stale = False
+            while not task.done():
+                snap = status.current
+                if snap.state == "running":
+                    seen_running = True
+                    if time.time() - snap.heartbeat > stale_after:
+                        went_stale = True
+                await asyncio.sleep(0.03)
+            await task
+            return seen_running, went_stale
+
+        seen_running, went_stale = asyncio.run(watch())
+        self.assertTrue(seen_running, "never observed the running state")
+        self.assertFalse(went_stale, "heartbeat went stale while a session was running")
+
+    def test_the_heartbeat_task_does_not_leak_past_once(self):
+        async def scenario():
+            await loop.main_loop(self.cfg, once=True)
+            return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+        pending = asyncio.run(scenario())
+        self.assertEqual(pending, [])
+
+
+class ServeDashboardTest(unittest.TestCase):
+    def test_a_bind_failure_does_not_prevent_the_loop_from_running(self):
+        # A real bound-and-listening socket, not a mock: SO_REUSEADDR (which
+        # _Server sets) only helps rebind a port stuck in TIME_WAIT, not one
+        # actively held by a live listener, so this reliably reproduces
+        # OSError: Address already in use.
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        self.addCleanup(blocker.close)
+        port = blocker.getsockname()[1]
+
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "repo" / ".git").mkdir(parents=True)
+        tasks = tmp / "tasks.md"
+        tasks.write_text("")  # nothing pending: main_loop(once=True) returns at once
+        cfg = Config(
+            repo=tmp / "repo",
+            tasks_file=tasks,
+            home=tmp / "home",
+            web_host="127.0.0.1",
+            web_port=port,
+        )
+
+        loop._serve_dashboard(cfg)  # must swallow the OSError, not raise
+
+        status.reset()
+        asyncio.run(loop.main_loop(cfg, once=True))
+        self.assertEqual(status.current.state, "idle")
 
 
 if __name__ == "__main__":
