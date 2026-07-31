@@ -228,11 +228,8 @@ class Handler(BaseHTTPRequestHandler):
                 run_dir = live
                 offset = 0
                 if run_dir is not None:
-                    path = run_dir / "events.jsonl"
                     self._sse({"kind": "run", "task_id": run_dir.name})
-                    for entry in read_log(path, REPLAY_ENTRIES):
-                        self._sse(entry)
-                    offset = path.stat().st_size if path.exists() else 0
+                    offset = self._replay(run_dir / "events.jsonl")
             if run_dir is not None:
                 offset = self._drain(run_dir / "events.jsonl", offset)
             now = time.time()
@@ -242,6 +239,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._sse({"kind": "ping"})
                 last_ping = now
             time.sleep(SSE_POLL_S)
+
+    def _replay(self, path: Path) -> int:
+        """Emit up to REPLAY_ENTRIES existing lines; return the offset to
+        resume tailing from.
+
+        Reads the file once and derives both the replayed entries and the
+        offset from that single snapshot, cut to the last complete line --
+        the same rule _drain applies. A second, later stat() call here would
+        race with a concurrent append (the run may already be writing): a
+        line that lands between the read and the stat would be counted in
+        the offset without ever having been read, and so would be silently
+        skipped by both the replay and the first _drain pass.
+        """
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return 0
+        cut = data.rfind(b"\n") + 1
+        entries: list[dict] = []
+        for raw in data[:cut].splitlines():
+            entries.extend(render_line(raw))
+        for entry in entries[-REPLAY_ENTRIES:]:
+            self._sse(entry)
+        return cut
 
     def _drain(self, path: Path, offset: int) -> int:
         """Emit every whole line past `offset`; return the new offset."""

@@ -33,6 +33,10 @@ class WebTestBase(unittest.TestCase):
         )
         self.server = web.serve(self.cfg)
         self.addCleanup(self.server.shutdown)
+        # shutdown() only stops the serve_forever loop; it leaves the
+        # listening socket open. Close it too, or every test in the module
+        # leaks one fd for the life of the process.
+        self.addCleanup(self.server.server_close)
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
     def get(self, path: str, token: str | None = None):
