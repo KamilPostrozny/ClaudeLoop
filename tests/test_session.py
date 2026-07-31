@@ -1,9 +1,12 @@
 import asyncio
+import contextlib
 import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from claudeloop import session
@@ -71,10 +74,14 @@ class RunTest(unittest.TestCase):
             session.run(self.cfg, self.run_dir, "uuid-1", "do it", resume=resume)
         )
 
-    def test_returns_parsed_events_and_skips_non_json_lines(self):
+    def test_returns_only_rate_limit_and_result_events(self):
+        # decide() and total_cost() only ever look at these two types; a
+        # multi-hour session's `system`/`assistant`/`user` events (including
+        # full tool results under bypassPermissions) must not pile up in
+        # memory just to be read once and discarded.
         events = self.run_once()
         types = [event.get("type") for event in events]
-        self.assertEqual(types, ["system", "result"])
+        self.assertEqual(types, ["result"])
 
     def test_logs_every_raw_line_including_the_unparseable_one(self):
         self.run_once()
@@ -109,6 +116,83 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.run_dir / "result.json").exists())
 
 
+class HungProcessTest(unittest.TestCase):
+    """A wedged `claude` (stalled network, a hung MCP server, ...) must never
+    park the orchestrator forever -- it gets killed and treated like a
+    plain, resumable nudge instead."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tmp / "tasks.md",
+            home=self.tmp / "home",
+        )
+        self.run_dir = self.tmp / "home" / "runs" / "abc"
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{fake_path_dir(self.tmp)}{os.pathsep}{self.old_path}"
+        hang = self.tmp / "bin" / "claude"
+        hang.write_text("#!/usr/bin/env bash\nsleep 9999\n")
+        hang.chmod(0o755)
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+
+    def test_a_hung_process_is_killed_once_the_timeout_fires(self):
+        cfg = replace(self.cfg, session_timeout_s=0.2)
+        start = time.monotonic()
+        events = asyncio.run(session.run(cfg, self.run_dir, "uuid-1", "do it", resume=False))
+        elapsed = time.monotonic() - start
+        # Bounded, not "eventually" -- proves the timeout (plus, worst case,
+        # one REAP_TIMEOUT_S: this script's `sleep` is a real forked child
+        # that can outlive the killed shell and hold the pipes open) fired
+        # rather than the process happening to exit for some other reason.
+        self.assertLess(elapsed, 0.2 + session.REAP_TIMEOUT_S + 3)
+        self.assertEqual(events, [])
+
+    def test_cancelling_the_caller_still_kills_the_child(self):
+        # Simulates SIGTERM/Ctrl-C: asyncio.run cancels the running task.
+        # Without the try/finally in session.run, the child would keep
+        # running after this function returns -- a restart would then race a
+        # second live bypassPermissions session against it.
+        pid_file = self.tmp / "pid"
+        hang = self.tmp / "bin" / "claude"
+        hang.write_text(f'#!/usr/bin/env bash\necho $$ > "{pid_file}"\nsleep 9999\n')
+        hang.chmod(0o755)
+
+        async def go():
+            task = asyncio.ensure_future(
+                session.run(self.cfg, self.run_dir, "uuid-1", "do it", resume=False)
+            )
+            while not pid_file.exists():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        pid = int(pid_file.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_stdin_is_not_inherited(self):
+        # A CLI that reads stdin must see EOF immediately, not block forever
+        # on a read from a pipe/terminal it was never meant to share. Bounded
+        # by a short *test-level* timeout so this fails loudly (instead of
+        # hanging the suite) if stdin is ever inherited again.
+        cat = self.tmp / "bin" / "claude"
+        cat.write_text('#!/usr/bin/env bash\ncat <&0\necho \'{"type":"result"}\'\n')
+        cat.chmod(0o755)
+        events = asyncio.run(
+            asyncio.wait_for(
+                session.run(self.cfg, self.run_dir, "uuid-1", "do it", resume=False),
+                timeout=5,
+            )
+        )
+        self.assertEqual(events[-1]["type"], "result")
+
+
 class OverlongLineTest(unittest.TestCase):
     """Covers the over-long-line path on both pipes.
 
@@ -122,9 +206,13 @@ class OverlongLineTest(unittest.TestCase):
 
     async def _read_events_case(self, limit: int):
         stream = asyncio.StreamReader(limit=limit)
-        stream.feed_data(b'{"type":"before"}\n')
+        # "before"/"after" would themselves now be filtered out of `events`
+        # (see the RunTest kept-event-types change), so use a type _read_events
+        # actually keeps -- the overrun handling being tested is orthogonal to
+        # that filter.
+        stream.feed_data(b'{"type":"result"}\n')
         stream.feed_data(b"x" * (limit * 2) + b"\n")
-        stream.feed_data(b'{"type":"after"}\n')
+        stream.feed_data(b'{"type":"result"}\n')
         stream.feed_eof()
         events: list[dict] = []
         path = self.tmp / "events.jsonl"
@@ -134,7 +222,7 @@ class OverlongLineTest(unittest.TestCase):
     def test_overlong_stdout_line_is_not_silently_dropped(self):
         events, path = asyncio.run(self._read_events_case(64))
         # Events either side of the overrun still come through...
-        self.assertEqual([e["type"] for e in events], ["before", "after"])
+        self.assertEqual([e["type"] for e in events], ["result", "result"])
         # ...and the overrun itself leaves a durable trace on disk instead of
         # vanishing with nothing written for it.
         text = path.read_text()

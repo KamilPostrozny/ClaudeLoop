@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at  REAL,
     finished_at REAL,
     summary     TEXT,
-    cost_usd    REAL
+    cost_usd    REAL,
+    question    TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +42,10 @@ class State:
         # WAL so S2's web UI can read while the loop writes.
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        # A 'running' row can only mean the previous process died mid-task
+        # (crash, SIGKILL, power loss): nothing else leaves it in that state.
+        # Left alone it would misreport as in-progress forever.
+        self.db.execute("UPDATE tasks SET status='interrupted' WHERE status='running'")
 
     def start_task(self, task_id: str, source: str, source_ref: str, text: str) -> None:
         now = time.time()
@@ -51,10 +56,18 @@ class State:
             (task_id, source, source_ref, text, now, now),
         )
 
-    def finish_task(self, task_id: str, status: str, summary: str, cost_usd: float) -> None:
+    def finish_task(
+        self,
+        task_id: str,
+        status: str,
+        summary: str,
+        cost_usd: float,
+        question: str | None = None,
+    ) -> None:
         self.db.execute(
-            "UPDATE tasks SET status=?, summary=?, cost_usd=?, finished_at=? WHERE id=?",
-            (status, summary, cost_usd, time.time(), task_id),
+            "UPDATE tasks SET status=?, summary=?, cost_usd=?, finished_at=?, question=?"
+            " WHERE id=?",
+            (status, summary, cost_usd, time.time(), question, task_id),
         )
 
     def start_run(self, task_id: str, session_id: str, resume_count: int) -> int:

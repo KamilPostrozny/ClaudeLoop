@@ -26,6 +26,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.tasks_file, self.tmp / "tasks.md")
         self.assertEqual(cfg.model, "opus")
         self.assertEqual(cfg.max_resumes, 20)
+        self.assertEqual(cfg.max_waits, 200)
+        self.assertEqual(cfg.session_timeout_s, 4 * 3600)
         self.assertEqual(cfg.home, self.tmp / "home")
 
     def test_overrides_defaults(self):
@@ -34,10 +36,14 @@ class ConfigTest(unittest.TestCase):
             f'tasks_file = "{self.tmp}/tasks.md"\n'
             'model = "sonnet"\n'
             'max_resumes = 3\n'
+            'max_waits = 50\n'
+            'session_timeout_s = 60\n'
         )
         cfg = load_config(path, home=self.tmp / "home")
         self.assertEqual(cfg.model, "sonnet")
         self.assertEqual(cfg.max_resumes, 3)
+        self.assertEqual(cfg.max_waits, 50)
+        self.assertEqual(cfg.session_timeout_s, 60.0)
 
     def test_rejects_missing_required_key(self):
         path = self.write(f'repo = "{self.repo}"\n')

@@ -29,6 +29,31 @@ class StateTest(unittest.TestCase):
         self.assertAlmostEqual(row["cost_usd"], 1.25)
         self.assertIsNotNone(row["finished_at"])
 
+    def test_finish_task_stores_the_question(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "blocked", "stuck", 0.0, "which currency?")
+        row = self.state.task("abc")
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["question"], "which currency?")
+
+    def test_finish_task_question_defaults_to_none(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "done", "worked fine", 1.25)
+        self.assertIsNone(self.state.task("abc")["question"])
+
+    def test_reopening_marks_orphaned_running_tasks_interrupted(self):
+        # No clean shutdown path ever leaves a row at 'running': it can only
+        # mean the previous process died mid-task.
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        reopened = State(self.tmp / "nested" / "state.db")
+        self.assertEqual(reopened.task("abc")["status"], "interrupted")
+
+    def test_reopening_does_not_touch_finished_tasks(self):
+        self.state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.state.finish_task("abc", "done", "worked fine", 1.25)
+        reopened = State(self.tmp / "nested" / "state.db")
+        self.assertEqual(reopened.task("abc")["status"], "done")
+
     def test_rerunning_a_task_replaces_the_previous_row(self):
         self.state.start_task("abc", "file", "- [ ] do it", "do it")
         self.state.finish_task("abc", "failed", "nope", 0.0)

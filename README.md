@@ -19,10 +19,12 @@ Python 3.11 or newer, and the Claude Code CLI on `PATH`, already authenticated
 `~/.claudeloop/config.toml`:
 
 ```toml
-repo        = "/home/you/Projects/yourrepo"
-tasks_file  = "/home/you/Projects/yourrepo/.claudeloop-tasks.md"
-model       = "opus"        # optional, default "opus"
-max_resumes = 20            # optional, default 20
+repo               = "/home/you/Projects/yourrepo"
+tasks_file         = "/home/you/Projects/yourrepo/.claudeloop-tasks.md"
+model              = "opus"   # optional, default "opus"
+max_resumes        = 20       # optional, default 20 -- bounds plain nudges
+max_waits          = 200      # optional, default 200 -- bounds quota waits, separately
+session_timeout_s  = 14400    # optional, default 14400 (4h) -- kills a wedged session
 ```
 
 One instance serves one repository. For a second repository, run a second
@@ -41,6 +43,9 @@ A markdown checklist. Unchecked items run in file order.
 `- [x]` succeeded. `- [!]` needs a human — it failed, was blocked on a
 question, or exhausted its resume budget. Neither is picked up again. Append
 new tasks at any time; the loop re-reads the file after each one.
+
+A task's id is a hash of its line text, so keep task lines distinct — two
+identical lines collapse to the same database row while still running twice.
 
 ## Run
 

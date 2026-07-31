@@ -155,14 +155,22 @@ Single process. Four units, each independently testable.
 Reads `~/.claudeloop/config.toml` via `tomllib`. Never writes it.
 
 ```toml
-repo        = "/home/kamil/Projects/assimo"
-tasks_file  = "/home/kamil/Projects/assimo/.claudeloop-tasks.md"
-model       = "opus"
-max_resumes = 20
+repo              = "/home/kamil/Projects/assimo"
+tasks_file        = "/home/kamil/Projects/assimo/.claudeloop-tasks.md"
+model             = "opus"
+max_resumes       = 20
+max_waits         = 200
+session_timeout_s = 14400
 ```
 
-`max_resumes` bounds nudges and rate-limit resumes together, so a task that
-cannot terminate fails instead of looping forever.
+`max_resumes` bounds plain nudges — invocations that exit with no result and
+no blocking rate limit, i.e. made no progress on their own. `max_waits` bounds
+quota waits separately, with a much larger default: waiting out a real rate
+limit is progress, not stalling, so a task that is purely waiting on quota
+must not be discarded just because it has been resumed many times.
+`session_timeout_s` bounds a single invocation: a wedged `claude` is killed
+and its exit treated as a plain nudge rather than parking the orchestrator
+forever.
 
 ### `source.py`
 
@@ -229,18 +237,23 @@ The state machine, expressed as a pure function so it can be tested against
 recorded event streams without spawning anything:
 
 ```python
-def decide(events, result_exists, resume_count, max_resumes) -> Action
+def decide(events, result_exists, resume_count, max_resumes, wait_count, max_waits) -> Action
 ```
 
 `events` is the stream from the invocation that just exited, not the task's
 whole history — a rate-limit event from an earlier attempt must not re-trigger
 a wait after a later attempt exits for a different reason.
 
+Nudges and quota waits are bounded by separate counters, since a wait is not a
+failure to make progress — only a nudge is. A task can be resumed by quota
+waits alone far longer than `max_resumes` would otherwise allow.
+
 | Condition | Action |
 |---|---|
 | result file exists | `Finish(status from file)` |
-| last `rate_limit_event` **of the run that just exited** has `status != "allowed"` | `WaitUntil(resetsAt + 30s)` then resume |
-| `resume_count < max_resumes` | `Resume("Continue.")` |
+| last `rate_limit_event` **of the run that just exited** has `status != "allowed"`, and `wait_count < max_waits` | `WaitUntil(resetsAt + 30s)` then resume |
+| blocking rate limit, but `wait_count >= max_waits` | `Finish("failed", reason="no_result")` |
+| no blocking rate limit, and `resume_count < max_resumes` | `Resume("Continue.")` |
 | otherwise | `Finish("failed", reason="no_result")` |
 
 The result file is checked first, so a session that finished its work and then
@@ -252,7 +265,18 @@ the API.
 
 Process-level failures — a non-zero exit with no result file and no blocking
 rate-limit event — fall through to the nudge path and are bounded by
-`max_resumes`.
+`max_resumes`. A blocking rate-limit event instead increments `wait_count` and
+is bounded by the separate, much larger `max_waits`.
+
+The database records which kind of resume happened — `RateLimited` for a wait,
+`Nudge` otherwise — rather than the Python class name, so wall time spent
+waiting on quota is a queryable fact rather than something to reverse out of
+`Resume` rows after the fact.
+
+A still-running invocation is bounded too: `session.run` kills the process
+after `session_timeout_s` (default four hours) and returns whatever partial
+events it collected, which `decide` then treats like any other clean-ish exit
+with no result and no blocking rate limit — a plain nudge.
 
 ### `state.py`
 

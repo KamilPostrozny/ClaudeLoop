@@ -17,6 +17,8 @@ class Config:
     tasks_file: Path
     model: str = "opus"
     max_resumes: int = 20
+    max_waits: int = 200
+    session_timeout_s: float = 4 * 3600
     home: Path = HOME
 
 
@@ -42,5 +44,7 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         tasks_file=Path(data["tasks_file"]).expanduser(),
         model=str(data.get("model", "opus")),
         max_resumes=int(data.get("max_resumes", 20)),
+        max_waits=int(data.get("max_waits", 200)),
+        session_timeout_s=float(data.get("session_timeout_s", 4 * 3600)),
         home=home,
     )
