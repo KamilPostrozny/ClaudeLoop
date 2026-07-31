@@ -109,5 +109,57 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.run_dir / "result.json").exists())
 
 
+class OverlongLineTest(unittest.TestCase):
+    """Covers the over-long-line path on both pipes.
+
+    A real subprocess isn't needed to reproduce this: an asyncio.StreamReader
+    built with a small `limit` and fed a line past that limit raises the same
+    ValueError from readline() that a real 16 MiB overrun would raise.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    async def _read_events_case(self, limit: int):
+        stream = asyncio.StreamReader(limit=limit)
+        stream.feed_data(b'{"type":"before"}\n')
+        stream.feed_data(b"x" * (limit * 2) + b"\n")
+        stream.feed_data(b'{"type":"after"}\n')
+        stream.feed_eof()
+        events: list[dict] = []
+        path = self.tmp / "events.jsonl"
+        await session._read_events(stream, path, events, limit=limit)
+        return events, path
+
+    def test_overlong_stdout_line_is_not_silently_dropped(self):
+        events, path = asyncio.run(self._read_events_case(64))
+        # Events either side of the overrun still come through...
+        self.assertEqual([e["type"] for e in events], ["before", "after"])
+        # ...and the overrun itself leaves a durable trace on disk instead of
+        # vanishing with nothing written for it.
+        text = path.read_text()
+        self.assertIn("exceeded", text)
+
+    async def _drain_case(self, limit: int):
+        stream = asyncio.StreamReader(limit=limit)
+        stream.feed_data(b"short line\n")
+        stream.feed_data(b"x" * (limit * 2) + b"\n")
+        stream.feed_data(b"after the overrun\n")
+        stream.feed_eof()
+        path = self.tmp / "stderr.log"
+        await session._drain(stream, path, limit=limit)
+        return path
+
+    def test_overlong_stderr_line_does_not_crash_the_drain(self):
+        # Before the fix this raised an uncaught ValueError out of _drain,
+        # which -- run under the same asyncio.gather as _read_events -- would
+        # take down the whole run() and lose every event already collected.
+        path = asyncio.run(self._drain_case(64))
+        text = path.read_text()
+        self.assertIn("short line", text)
+        self.assertIn("after the overrun", text)
+        self.assertIn("exceeded", text)
+
+
 if __name__ == "__main__":
     unittest.main()

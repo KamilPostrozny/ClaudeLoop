@@ -41,13 +41,25 @@ def build_command(cfg: Config, session_id: str, prompt: str, resume: bool) -> li
     return command
 
 
-async def _read_events(stream: asyncio.StreamReader, path: Path, out: list[dict]) -> None:
+def _overrun_marker(limit: int) -> bytes:
+    # The reader has already discarded the over-long line from its internal
+    # buffer by the time ValueError reaches us, so the original bytes cannot
+    # be recovered -- record that a line was dropped rather than losing the
+    # fact entirely.
+    return f"<claudeloop: line exceeded {limit} byte limit, discarded>\n".encode()
+
+
+async def _read_events(
+    stream: asyncio.StreamReader, path: Path, out: list[dict], limit: int = MAX_LINE
+) -> None:
     with open(path, "ab") as log:
         while True:
             try:
                 raw = await stream.readline()
             except ValueError:
-                continue  # over-long line, already discarded by the reader
+                log.write(_overrun_marker(limit))  # keep a durable trace of the drop
+                log.flush()
+                continue
             if not raw:
                 return
             log.write(raw)  # verbatim first: a parser bug never loses the record
@@ -58,10 +70,21 @@ async def _read_events(stream: asyncio.StreamReader, path: Path, out: list[dict]
                 pass  # non-JSON noise on stdout, already on disk
 
 
-async def _drain(stream: asyncio.StreamReader, path: Path) -> None:
+async def _drain(stream: asyncio.StreamReader, path: Path, limit: int = MAX_LINE) -> None:
     with open(path, "ab") as log:
-        async for chunk in stream:
-            log.write(chunk)
+        while True:
+            try:
+                raw = await stream.readline()
+            except ValueError:
+                # Same overrun as _read_events: an unbroken --verbose diagnostic
+                # (e.g. a giant traceback) must not crash the gather and take
+                # the whole run() -- and the events already collected -- with it.
+                log.write(_overrun_marker(limit))
+                log.flush()
+                continue
+            if not raw:
+                return
+            log.write(raw)
 
 
 async def run(
