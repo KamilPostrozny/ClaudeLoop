@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +23,52 @@ against a real instance, not the one the documentation happened to show."""
 
 BACKOFF_S = (1.0, 2.0, 4.0)
 """Waits between retries. Only 5xx and network faults get here."""
+
+DONE_LABEL = "claudeloop-done"
+BLOCKED_LABEL = "claudeloop-blocked"
+
+GUARD = (
+    f'(labels IS EMPTY OR labels NOT IN ("{DONE_LABEL}", "{BLOCKED_LABEL}"))'
+)
+"""Why not `labels != "claudeloop-done"`: in JQL that excludes every issue
+with no labels at all, which is most of a fresh backlog. The IS EMPTY
+disjunct is not defensive padding, it is the only correct idiom."""
+
+_ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
+
+
+def compose_jql(operator_jql: str) -> str:
+    """Splice the guard into the operator's query, keeping their ordering.
+
+    Composed rather than documented: an operator who forgets the exclusion
+    gets an infinite loop over one finished ticket, so this must not be
+    something they can leave out.
+    """
+    # ponytail: a literal "ORDER BY" inside a quoted JQL string value would
+    # split wrongly. Full tokenisation if that ever shows up in practice.
+    parts = _ORDER_BY.split(operator_jql, maxsplit=1)
+    where = parts[0].strip()
+    order = parts[1].strip() if len(parts) > 1 else ""
+    composed = f"({where}) AND {GUARD}" if where else GUARD
+    return f"{composed} ORDER BY {order}" if order else composed
+
+
+def task_text(key: str, summary: str | None, description: str | None) -> str:
+    """The task the session is handed. The key leads so the prompt layer can
+    tell the session to read the first token and find it."""
+    head = f"{key}: {(summary or '').strip()}".strip()
+    body = (description or "").strip()
+    return f"{head}\n\n{body}" if body else head
+
+
+def closing_comment(status: str, summary: str, cost: float) -> str:
+    """Posted by the orchestrator, not the session -- so it exists even when
+    the session died mid-run and never said anything, which is exactly when a
+    record on the ticket matters most."""
+    return (
+        f"ClaudeLoop finished this task with status *{status}* "
+        f"(cost ${cost:.4f}).\n\n{summary}"
+    )
 
 
 class JiraError(Exception):

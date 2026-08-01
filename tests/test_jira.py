@@ -1,6 +1,9 @@
 import unittest
 
-from claudeloop.jira import SEARCH_PATH, JiraClient, JiraError
+from claudeloop.jira import (
+    BLOCKED_LABEL, DONE_LABEL, SEARCH_PATH, JiraClient, JiraError,
+    closing_comment, compose_jql, task_text,
+)
 
 from .jira_fake import FakeJira, fixture
 
@@ -76,3 +79,63 @@ class JiraClientTest(unittest.TestCase):
                             timeout=1.0)
         with self.assertRaises(JiraError):
             client.search("project = OPS")
+
+
+class ComposeJqlTest(unittest.TestCase):
+    def test_appends_the_guard_to_a_plain_query(self):
+        self.assertEqual(
+            compose_jql("project = OPS AND status = 'To Do'"),
+            '(project = OPS AND status = \'To Do\') AND (labels IS EMPTY OR '
+            'labels NOT IN ("claudeloop-done", "claudeloop-blocked"))',
+        )
+
+    def test_the_guard_keeps_issues_that_have_no_labels(self):
+        # labels != "x" silently excludes every unlabelled issue -- which is
+        # most of a fresh backlog. This is the whole reason for IS EMPTY.
+        self.assertIn("labels IS EMPTY OR", compose_jql("project = OPS"))
+        self.assertNotIn("labels !=", compose_jql("project = OPS"))
+
+    def test_preserves_the_operators_ordering(self):
+        composed = compose_jql("project = OPS ORDER BY priority DESC")
+        self.assertTrue(composed.endswith(" ORDER BY priority DESC"), composed)
+        self.assertIn("(project = OPS) AND (labels IS EMPTY", composed)
+
+    def test_order_by_is_matched_case_insensitively(self):
+        composed = compose_jql("project = OPS order by created ASC")
+        self.assertTrue(composed.endswith(" ORDER BY created ASC"), composed)
+
+    def test_a_query_that_is_only_an_ordering_still_gets_the_guard(self):
+        composed = compose_jql("ORDER BY created")
+        self.assertTrue(composed.startswith("(labels IS EMPTY"), composed)
+        self.assertTrue(composed.endswith(" ORDER BY created"), composed)
+
+
+class TaskTextTest(unittest.TestCase):
+    def test_key_leads_so_the_session_can_find_it(self):
+        text = task_text("OPS-1", "Fix the widget", "It is broken.")
+        self.assertTrue(text.startswith("OPS-1: Fix the widget"), text)
+        self.assertIn("It is broken.", text)
+
+    def test_a_null_description_leaves_key_and_summary_alone(self):
+        self.assertEqual(task_text("OPS-2", "Fix the widget", None),
+                         "OPS-2: Fix the widget")
+
+    def test_a_whitespace_only_description_counts_as_absent(self):
+        self.assertEqual(task_text("OPS-2", "Fix it", "   \n  "), "OPS-2: Fix it")
+
+
+class ClosingCommentTest(unittest.TestCase):
+    def test_carries_status_cost_and_summary(self):
+        body = closing_comment("done", "Opened PR #4.", 0.1234)
+        self.assertIn("done", body)
+        self.assertIn("$0.1234", body)
+        self.assertIn("Opened PR #4.", body)
+        self.assertIn("ClaudeLoop", body)
+
+
+class LabelsTest(unittest.TestCase):
+    def test_are_the_exact_strings_the_guard_excludes(self):
+        self.assertEqual(DONE_LABEL, "claudeloop-done")
+        self.assertEqual(BLOCKED_LABEL, "claudeloop-blocked")
+        self.assertIn(DONE_LABEL, compose_jql("project = OPS"))
+        self.assertIn(BLOCKED_LABEL, compose_jql("project = OPS"))
