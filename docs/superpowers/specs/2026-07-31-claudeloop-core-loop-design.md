@@ -16,47 +16,29 @@ reads the state it writes.
 
 ## Project decomposition
 
-ClaudeLoop as described spans five independent subsystems. Each gets its own
+ClaudeLoop as described spans several independent subsystems. Each gets its own
 spec, plan, and implementation cycle. This document covers S1 only.
 
-| Slice | Scope | Depends on | Status |
-|---|---|---|---|
-| **S1** | Core loop: task source interface, file source, headless sessions, rate-limit recovery, state | — | merged |
-| **S1.1** | Session environment: instruction layering, definition of done, plugin/MCP passthrough, `[session_env]` | S1 | spec'd |
-| **S2a** | Read-only dashboard: live status, streaming output, pending/completed lists, quota gauge | S1 | merged |
-| **S3** | Jira source: JQL-driven task pull, transitions, a `claudeloop.jira` CLI the session uses for comments | S1.1 | designed |
-| **S2b** | Question and answer channel, across both the dashboard and Jira comments | S2a, S3 | — |
-| **S4** | Home Assistant OS addon: Dockerfile, `config.yaml`, ingress sidebar, persistent `/data` | S1, S2a | — |
-| **S5** | Setup wizard: a config schema that both validates and renders an in-browser first-run wizard | S2a, S3 | — |
+As first decomposed, on 2026-07-31:
 
-Two orderings are deliberate. **S3 precedes S2b** so the answer channel is
-designed against two task sources at once rather than built for the web and
-retrofitted to Jira. **S5 follows S3** so its config schema is written once
-against the complete key set; S5 absorbs the cost of folding S1.1's and S3's
-hand-written validation into that schema.
+| Slice | Scope | Depends on |
+|---|---|---|
+| **S1** | Core loop: task source interface, file source, headless sessions, rate-limit recovery, state | — |
+| **S2** | Web UI: live status, streaming output, pending/completed lists, question display | S1 |
+| **S3** | Jira source: JQL-driven task pull, comment Q&A, status transitions | S1 |
+| **S4** | Home Assistant OS addon: Dockerfile, `config.yaml`, ingress sidebar, persistent `/data` | S1 + S2 |
+| **S5** | Config web UI: model, plugins, credentials via browser | S4 |
 
-S5 should also offer a curated **proposed plugin set**: the wizard presents
-plugins ClaudeLoop suggests rather than leaving the operator to discover them,
-and each carries optional default instructions on how to use it. Those
-instructions live in their **own file, separate from `instructions.md`**, so
-ClaudeLoop's suggested plugin guidance never gets tangled with the operator's
-own policy — the two have different authors and different lifetimes, and an
-operator editing their instructions should not be editing ours.
+**This table is the decomposition as it stood when S1 was designed, and is left
+here as the record of that decision rather than maintained.** It has since been
+superseded in three ways: S2 split into S2a and S2b along the read/write seam;
+S1.1 was inserted for session environment; and S5 turned out to depend on S2a
+rather than S4, and to be wanted rather than speculative.
 
-That adds a fourth prompt layer to the three S1.1 established (protocol,
-operator, definition of done). It slots below the operator layer and above the
-definition of done: it is ClaudeLoop's advice about its own tooling, so the
-operator must be able to override it.
-
-S5 also carries two constraints settled in advance. It is the first slice to
-**write** anything from the browser, deliberately breaking S2a's global
-read-only rule, and it writes a file containing tokens. And it has a bootstrap
-problem: with no configuration there is no `web_host`, `web_port` or
-`web_token`, so setup mode binds loopback unconditionally and additionally
-requires a one-time token printed to the console — two independent barriers,
-because an unauthenticated setup endpoint would let anyone reaching it
-configure an agent that runs with bypassed permissions against real
-credentials.
+**[`ROADMAP.md`](../../../ROADMAP.md) at the repository root is the living
+version** — current slice states, ordering decisions and their reasons, and
+what has already been settled about the slices not yet built. Read that, not
+this table.
 
 ## Key insight
 
