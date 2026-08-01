@@ -178,6 +178,28 @@ class ReopenTest(unittest.TestCase):
         source.mark(task, "done", "finished")  # must not raise
         source.reopen(task)
 
+    def test_a_crlf_checklist_keeps_its_line_endings(self):
+        # Marking one task must not silently rewrite every line ending in
+        # the file. read_text()/write_text() would: they translate CRLF to
+        # "\n" on the way in and never put it back.
+        self.path.write_bytes(b"- [ ] alpha\r\n- [ ] beta\r\n")
+        source = FileSource(self.path)
+        task = source.pending()[0]
+
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(self.path.read_bytes(), b"- [!] alpha\r\n- [ ] beta\r\n")
+
+        source.reopen(task)
+        self.assertEqual(self.path.read_bytes(), b"- [ ] alpha\r\n- [ ] beta\r\n")
+
+    def test_mixed_line_endings_are_each_left_as_they_were(self):
+        self.path.write_bytes(b"- [ ] alpha\r\n- [ ] beta\n")
+        source = FileSource(self.path)
+
+        source.mark(source.pending()[1], "done", "did it")
+
+        self.assertEqual(self.path.read_bytes(), b"- [ ] alpha\r\n- [x] beta\n")
+
 
 if __name__ == "__main__":
     unittest.main()

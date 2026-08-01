@@ -3,6 +3,7 @@ checklist; S3 adds a Jira one behind the same protocol."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,9 +68,15 @@ class FileSource:
         file while the task ran cannot cause the wrong line to be rewritten.
         A line that has since vanished -- or a whole file that has -- is left
         alone; the database still holds the record.
+
+        Read and written with newline="" so a checklist authored on Windows
+        keeps its line endings. The default translates CRLF to "\\n" on the
+        way in and never puts it back, which would rewrite every line ending
+        in the file as a side effect of marking one task.
         """
         try:
-            lines = self.path.read_text().splitlines(keepends=True)
+            with self.path.open(newline="") as handle:
+                lines = handle.read().splitlines(keepends=True)
         except OSError:
             return
         for index, line in enumerate(lines):
@@ -79,7 +86,12 @@ class FileSource:
             indent = line[: len(line) - len(line.lstrip())]
             eol = line[len(body):]
             lines[index] = f"{indent}{marker} {text}{eol}"
-            self.path.write_text("".join(lines))
+            # Suppressed for the same reason as the read above: the task
+            # file is the user's, and it can vanish or turn unwritable
+            # between the two. The database still holds the record.
+            with contextlib.suppress(OSError):
+                with self.path.open("w", newline="") as handle:
+                    handle.write("".join(lines))
             return
 
     def mark(self, task: Task, status: str, summary: str, cost: float = 0.0) -> None:
