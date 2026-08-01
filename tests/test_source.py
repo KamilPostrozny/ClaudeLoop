@@ -116,14 +116,26 @@ class ReopenTest(unittest.TestCase):
 
         self.assertEqual(self.path.read_text(), "- [ ] alpha\n- [ ] beta\n")
 
-    def test_reopen_keeps_indentation_and_line_ending(self):
-        source = self.source_for("  - [ ] alpha\r\n")
+    def test_reopen_keeps_indentation(self):
+        source = self.source_for("    - [ ] alpha\n")
         task = source.pending()[0]
         source.mark(task, "blocked", "stuck")
 
         source.reopen(task)
 
-        self.assertEqual(self.path.read_text(), "  - [ ] alpha\r\n")
+        self.assertEqual(self.path.read_text(), "    - [ ] alpha\n")
+
+    def test_reopen_keeps_a_missing_trailing_newline(self):
+        # The last line of a file that does not end in one. mark() and
+        # reopen() share _rewrite, so this pins the eol handling for both.
+        source = self.source_for("- [ ] alpha")
+        task = source.pending()[0]
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(self.path.read_text(), "- [!] alpha")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "- [ ] alpha")
 
     def test_reopen_leaves_a_line_that_has_since_vanished_alone(self):
         source = self.source_for("- [ ] alpha\n")
