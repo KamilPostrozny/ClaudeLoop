@@ -61,7 +61,9 @@ CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 
 JIRA_TASK_SOURCE = """## Task source
 
-This task is a Jira issue. Its key is the first token of the task text.
+This task is a Jira issue. The task text begins with the issue key,
+followed by a colon and the issue's summary -- in "OPS-42: Fix the widget",
+the key is OPS-42.
 
 Read the full ticket, including its comments:
     {python} -m claudeloop.jira show <KEY>

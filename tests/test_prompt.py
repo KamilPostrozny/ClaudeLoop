@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from claudeloop.config import Config, JiraConfig
+from claudeloop.jira import task_text
 from claudeloop.prompt import (
     BUILTIN_DEFINITION_OF_DONE,
     PROTOCOL,
@@ -245,8 +246,13 @@ class TaskSourceSectionTest(unittest.TestCase):
     def test_names_this_interpreter_not_bare_python(self):
         self.assertIn(sys.executable, compose(self.jira_cfg()))
 
-    def test_says_the_key_is_the_first_token_of_the_task_text(self):
-        self.assertIn("first token", compose(self.jira_cfg()))
+    def test_the_key_instruction_matches_how_task_text_is_built(self):
+        text = compose(self.jira_cfg())
+        # The prompt's worked example must be true of the real builder.
+        self.assertIn("OPS-42: Fix the widget", text)
+        self.assertEqual(task_text("OPS-42", "Fix the widget", None),
+                         "OPS-42: Fix the widget")
+        self.assertIn("the key is OPS-42", text)
 
     def test_forbids_the_session_transitioning_or_relabelling(self):
         text = compose(self.jira_cfg())

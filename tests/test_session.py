@@ -8,6 +8,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from claudeloop import session
 from claudeloop.config import Config
@@ -357,6 +358,23 @@ class PythonPathTest(unittest.TestCase):
             self.tmp / "run",
         )
         self.assertEqual(env["CLAUDELOOP_RESULT"], str(self.tmp / "run" / "result.json"))
+
+    def test_an_ambient_pythonpath_survives_in_front_of_nothing(self):
+        with patch.dict(os.environ, {"PYTHONPATH": "/opt/ambient"}):
+            env = session.child_env(self.cfg(), self.tmp / "run")
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(Path(parts[0]), Path(session.PACKAGE_PARENT))
+        self.assertIn("/opt/ambient", parts)
+
+    def test_session_env_pythonpath_wins_over_the_ambient_one(self):
+        with patch.dict(os.environ, {"PYTHONPATH": "/opt/ambient"}):
+            env = session.child_env(
+                self.cfg(session_env={"PYTHONPATH": "/opt/theirs"}), self.tmp / "run"
+            )
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(Path(parts[0]), Path(session.PACKAGE_PARENT))
+        self.assertIn("/opt/theirs", parts)
+        self.assertNotIn("/opt/ambient", parts)
 
 
 if __name__ == "__main__":
