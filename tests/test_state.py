@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -114,6 +115,43 @@ class StateTest(unittest.TestCase):
         self.state.start_task("abc", "file", "- [ ] do it", "do it")
         reopened = State(self.tmp / "nested" / "state.db")
         self.assertEqual(reopened.task("abc")["text"], "do it")
+
+
+class TerminalIdsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "state.db")
+
+    def finished(self, task_id: str, status: str) -> None:
+        self.state.start_task(task_id, "jira", "OPS-1", "text")
+        self.state.finish_task(task_id, status, "summary", 0.0)
+
+    def test_collects_every_terminal_status(self):
+        self.finished("aaaa", "done")
+        self.finished("bbbb", "failed")
+        self.finished("cccc", "blocked")
+        self.assertEqual(self.state.terminal_ids(), {"aaaa", "bbbb", "cccc"})
+
+    def test_running_and_interrupted_are_not_terminal(self):
+        self.state.start_task("dddd", "jira", "OPS-2", "text")
+        self.state.db.execute("UPDATE tasks SET status='interrupted' WHERE id='dddd'")
+        self.state.start_task("eeee", "jira", "OPS-3", "text")
+        self.assertEqual(self.state.terminal_ids(), set())
+
+    def test_is_empty_on_a_fresh_database(self):
+        self.assertEqual(self.state.terminal_ids(), set())
+
+    def test_terminal_ids_works_from_a_different_thread(self):
+        # The loop calls terminal_ids() through asyncio.to_thread, i.e. from
+        # a worker thread other than the one that created this State.
+        # sqlite3 connections opened without check_same_thread=False raise
+        # sqlite3.ProgrammingError when used off their creating thread -- the
+        # live smoke test found this made the re-run backstop silently
+        # inert, because JiraSource.pending() caught the error and carried
+        # on as if state.db were unreadable.
+        self.finished("aaaa", "done")
+        result = asyncio.run(asyncio.to_thread(self.state.terminal_ids))
+        self.assertEqual(result, {"aaaa"})
 
 
 if __name__ == "__main__":

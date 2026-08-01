@@ -14,7 +14,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S1** | Core loop | merged |
 | **S1.1** | Session environment | merged |
 | **S2a** | Read-only web dashboard | merged |
-| **S3** | Jira task source | designed, no spec written |
+| **S3** | Jira task source | merged |
 | **S2b** | Question and answer channel | not started |
 | **S5** | Setup wizard and config schema | not started |
 | **S4** | Home Assistant OS addon | not started |
@@ -64,63 +64,37 @@ Localhost by default; a token is required to bind wider.
 
 Spec: `docs/superpowers/specs/2026-07-31-claudeloop-web-dashboard-design.md`
 
+### S3 — Jira task source
+
+A second `TaskSource` implementation. The protocol carried most of it — the
+loop still talks only to `pending()`, `start()` and `mark()` — but the design's
+claim that nothing else would change did not survive contact: `loop.py` now
+runs every source call through `asyncio.to_thread` (they are blocking HTTP
+under Jira), the dashboard's pending list moved onto the status snapshot
+because `cfg.tasks_file` is `None` here, and `state.db` gained
+`terminal_ids()`. Jira Cloud, REST v2, API-token Basic auth over `urllib`. `config.py`
+composes the operator's `jql` from a `project`/`status` shorthand when they
+don't give one outright, and `pending()` splices a label-exclusion guard onto
+that query so a finished ticket cannot be picked up again, then turns each
+matching issue into one task carrying its key, summary and description. `mark()` labels the issue `claudeloop-done` or
+`claudeloop-blocked`, posts a closing comment with status, summary and cost,
+then fires `transition_done` if the workflow offers it from the issue's
+current status; `start()` fires `transition_start` the same way. A terminal row
+in `state.db` is what actually stops a second run, and the live smoke test is
+what proved it load-bearing: Jira's search index is eventually consistent, so a
+ticket labelled `claudeloop-done` still matched the query 0.8 seconds later.
+The label closes the window; the database covers it. The session reaches Jira
+through `python -m claudeloop.jira show`/`comment`; it cannot transition
+issues or touch labels, so a confused session can't park a ticket somewhere
+the operator didn't expect. An unreachable Jira, a 401, or a JQL Jira rejects
+all read as an empty backlog, so the loop idles and retries instead of
+failing tasks.
+
+Spec: `docs/superpowers/specs/2026-08-01-claudeloop-jira-task-source-design.md`
+
 ---
 
 ## Next
-
-### S3 — Jira task source
-
-A second `TaskSource` implementation. The loop, session, database and dashboard
-need no changes — they already talk to `pending()` and `mark()`.
-
-**Decided:**
-
-- **Jira Cloud, API token, Basic auth, `urllib`.** API tokens are free on any
-  tier. OAuth 3LO would need a registered app and a browser consent flow, which
-  a headless box cannot complete.
-- **REST v2, not v3.** v2 returns `description` as a plain string and accepts a
-  plain-string comment body; v3 returns and demands ADF JSON. If v2 is ever
-  retired the fallback is a small ADF flattener.
-- **Task identity hashes the issue key, not the text.** `task_id(issue_key)`
-  keeps the id 16 hex characters, which `web.py`'s `TASK_ID_RE` requires as a
-  path-traversal guard, and means editing a ticket does not mint a new task.
-  The issue key is the `source_ref`.
-- **The orchestrator embeds the ticket, and the session talks to Jira live.**
-  `pending()` fetches summary and description and composes them into the task
-  text, so the task is self-describing and testable against recorded fixtures.
-  The session additionally reads and posts comments as it works — it needs to
-  communicate on the ticket anyway, which is what S2b will build on.
-- **Still one repository per configuration.** A JQL query maps to one target
-  repository; a second repository means a second instance with its own config.
-  Unchanged from S1.
-- **ClaudeLoop composes the blocked-label exclusion into the operator's JQL**
-  rather than trusting them to remember it, splitting on `ORDER BY` so their
-  ordering survives. The guard cannot be accidentally disabled.
-- **Failure adds a label ClaudeLoop owns** (`claudeloop-blocked`) rather than
-  transitioning to a status the workflow may not permit from where the issue
-  sits. The direct analogue of `- [!]` in the file source.
-- **Transitions on start and on done**, target names in config, matched per
-  issue against the transitions Jira actually offers. A missing name logs and
-  continues rather than failing the task.
-- **The orchestrator posts the closing comment** with status, summary and cost.
-  It exists even when the session died mid-run and never got to say anything —
-  which is exactly when a record on the ticket matters most.
-- **The session talks to Jira through `python -m claudeloop.jira`**, a small
-  CLI over the same HTTP code, not through the Atlassian MCP plugin. One
-  credential instead of two, no OAuth browser flow on the S4 box, and the
-  session's Jira access is code that can be tested. The plugin stays available
-  for interactive use; nothing depends on it.
-- **Network failures never look like an empty backlog.** `pending()` swallows
-  HTTP errors, logs, and returns `[]` so the loop idles and retries. `mark()`
-  retries a few times then logs loudly — the task really is finished and
-  `state.db` records it.
-
-**Open — one non-obvious JQL trap.** `labels != "x"` **excludes issues that
-have no labels at all.** The correct idiom is
-`(labels IS EMPTY OR labels NOT IN ("x"))`.
-
-**Unverified.** The current search endpoint path — Atlassian moved it recently.
-Confirm against the live instance before writing the code, read-only first.
 
 ### S2b — Question and answer channel
 
@@ -136,6 +110,21 @@ specifically so S2b needs no schema change.
 thread — the loop — calls `set_status`. A human answering from the web thread
 is a second writer, and `set_status` is a read-modify-write. Its docstring says
 so; S2b has to solve it rather than rediscover it.
+
+**What S3 leaves it, and the trap in it.** The session can already talk on a
+ticket — `python -m claudeloop.jira comment KEY -` — so a Jira question has an
+obvious home, and a human's reply has an obvious place to live. But a `blocked`
+task today gets the `claudeloop-blocked` label, and `pending()` excludes that
+label permanently. Answering a blocked question therefore has to *remove* the
+label, or the answered task can never be picked up again — and under the file
+source the equivalent is rewriting `- [!]` back to `- [ ]`. Neither source
+does that today. Whatever S2b builds, resuming an answered task is a
+task-source operation, not just a loop one, so the `TaskSource` protocol
+probably grows a third verb.
+
+**Also worth knowing:** the protocol gained `start(task)` and `mark(..., cost)`
+in S3, and `JiraSource` shows the shape a non-file source takes — including
+that everything it does must be safe to call from `asyncio.to_thread`.
 
 ### S5 — Setup wizard and config schema
 
@@ -204,6 +193,21 @@ Real, deliberately deferred, tracked here so they are not lost.
   `Set-Cookie` plus `history.replaceState` pair, worth doing when the token path
   is actually used.
 - `Config` has a `dict` field, so it is unhashable. Nothing hashes it.
+- `JiraSource.pending` fetches one page of 50 issues and never paginates, so an
+  ordering that puts wanted work past the 50th row never reaches it.
+- The dashboard's pending list is now published on the loop's status snapshot
+  rather than re-read on the web thread, so it reflects the backlog as of the
+  current task's start rather than live — under the file source, that's a
+  step back from re-reading the tasks file on every request.
+- `JiraClient.add_label`, `transitions` and `transition` still interpolate the
+  issue key into the URL unescaped — safe today only because `JiraSource` is
+  their only caller and always passes keys straight from Jira's own search
+  results.
+- A `claude -p` session survives its parent being killed abruptly: it runs
+  with `start_new_session=True`, and the loop's kill path only runs on its
+  own orderly exit. An operator who kills the orchestrator with SIGKILL must
+  also kill the session themselves. Observed during the Jira source's live
+  smoke test.
 
 ## Working notes
 

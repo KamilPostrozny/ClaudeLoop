@@ -51,6 +51,13 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(status.current.state, "idle")
         self.assertIsNone(status.current.task_id)
 
+    def test_pending_starts_empty(self):
+        self.assertEqual(status.current.pending, ())
+
+    def test_pending_round_trips(self):
+        status.set_status(pending=(("a", "b"),))
+        self.assertEqual(status.current.pending, (("a", "b"),))
+
 
 if __name__ == "__main__":
     unittest.main()

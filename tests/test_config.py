@@ -272,5 +272,146 @@ class SessionEnvironmentConfigTest(unittest.TestCase):
         self.assertEqual(cfg.repo, self.repo)
 
 
+class JiraConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        self.home = self.tmp / "home"
+
+    def write(self, body: str) -> Path:
+        path = self.tmp / "config.toml"
+        path.write_text(f'repo = "{self.repo}"\n{body}')
+        path.chmod(0o600)
+        return path
+
+    JIRA = (
+        'source = "jira"\n'
+        "[jira]\n"
+        'site = "https://example.atlassian.net"\n'
+        'email = "me@example.com"\n'
+        'token = "secret"\n'
+        'jql = "project = OPS ORDER BY created"\n'
+    )
+
+    def test_loads_a_jira_source(self):
+        cfg = load_config(self.write(self.JIRA), home=self.home)
+        self.assertEqual(cfg.source, "jira")
+        self.assertEqual(cfg.jira.site, "https://example.atlassian.net")
+        self.assertEqual(cfg.jira.email, "me@example.com")
+        self.assertEqual(cfg.jira.token, "secret")
+        self.assertEqual(cfg.jira.jql, "project = OPS ORDER BY created")
+        self.assertEqual(cfg.jira.transition_start, "")
+        self.assertEqual(cfg.jira.transition_done, "")
+
+    def test_jira_needs_no_tasks_file(self):
+        cfg = load_config(self.write(self.JIRA), home=self.home)
+        self.assertIsNone(cfg.tasks_file)
+
+    def test_transitions_are_optional_and_carried_when_present(self):
+        cfg = load_config(
+            self.write(self.JIRA + 'transition_start = "In Progress"\n'
+                                   'transition_done = "Done"\n'),
+            home=self.home,
+        )
+        self.assertEqual(cfg.jira.transition_start, "In Progress")
+        self.assertEqual(cfg.jira.transition_done, "Done")
+
+    def test_defaults_to_the_file_source(self):
+        tasks = self.tmp / "tasks.md"
+        tasks.write_text("")
+        cfg = load_config(self.write(f'tasks_file = "{tasks}"\n'), home=self.home)
+        self.assertEqual(cfg.source, "file")
+        self.assertEqual(cfg.tasks_file, tasks)
+        self.assertIsNone(cfg.jira)
+
+    def test_an_unknown_source_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('source = "github"\n'), home=self.home)
+        self.assertIn("source", str(caught.exception))
+
+    def test_the_file_source_still_requires_tasks_file(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('source = "file"\n'), home=self.home)
+        self.assertIn("tasks_file", str(caught.exception))
+
+    def test_the_jira_source_requires_the_jira_table(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('source = "jira"\n'), home=self.home)
+        self.assertIn("[jira]", str(caught.exception))
+
+    def test_project_composes_a_query_so_nobody_has_to_write_jql(self):
+        cfg = load_config(self.write(
+            'source = "jira"\n[jira]\n'
+            'site = "https://example.atlassian.net"\n'
+            'email = "me@example.com"\n'
+            'token = "secret"\n'
+            'project = "OPS"\n'
+        ), home=self.home)
+        self.assertEqual(cfg.jira.jql, 'project = "OPS" ORDER BY created ASC')
+
+    def test_status_narrows_the_composed_query(self):
+        cfg = load_config(self.write(
+            'source = "jira"\n[jira]\n'
+            'site = "https://example.atlassian.net"\n'
+            'email = "me@example.com"\n'
+            'token = "secret"\n'
+            'project = "OPS"\nstatus = "To Do"\n'
+        ), home=self.home)
+        self.assertEqual(
+            cfg.jira.jql,
+            'project = "OPS" AND status = "To Do" ORDER BY created ASC',
+        )
+
+    def test_an_explicit_jql_wins_over_the_shorthand(self):
+        cfg = load_config(self.write(self.JIRA + 'project = "OTHER"\n'), home=self.home)
+        self.assertEqual(cfg.jira.jql, "project = OPS ORDER BY created")
+
+    def test_neither_jql_nor_project_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(
+                'source = "jira"\n[jira]\n'
+                'site = "https://example.atlassian.net"\n'
+                'email = "me@example.com"\n'
+                'token = "secret"\n'
+            ), home=self.home)
+        self.assertIn("jql", str(caught.exception))
+        self.assertIn("project", str(caught.exception))
+
+    def test_a_non_https_site_is_refused(self):
+        # urllib's redirect handler forwards the Authorization header across
+        # hosts, so an http:// typo puts the Basic-auth API token on the
+        # wire in cleartext the first time Jira redirects it.
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(
+                'source = "jira"\n[jira]\n'
+                'site = "http://example.atlassian.net"\n'
+                'email = "me@example.com"\n'
+                'token = "secret"\n'
+                'project = "OPS"\n'
+            ), home=self.home)
+        self.assertIn("https://", str(caught.exception))
+
+    def test_each_missing_jira_key_is_named(self):
+        for key in ("site", "email", "token", "jql"):
+            with self.subTest(key=key):
+                body = "".join(line + "\n" for line in self.JIRA.splitlines()
+                               if not line.startswith(f"{key} ="))
+                with self.assertRaises(ValueError) as caught:
+                    load_config(self.write(body), home=self.home)
+                self.assertIn(key, str(caught.exception))
+
+    def test_a_tasks_file_inside_the_repo_is_still_refused_under_jira(self):
+        # tasks_file must come before [jira] opens -- TOML assigns any key
+        # after a table header to that table, not the root, so appending it
+        # after self.JIRA would silently make it jira.tasks_file instead of
+        # the top-level key this guard checks.
+        inside = self.repo / "tasks.md"
+        inside.write_text("")
+        with self.assertRaises(ValueError):
+            load_config(self.write(f'tasks_file = "{inside}"\n' + self.JIRA),
+                        home=self.home)
+
+
 if __name__ == "__main__":
     unittest.main()

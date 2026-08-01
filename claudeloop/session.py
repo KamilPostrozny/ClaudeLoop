@@ -11,6 +11,14 @@ from pathlib import Path
 from .config import Config
 from .prompt import compose
 
+PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
+"""The directory holding the claudeloop package.
+
+The session runs with cwd=repo, where `python -m claudeloop.jira` is an
+ImportError -- and running jira.py by absolute path breaks its relative
+imports. This is what makes the session's Jira CLI reachable.
+"""
+
 MAX_LINE = 16 * 1024 * 1024
 """asyncio's default 64 KiB line buffer is too small: a single stream-json line
 carrying a large tool result overruns it and raises ValueError."""
@@ -53,12 +61,22 @@ def child_env(cfg: Config, run_dir: Path) -> dict[str, str]:
     CLAUDELOOP_RESULT is merged last on purpose: a misconfigured session_env
     must not be able to redirect the result file, which is the only thing the
     loop uses to decide a task is finished.
+
+    PYTHONPATH only gets ClaudeLoop's own package parent prepended under the
+    Jira source, which is the only one whose sessions call `python -m
+    claudeloop.jira`. Under source = "file" this would otherwise put
+    ClaudeLoop's repo root -- which contains an importable tests/ package --
+    on the import path of a session working in an unrelated repository.
+    Prepended rather than replaced, so an operator who set one in
+    [session_env] for the repository's own needs keeps it.
     """
-    return (
-        os.environ
-        | dict(cfg.session_env)
-        | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
-    )
+    env = os.environ | dict(cfg.session_env)
+    if cfg.source == "jira":
+        inherited = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            os.pathsep.join([PACKAGE_PARENT, inherited]) if inherited else PACKAGE_PARENT
+        )
+    return env | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
 
 
 def _overrun_marker(limit: int) -> bytes:

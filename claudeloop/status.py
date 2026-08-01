@@ -18,10 +18,10 @@ provides one.
 One more thing this buys readers, and doesn't: `api_state()` binds one
 reference to `current` and reads every field off that single snapshot, so
 `status` in the `/api/state` payload is internally consistent -- it never
-mixes fields from two different Status instances. But the payload as a
-whole is not a consistent snapshot: `pending` and `completed` are read from
-the task file and the database *after* `status` is captured, so they can
-describe a slightly earlier or later moment than `status` does.
+mixes fields from two different Status instances. `pending` now rides on
+that same snapshot. But the payload as a whole is not a consistent snapshot:
+`completed` is read from the database *after* `status` is captured, so it
+can describe a slightly earlier or later moment than `status` does.
 """
 
 from __future__ import annotations
@@ -44,6 +44,12 @@ class Status:
     wait_until: float | None = None  # set while sleeping off a quota block
     rate_limit: dict | None = None  # last rate_limit_info seen, for the gauge
     last_error: str | None = None
+    # (task_id, task_text) pairs, source order: the backlog as of the start
+    # of the current task, not live -- published once when that task starts,
+    # not re-read while it runs. A tuple, not a list: web reads this snapshot
+    # from another thread, and a list would be a mutable object the loop
+    # still holds open.
+    pending: tuple[tuple[str, str], ...] = ()
     heartbeat: float = 0.0
 
 

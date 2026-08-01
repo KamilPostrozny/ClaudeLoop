@@ -37,7 +37,15 @@ class State:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None is autocommit: a crash never loses the last write.
-        self.db = sqlite3.connect(db_path, isolation_level=None)
+        # check_same_thread=False: the loop is strictly serial and awaits every
+        # asyncio.to_thread call before starting the next, so although this
+        # connection gets used from a different worker thread each time, it is
+        # never touched by two threads at once. That is single-writer access
+        # from a varying thread, not concurrent access, so sqlite3's default
+        # same-thread guard is a false positive here -- without this, a call
+        # like JiraSource.pending() reaching State.terminal_ids() through
+        # to_thread raises sqlite3.ProgrammingError on every call.
+        self.db = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         # WAL so S2's web UI can read while the loop writes.
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -94,3 +102,15 @@ class State:
 
     def task(self, task_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+    def terminal_ids(self) -> set[str]:
+        """Task ids that reached a verdict, for a source that needs a backstop
+        against re-running finished work.
+
+        'interrupted' is excluded on purpose: State.__init__ writes it when a
+        previous process died mid-task, and that task never finished.
+        """
+        rows = self.db.execute(
+            "SELECT id FROM tasks WHERE status IN ('done', 'failed', 'blocked')"
+        )
+        return {row["id"] for row in rows}

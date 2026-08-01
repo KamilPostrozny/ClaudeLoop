@@ -1,8 +1,10 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from claudeloop.config import Config
+from claudeloop.config import Config, JiraConfig
+from claudeloop.jira import task_text
 from claudeloop.prompt import (
     BUILTIN_DEFINITION_OF_DONE,
     PROTOCOL,
@@ -215,6 +217,65 @@ class PromptTest(unittest.TestCase):
         # documentation" was wrong whenever it wasn't a repo CLAUDE.md.
         self.assertNotIn("repository's own documentation", precedence(has_operator=True))
         self.assertNotIn("repository's own documentation", precedence(has_operator=False))
+
+
+class TaskSourceSectionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg(self, **kwargs):
+        return Config(repo=self.repo, tasks_file=self.tmp / "t.md",
+                      home=self.tmp, **kwargs)
+
+    def jira_cfg(self):
+        return self.cfg(source="jira", jira=JiraConfig(
+            "https://example.atlassian.net", "me@example.com", "secret",
+            "project = OPS"))
+
+    def test_absent_for_the_file_source(self):
+        self.assertNotIn("Task source", compose(self.cfg()))
+
+    def test_present_for_the_jira_source(self):
+        text = compose(self.jira_cfg())
+        self.assertIn("## Task source", text)
+        self.assertIn("claudeloop.jira show", text)
+        self.assertIn("claudeloop.jira comment", text)
+
+    def test_names_this_interpreter_not_bare_python(self):
+        self.assertIn(sys.executable, compose(self.jira_cfg()))
+
+    def test_the_key_instruction_matches_how_task_text_is_built(self):
+        text = compose(self.jira_cfg())
+        # The prompt's worked example must be true of the real builder.
+        self.assertIn("OPS-42: Fix the widget", text)
+        self.assertEqual(task_text("OPS-42", "Fix the widget", None),
+                         "OPS-42: Fix the widget")
+        self.assertIn("the key is OPS-42", text)
+
+    def test_forbids_the_session_transitioning_or_relabelling(self):
+        text = compose(self.jira_cfg())
+        self.assertIn("Do not transition", text)
+        self.assertIn("labels", text)
+
+    def test_says_a_comment_is_not_how_a_task_ends(self):
+        # A session told it may talk on the ticket is exactly the session
+        # that ends its turn with a comment instead of the result file.
+        self.assertIn("Commenting is not how a task ends", compose(self.jira_cfg()))
+
+    def test_does_not_leave_a_long_step_undefined(self):
+        # "or before a long step" gave a literal-minded session no way to
+        # tell how long is long, so it could read every file edit as
+        # qualifying and bill a Jira round trip before each one.
+        self.assertNotIn("a long step", compose(self.jira_cfg()))
+        self.assertIn("Comment when you find something a human should see.",
+                      compose(self.jira_cfg()))
+
+    def test_sits_below_the_protocol(self):
+        text = compose(self.jira_cfg())
+        self.assertLess(text.index("unattended under ClaudeLoop"),
+                        text.index("## Task source"))
 
 
 if __name__ == "__main__":

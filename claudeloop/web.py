@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, urlparse
 from . import status as status_module
 from .config import LOOPBACK_HOSTS, WILDCARD_HOSTS, Config
 from .render import render_event
-from .source import FileSource
 
 log = logging.getLogger("claudeloop.web")
 
@@ -161,9 +160,9 @@ def api_state(cfg: Config) -> dict:
             "stale": time.time() - snapshot.heartbeat > STALE_AFTER_S,
         },
         "pending": [
-            {"id": task.id, "text": task.text}
-            for task in FileSource(cfg.tasks_file).pending()
-            if task.id != snapshot.task_id
+            {"id": task_id, "text": text}
+            for task_id, text in snapshot.pending
+            if task_id != snapshot.task_id
         ],
         "completed": completed,
         "now": time.time(),

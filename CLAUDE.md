@@ -113,8 +113,8 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Three slices have run one. Two of them surfaced defects the passing suite could
-not have caught — five between them:
+Four slices have run one. Three of them surfaced defects the passing suite could
+not have caught — seven between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
   parking the loop until the window reset. The fixtures had only ever shown
@@ -127,6 +127,14 @@ not have caught — five between them:
 - The resume nudge said `"Continue."` to a session that believed it had
   finished, which correctly answered that there was nothing to continue.
 - Each task branched off the previous task's branch rather than the default.
+- The Jira source's `state.db` re-run backstop had never once worked: `State`'s
+  SQLite connection is created on the loop's thread, and `pending()` now runs
+  through `asyncio.to_thread`, which `sqlite3` refuses. It failed as a warning
+  rather than a crash, so only a live run showed it.
+- Jira's JQL search index is eventually consistent. A ticket labelled
+  `claudeloop-done` still matched the query 0.8 seconds later, so the label
+  alone cannot prevent a re-run — with the backstop dead, the loop ran a
+  finished ticket a second time and paid for it twice.
 
 The third — S1's — found nothing wrong, and was still worth running: it is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that

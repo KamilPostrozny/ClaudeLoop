@@ -17,6 +17,7 @@ from . import session
 from . import status as status_module
 from . import web
 from .config import DEFAULT_CONFIG, Config, load_config
+from .jira import JiraClient, JiraSource
 from .source import FileSource, Task, TaskSource
 from .state import State
 
@@ -194,6 +195,7 @@ IDLE_FIELDS = {
     "session_id": None,
     "started_at": None,
     "wait_until": None,
+    "pending": (),
 }
 """set_status carries unnamed fields over, so going idle has to clear the
 task fields explicitly or the dashboard shows a task that finished an hour
@@ -343,6 +345,19 @@ def reset_to_default_branch(repo: Path) -> None:
         )
 
 
+def build_source(cfg: Config, state: State) -> TaskSource:
+    """The one place that knows which task source a config selects."""
+    if cfg.source == "jira" and cfg.jira is not None:
+        return JiraSource(
+            JiraClient(cfg.jira.site, cfg.jira.email, cfg.jira.token),
+            cfg.jira.jql,
+            state,
+            cfg.jira.transition_start,
+            cfg.jira.transition_done,
+        )
+    return FileSource(cfg.tasks_file)
+
+
 async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) -> dict:
     """Run one task to a terminal status, resuming through rate limits."""
     run_dir = cfg.home / "runs" / task.id
@@ -360,6 +375,10 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     # thread: it shells out to git synchronously, and this coroutine must
     # not block the event loop the heartbeat task and the dashboard share.
     await asyncio.to_thread(reset_to_default_branch, cfg.repo)
+    # Offloaded for the same reason as the git call above: under the Jira
+    # source this is a blocking HTTP round trip, and this coroutine shares
+    # its thread with the heartbeat and the dashboard.
+    await asyncio.to_thread(source.start, task)
     log.info("task %s starting: %s", task.id, task.text)
     status_module.set_status(
         state="running",
@@ -433,7 +452,9 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     state.finish_task(
         task.id, result["status"], result["summary"], cost, result.get("question")
     )
-    source.mark(task, result["status"], result["summary"])
+    await asyncio.to_thread(
+        source.mark, task, result["status"], result["summary"], cost
+    )
     log.info("task %s %s ($%.4f): %s", task.id, result["status"], cost, result["summary"])
     return result
 
@@ -444,11 +465,11 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
     `once` drains the tasks pending right now and returns, for tests.
     """
     state = State(cfg.home / "state.db")
-    source = FileSource(cfg.tasks_file)
+    source = build_source(cfg, state)
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         while True:
-            pending = source.pending()
+            pending = await asyncio.to_thread(source.pending)
             if not pending:
                 if once:
                     status_module.set_status(**IDLE_FIELDS)
@@ -458,6 +479,19 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                 continue
             # Re-read after every task: the file may have been edited meanwhile.
             task = pending[0]
+            # Published for the dashboard: web reads this off the snapshot
+            # rather than re-reading the task source itself, since under the
+            # Jira source that would be a network call on the web thread.
+            # As a result the list is only as fresh as the start of the
+            # current task, not live -- under the file source that's a small
+            # step back from the old per-request re-read (an edit to
+            # tasks.md mid-task won't show until the next task starts); under
+            # the Jira source a per-request re-read would mean a network
+            # round trip on the web thread, which is the whole reason this
+            # rides on the snapshot instead.
+            status_module.set_status(
+                pending=tuple((t.id, t.text) for t in pending)
+            )
             try:
                 await run_task(cfg, state, source, task)
             except Exception as error:
@@ -465,9 +499,12 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                 # a fork failing under memory pressure, ...) is an environment
                 # fault, not a task verdict. Deliberately no source.mark: marking
                 # it `- [!]` would burn through the whole task list in seconds if
-                # the fault is permanent. Recorded as failed so the row doesn't
-                # stay stuck at 'running', then retried slowly rather than taking
-                # the whole process down.
+                # the fault is permanent. Recorded as 'error', not 'failed': a
+                # crash outside the session state machine is not a verdict on
+                # the task, and State.terminal_ids() -- the backstop a task
+                # source uses to avoid re-offering work it already finished --
+                # is keyed on terminal statuses, which must be able to offer
+                # this task again rather than treat it as permanently done.
                 log.exception("task %s crashed outside the session state machine", task.id)
                 status_module.set_status(state="error", last_error=str(error))
                 try:
@@ -478,7 +515,7 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                         " WHERE task_id=? AND ended_at IS NULL",
                         (time.time(), task.id),
                     )
-                    state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
+                    state.finish_task(task.id, "error", f"ClaudeLoop crashed: {error}", 0.0)
                 except Exception:
                     # Recording a crash must never itself be able to crash the
                     # loop -- an unattended run has to survive even a state.db
