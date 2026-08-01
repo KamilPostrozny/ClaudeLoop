@@ -9,6 +9,8 @@ from pathlib import Path
 HOME = Path.home() / ".claudeloop"
 DEFAULT_CONFIG = HOME / "config.toml"
 REQUIRED_KEYS = ("repo", "tasks_file")
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+WILDCARD_HOSTS = ("0.0.0.0", "::")
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,9 @@ class Config:
     max_resumes: int = 20
     max_waits: int = 200
     session_timeout_s: float = 4 * 3600
+    web_host: str = "127.0.0.1"
+    web_port: int = 8765
+    web_token: str = ""
     home: Path = HOME
 
 
@@ -39,6 +44,21 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
     if not (repo / ".git").exists():
         raise ValueError(f"{path}: repo {repo} is not a git repository")
 
+    web_host = str(data.get("web_host", "127.0.0.1"))
+    web_token = str(data.get("web_token", "")).strip()
+    if not web_token.isascii():
+        raise ValueError(
+            f"{path}: web_token must be ASCII -- secrets.compare_digest, used to"
+            " check it on every request, raises TypeError on anything else."
+        )
+    if web_host not in LOOPBACK_HOSTS and not web_token:
+        raise ValueError(
+            f"{path}: web_host {web_host!r} is not loopback, so web_token must be"
+            " set to a non-empty value. The dashboard watches an agent holding"
+            " real credentials; exposing it beyond this machine has to be a"
+            " deliberate act."
+        )
+
     return Config(
         repo=repo,
         tasks_file=Path(data["tasks_file"]).expanduser(),
@@ -46,5 +66,8 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         max_resumes=int(data.get("max_resumes", 20)),
         max_waits=int(data.get("max_waits", 200)),
         session_timeout_s=float(data.get("session_timeout_s", 4 * 3600)),
+        web_host=web_host,
+        web_port=int(data.get("web_port", 8765)),
+        web_token=web_token,
         home=home,
     )

@@ -25,10 +25,34 @@ model              = "opus"   # optional, default "opus"
 max_resumes        = 20       # optional, default 20 -- bounds plain nudges
 max_waits          = 200      # optional, default 200 -- bounds quota waits, separately
 session_timeout_s  = 14400    # optional, default 14400 (4h) -- kills a wedged session
+web_host           = "127.0.0.1"  # optional, default "127.0.0.1" -- see Dashboard below
+web_port           = 8765         # optional, default 8765
+web_token          = ""           # optional, default "" -- required if web_host isn't loopback
 ```
 
 One instance serves one repository. For a second repository, run a second
 instance with its own config.
+
+## Dashboard
+
+ClaudeLoop runs a small read-only web dashboard on its own daemon thread:
+current task and status, a live stream of the running session's output, the
+pending queue, and completed task history with cost and timing. It reads
+`state.db` through its own read-only connection and tails `events.jsonl` off
+disk — it never touches the loop's own objects, so nothing served here can
+affect what the loop does.
+
+By default it binds `127.0.0.1:8765`, reachable only from the machine
+ClaudeLoop runs on. To reach it from another device, set `web_host` to a
+non-loopback address (or `0.0.0.0`) — at which point `web_token` becomes
+required and every request must carry `?token=...`. This isn't optional
+because the dashboard watches an agent holding real, unattended credentials
+for `repo`: task text, tool output, and file contents it read are all visible
+through it, so exposing it beyond this machine has to be a deliberate act
+with a token guarding it, not a default.
+
+The dashboard cannot start or stop tasks, edit files, or otherwise change
+anything the loop is doing — every route is a read.
 
 ## Tasks
 

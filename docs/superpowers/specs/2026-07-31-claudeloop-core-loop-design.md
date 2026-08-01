@@ -80,9 +80,33 @@ request was throttled:
 parsing of the English `"You've hit your session limit · resets 1:40pm
 (Europe/Warsaw)"` notice and no timezone handling.
 
-Any `status` other than `"allowed"` is treated as blocking. `rateLimitType` is
-recorded but not branched on, so a weekly or model-specific limit is handled by
-the same path as `five_hour`.
+A later live smoke test produced a `status` this design hadn't accounted for:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{
+  "status":"allowed_warning","rateLimitType":"seven_day","resetsAt":1785600000,
+  "utilization":0.8,"isUsingOverage":false,"surpassedThreshold":0.75}}
+```
+
+`allowed_warning` means "80% of this window used, still allowed" — a
+headroom report, not a block. The original rule here ("any `status` other
+than `"allowed"` is treated as blocking") read it as blocking anyway, parking
+the loop until `resetsAt` — potentially hours — on an invocation that hadn't
+actually been throttled. The corrected rule keys off the `"allowed"` prefix
+rather than an exact match or a hardcoded list: every non-blocking status
+observed so far (`allowed`, `allowed_warning`) is shaped `allowed*`; a
+blocking one (`rejected`, this repo's fake CLI) uses an unrelated word. A
+status matching neither — including one never seen before — is treated as
+blocking, since a false wait is bounded and visible on the dashboard while a
+false non-wait would burn `max_resumes` against a real block and fail the
+task outright. See `blocking_reset()` in `loop.py` for the full reasoning.
+
+`utilization` and `surpassedThreshold` are informational — the fraction of
+the window used and the warning threshold it crossed — and do not affect the
+blocking decision; S2's quota gauge renders them, per the dashboard design.
+
+`rateLimitType` is recorded but not branched on, so a `seven_day` or
+model-specific limit is handled by the same path as `five_hour`.
 
 The target account reports `overageStatus: "rejected"` with
 `overageDisabledReason: "out_of_credits"`, meaning requests hard-stop at the
@@ -357,6 +381,14 @@ task, using the real `claude` binary. Every assumption the design rests on held:
   ($0.045 for the run), so recorded cost is real rather than silently zero.
 - The task was checked off, the work was committed in the target repository,
   and the database recorded `done` with `exit_reason = ReadResult`.
+
+A later live run surfaced a `rate_limit_info` shape this design hadn't seen:
+`status: "allowed_warning"`, `rateLimitType: "seven_day"`, plus `utilization`
+and `surpassedThreshold`. It exposed a real bug — `blocking_reset()` read any
+non-`"allowed"` status as blocking, so `allowed_warning` triggered a false
+multi-hour wait. Fixed by keying off the `"allowed"` prefix instead of an
+exact match; see the rate-limit section above. The payload is captured at
+`tests/fixtures/allowed_warning.jsonl`.
 
 Not exercised live: recovery from an actually-blocking rate limit. Forcing a
 real quota exhaustion was out of proportion to the check; the blocking branch

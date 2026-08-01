@@ -174,6 +174,32 @@ carries meaning.
 "Orange while waiting for you" arrives with S2b; nothing in S2a can block on a
 human.
 
+### Quota gauge
+
+The meter's fill comes straight from `rate_limit_info.utilization` (0..1),
+clamped defensively and hidden when the field is absent — older payloads
+won't carry it. This replaced an earlier build that tried to reconstruct the
+window itself: it kept a `WINDOWS` table of known `rateLimitType` values
+(`five_hour`, `weekly`, `opus_weekly`) and subtracted a window length back off
+`resetsAt` to get a start time. A live smoke test's real `rateLimitType` was
+`seven_day`, which matched nothing in that table, so the meter always fell to
+its unknown-window branch and rendered an empty track. `utilization` makes the
+whole reconstruction unnecessary — it's the ratio the meter wants, delivered
+directly, for any `rateLimitType` including ones never seen before.
+
+The countdown to `resetsAt` is unaffected and orthogonal: it still just needs
+a reset time, not a window length, so it renders independently of whether
+`utilization` is present. `rateLimitType` is shown as a label, formatted by
+spelling out the number word in the string (`seven_day` → "7 day") rather
+than a name-to-duration lookup, for the same reason the fill no longer uses
+one.
+
+`status` colours the meter — `allowed_warning` or a blocking status render
+distinct from plain `allowed` — using the same `"allowed"`-prefix rule as
+`blocking_reset()` in `loop.py`, so the dashboard and the loop's own decision
+never disagree about what a status means. `surpassedThreshold` (also 0..1) is
+drawn as a thin marker on the track showing where the warning line sits.
+
 ## Architecture
 
 ### `claudeloop/status.py`

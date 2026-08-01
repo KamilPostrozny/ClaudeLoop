@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ClaudeLoop</title>
+<link rel="icon" id="favicon">
+<!-- Classic, not a module: modules defer, and a deferred theme would flash the
+     wrong background at 3am. Three lines, no dependency, still one file. -->
+<script>
+  try {
+    var t = localStorage.getItem("claudeloop-theme");
+    if (t) document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+<style>
+/* ---------------------------------------------------------------- tokens */
+:root {
+  --bg: #FDF4EC;
+  --surface: #FFFFFF;
+  --sunken: #FBF2E9;
+  --line: rgba(36, 45, 55, .14);
+  --text: #242D37;
+  --muted: #6B7885;
+  --accent: #FD7C33;      /* fills, rules, the meter                        */
+  --accent-ink: #C4551A;  /* #FD7C33 is 2.6:1 on white and fails as type    */
+  --chip: #FBE3CD;        /* the logo's own peach: the PNG has no alpha     */
+  --ok: #17805A;
+  --warn: #9A6B00;
+  --bad: #C0203F;
+  --idle: #6B7885;
+  --shadow: 0 1px 2px rgba(36, 45, 55, .06), 0 8px 24px rgba(36, 45, 55, .05);
+}
+/* Dark is chosen, not an inverted flip: each status step is re-picked
+   against #242D37 rather than lightened arithmetically. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1B222B;
+    --surface: #242D37;
+    --sunken: #1F2731;
+    --line: rgba(242, 232, 224, .12);
+    --text: #F2E8E0;
+    --muted: #9AA6B2;
+    --accent: #FD7C33;
+    --accent-ink: #FD7C33;  /* ~5.5:1 on #242D37, so the brand hue holds    */
+    --chip: #F7E2CE;
+    --ok: #4ECB8D;
+    --warn: #E8B44A;
+    --bad: #F2726B;
+    --idle: #9AA6B2;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1B222B;
+  --surface: #242D37;
+  --sunken: #1F2731;
+  --line: rgba(242, 232, 224, .12);
+  --text: #F2E8E0;
+  --muted: #9AA6B2;
+  --accent: #FD7C33;
+  --accent-ink: #FD7C33;
+  --chip: #F7E2CE;
+  --ok: #4ECB8D;
+  --warn: #E8B44A;
+  --bad: #F2726B;
+  --idle: #9AA6B2;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+}
+
+/* The console is the subject, so the monospace face is the display face:
+   every label, figure and structural mark is set in it. Prose is the only
+   thing that gets the UI sans. */
+:root {
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------------------------------------------------------------- shell */
+.wrap { max-width: 760px; margin: 0 auto; padding: 0 14px 56px; }
+
+header {
+  position: sticky; top: 0; z-index: 5;
+  padding: 10px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+header .inner {
+  display: flex; align-items: center; gap: 11px;
+  width: 100%; max-width: 760px; margin: 0 auto;
+}
+.chip {
+  width: 38px; height: 38px; flex: none;
+  border-radius: 11px; overflow: hidden;
+  background: var(--chip);
+  box-shadow: inset 0 0 0 1px rgba(36, 45, 55, .10);
+}
+.chip img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.wordmark {
+  font: 600 16px/1 var(--mono);
+  letter-spacing: -.02em;
+  margin: 0;
+}
+.wordmark b { color: var(--accent-ink); font-weight: 600; }
+.wordmark small {
+  display: block; margin-top: 5px;
+  font: 400 9.5px/1 var(--mono);
+  letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
+}
+.spacer { margin-left: auto; }
+button.ghost {
+  font: 500 11px/1 var(--mono);
+  letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); background: none;
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 11px; cursor: pointer;
+}
+button.ghost:hover { color: var(--text); border-color: var(--muted); }
+#offline {
+  font: 500 10px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase;
+  color: var(--bad); border: 1px solid currentColor; border-radius: 999px;
+  padding: 5px 8px;
+}
+[hidden] { display: none !important; }
+
+/* ---------------------------------------------------------------- cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  margin-top: 14px;
+}
+.eyebrow {
+  display: flex; align-items: baseline; gap: 8px;
+  margin: 0; padding: 13px 15px 0;
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: .17em; text-transform: uppercase; color: var(--muted);
+}
+.eyebrow .count { color: var(--accent-ink); font-weight: 600; letter-spacing: 0; }
+
+/* ------------------------------------------------------------- the beacon */
+/* The one loud element. A state rail down the left edge plus a pulsing dot:
+   readable across a dark room, and never colour alone -- the label is always
+   spelled out beside it. */
+#status {
+  position: relative; overflow: hidden;
+  padding: 16px 16px 16px 19px;
+  --state: var(--idle);
+}
+#status::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--state);
+}
+#status[data-state="running"] { --state: var(--ok); }
+#status[data-state="waiting"] { --state: var(--warn); }
+#status[data-state="error"],
+#status[data-state="stale"]   { --state: var(--bad); }
+
+.beacon { display: flex; align-items: center; gap: 9px; }
+.dot {
+  position: relative; flex: none;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--state);
+}
+#status[data-state="running"] .dot::after {
+  content: ""; position: absolute; inset: -4px;
+  border-radius: 50%; border: 1.5px solid var(--state);
+  animation: ring 2s ease-out infinite;
+}
+@keyframes ring {
+  0%   { transform: scale(.45); opacity: .9; }
+  100% { transform: scale(1.5); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #status[data-state="running"] .dot::after { animation: none; opacity: .5; }
+}
+.state-label {
+  font: 600 12px/1 var(--mono);
+  letter-spacing: .13em; text-transform: uppercase;
+  color: var(--state);
+}
+.attempt {
+  margin-left: auto;
+  font: 500 10.5px/1 var(--mono); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.task-text {
+  margin: 11px 0 0;
+  font-size: 16px; line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.task-text.none { color: var(--muted); font-style: italic; }
+.detail {
+  margin: 9px 0 0;
+  font: 400 12.5px/1.5 var(--mono); color: var(--bad);
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+
+/* Figures: one hero numeral, the rest kept small. Not a chart -- a single
+   current value is a stat tile, never a one-bar bar chart. */
+.figures { display: flex; align-items: flex-end; gap: 22px; margin-top: 13px; }
+.fig-v {
+  display: block;
+  font: 400 30px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+}
+.fig-v.sm { font-size: 17px; color: var(--muted); }
+.fig-l {
+  display: block; margin-top: 6px;
+  font: 500 10px/1 var(--mono);
+  letter-spacing: .15em; text-transform: uppercase; color: var(--muted);
+}
+
+/* Quota: a single ratio against a limit, so a meter -- not a gauge dial and
+   not a pie of two slices. The track is how much of the block has run. */
+.quota { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.meter {
+  position: relative;
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--sunken);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.meter i {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--accent);
+  transition: width .6s linear;
+}
+/* allowed_warning: still allowed, but worth a distinct colour so it doesn't
+   read as identical to plain headroom. A blocking status reuses the same
+   fill for the (rare) moment one is visible before the loop starts waiting. */
+.quota[data-level="warn"] .meter i { background: var(--warn); }
+.quota[data-level="bad"] .meter i { background: var(--bad); }
+/* Where surpassedThreshold sits: a thin still marker, not another fill --
+   it's a reference line, not a value. */
+#meter-threshold {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: var(--text); opacity: .35;
+}
+.quota-legend {
+  display: flex; justify-content: space-between; gap: 10px; margin-top: 9px;
+  font: 500 10.5px/1.3 var(--mono);
+  letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+}
+.quota-legend b { color: var(--text); font-weight: 500; letter-spacing: .04em; }
+
+/* ---------------------------------------------------------------- stream */
+#stream {
+  padding: 10px 15px 14px;
+  max-height: 46vh; min-height: 108px; overflow-y: auto;
+  overscroll-behavior: contain;
+}
+#stream .empty {
+  color: var(--muted); font: 400 12.5px/1.5 var(--mono); padding: 8px 0;
+}
+.e { animation: rise .18s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) { .e { animation: none; } }
+
+.e-text {
+  margin: 9px 0; font-size: 14.5px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.e-tool { margin: 5px 0; }
+.e-tool > summary {
+  display: flex; align-items: baseline; gap: 8px;
+  list-style: none; cursor: pointer;
+  padding: 4px 0 4px 15px; position: relative;
+  font: 400 12.5px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.e-tool > summary::-webkit-details-marker { display: none; }
+.e-tool > summary::before {
+  content: "+"; position: absolute; left: 0; top: 4px;
+  color: var(--accent); font: 600 12px/1.4 var(--mono);
+}
+.e-tool[open] > summary::before { content: "\2212"; }
+.e-tool.bare > summary { cursor: default; }
+.e-tool.bare > summary::before { content: "\00b7"; color: var(--muted); }
+.tool-name { color: var(--accent-ink); font-weight: 600; flex: none; }
+.tool-sum { color: var(--muted); overflow-wrap: anywhere; }
+.e-tool pre {
+  margin: 4px 0 10px 15px; padding: 10px 11px;
+  background: var(--sunken); border: 1px solid var(--line);
+  border-left: 2px solid var(--line);
+  border-radius: 8px;
+  font: 400 12px/1.5 var(--mono);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 260px; overflow: auto;
+}
+.e-tool.err > summary::before,
+.e-tool.err .tool-name { color: var(--bad); }
+.e-tool.err pre { border-left-color: var(--bad); }
+
+.e-done {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  margin: 12px 0 4px; padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  font: 400 12px/1.6 var(--mono); font-variant-numeric: tabular-nums;
+}
+.e-done span { color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.e-done b { font-weight: 600; color: var(--text); margin-right: 8px; }
+.e-done .sub { margin-left: auto; color: var(--warn); }
+
+/* ----------------------------------------------------------------- lists */
+.list { list-style: none; margin: 6px 0 0; padding: 0 0 6px; }
+.list li {
+  display: flex; gap: 11px; align-items: baseline;
+  padding: 9px 15px; border-top: 1px solid var(--line);
+  font-size: 14px; overflow-wrap: anywhere;
+}
+.list li:first-child { border-top: none; }
+/* Numbering earns its place: pending really is a queue, and the number says
+   how many sessions away a task is. */
+.list .n {
+  flex: none; width: 22px;
+  font: 500 11px/1.5 var(--mono); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.empty-row {
+  padding: 8px 15px 14px; color: var(--muted);
+  font-style: italic; font-size: 13.5px;
+}
+
+.done-item { border-top: 1px solid var(--line); }
+.done-item:first-child { border-top: none; }
+.done-item > summary {
+  display: flex; gap: 10px; align-items: baseline;
+  list-style: none; cursor: pointer; padding: 10px 15px;
+}
+.done-item > summary::-webkit-details-marker { display: none; }
+.done-item .mark {
+  flex: none; width: 14px;
+  font: 600 12px/1.5 var(--mono); text-align: center;
+}
+.done-item[data-status="done"] .mark { color: var(--ok); }
+.done-item[data-status="failed"] .mark,
+.done-item[data-status="error"] .mark,
+.done-item[data-status="interrupted"] .mark { color: var(--bad); }
+.done-item[data-status="blocked"] .mark { color: var(--warn); }
+.done-title { flex: 1; font-size: 14px; overflow-wrap: anywhere; }
+.done-cost {
+  flex: none; font: 400 12px/1.5 var(--mono);
+  font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.done-body { padding: 2px 15px 14px 39px; }
+.note {
+  margin: 0 0 10px; font-size: 13.5px; line-height: 1.55; color: var(--muted);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.note.q { color: var(--warn); }
+.note.stamp {
+  font: 400 11px/1.5 var(--mono); letter-spacing: .05em;
+}
+.runs { margin: 0 0 10px; }
+.run {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 5px 0;
+  font: 400 11.5px/1.4 var(--mono); color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.run .idx { color: var(--text); }
+.run .reason { color: var(--text); }
+.run.limited .reason { color: var(--warn); }
+.run.failed .reason { color: var(--bad); }
+.log { border-top: 1px solid var(--line); padding-top: 4px; }
+
+@media (max-width: 420px) {
+  .figures { gap: 16px; }
+  .fig-v { font-size: 26px; }
+  .done-body { padding-left: 15px; }
+  #stream { max-height: 42vh; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <span class="chip"><img id="logo" alt=""></span>
+    <h1 class="wordmark">Claude<b>Loop</b><small>Unattended</small></h1>
+    <span class="spacer"></span>
+    <span id="offline" hidden>No server</span>
+    <button class="ghost" id="theme" type="button" aria-label="Switch theme">
+      <span id="theme-label">Theme</span>
+    </button>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section class="card" id="status" data-state="idle">
+    <div class="beacon">
+      <span class="dot"></span>
+      <span class="state-label" id="state-label" aria-live="polite">Connecting</span>
+      <span class="attempt" id="attempt" hidden></span>
+    </div>
+    <p class="task-text none" id="task-text">No task in flight</p>
+    <p class="detail" id="detail" hidden></p>
+    <div class="figures" id="figures" hidden>
+      <div>
+        <span class="fig-v" id="elapsed">0:00</span>
+        <span class="fig-l" id="elapsed-label">Elapsed</span>
+      </div>
+      <div id="session-fig" hidden>
+        <span class="fig-v sm" id="session">—</span>
+        <span class="fig-l">Session</span>
+      </div>
+    </div>
+    <div class="quota" id="quota" hidden>
+      <div class="meter" id="meter" hidden>
+        <i id="meter-fill" style="width:0%"></i>
+        <b id="meter-threshold" hidden></b>
+      </div>
+      <div class="quota-legend">
+        <span id="quota-type">Quota</span>
+        <span>Resets in <b id="quota-left">—</b></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="eyebrow">Live output</h2>
+    <div id="stream"><p class="empty">Waiting for the next session…</p></div>
+  </section>
+
+  <section class="card">
+    <h2 class="eyebrow">Pending <span class="count" id="pending-count">0</span></h2>
+    <ol class="list" id="pending"></ol>
+  </section>
+
+  <section class="card">
+    <h2 class="eyebrow">Completed <span class="count" id="completed-count">0</span></h2>
+    <div id="completed"></div>
+  </section>
+
+</div>
+
+<script type="module">
+// Everything here builds nodes with textContent. Task text, tool summaries and
+// tool output come out of a repository the session is reading; none of it is
+// trusted, and none of it is ever handed to innerHTML.
+
+const TOKEN = new URLSearchParams(location.search).get("token");
+const url = (path) =>
+  TOKEN ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : path;
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text != null) node.textContent = text;
+  return node;
+};
+
+// The logo is fetched from here rather than from a src attribute in the
+// markup: an attribute would fire before this line and 403 on a token'd
+// dashboard.
+$("logo").src = url("/logo.png");
+$("favicon").href = url("/logo.png");
+
+/* ------------------------------------------------------------------ theme */
+const THEME_KEY = "claudeloop-theme";
+function isDark() {
+  const forced = document.documentElement.dataset.theme;
+  if (forced) return forced === "dark";
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+}
+function paintThemeButton() {
+  $("theme-label").textContent = isDark() ? "Light" : "Dark";
+}
+$("theme").addEventListener("click", () => {
+  const next = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+  paintThemeButton();
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paintThemeButton);
+paintThemeButton();
+
+/* ------------------------------------------------------------------ time */
+// The server's clock is the authority: every timestamp in the payload is the
+// loop's, so countdowns run off the server's now, not the phone's.
+let skew = 0;
+const now = () => (Date.now() + skew) / 1000;
+
+function clock(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const pad = (n) => String(n).padStart(2, "0");
+  return h ? `${h}:${pad(m)}:${pad(seconds % 60)}` : `${m}:${pad(seconds % 60)}`;
+}
+function coarse(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  if (seconds >= 3600) {
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  }
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
+const money = (v) => "$" + (Number(v) || 0).toFixed(Number(v) >= 1 ? 2 : 3);
+
+/* --------------------------------------------------------------- entries */
+// One renderer, shared by the live stream and a completed task's log.
+function appendEntry(host, entry, tools) {
+  if (!entry || entry.kind === "ping") return;
+
+  if (entry.kind === "text") {
+    host.appendChild(el("p", "e e-text", entry.text || ""));
+    return;
+  }
+
+  if (entry.kind === "tool") {
+    const box = el("details", "e e-tool bare");
+    const head = el("summary");
+    head.appendChild(el("span", "tool-name", entry.name || "tool"));
+    if (entry.summary) head.appendChild(el("span", "tool-sum", entry.summary));
+    box.appendChild(head);
+    host.appendChild(box);
+    if (entry.id) tools.set(entry.id, box);
+    return;
+  }
+
+  if (entry.kind === "result") {
+    // A result belongs to its call, so it folds into that line rather than
+    // spending a second row. Replay can cut the call away, so a stray result
+    // still gets a row of its own.
+    let box = entry.id ? tools.get(entry.id) : null;
+    if (box) {
+      tools.delete(entry.id);
+    } else {
+      box = el("details", "e e-tool");
+      const head = el("summary");
+      head.appendChild(el("span", "tool-name", entry.is_error ? "error" : "output"));
+      box.appendChild(head);
+      host.appendChild(box);
+    }
+    box.classList.remove("bare");
+    if (entry.is_error) box.classList.add("err");
+    box.appendChild(el("pre", null, entry.preview || "(no output)"));
+    return;
+  }
+
+  if (entry.kind === "done") {
+    const row = el("div", "e e-done");
+    row.appendChild(el("span", null, "cost"));
+    row.appendChild(el("b", null, money(entry.cost)));
+    row.appendChild(el("span", null, "took"));
+    row.appendChild(el("b", null, coarse((entry.duration_ms || 0) / 1000)));
+    if (entry.subtype && entry.subtype !== "success") {
+      row.appendChild(el("span", "sub", entry.subtype));
+    }
+    host.appendChild(row);
+  }
+}
+
+/* ---------------------------------------------------------- live stream */
+const stream = $("stream");
+const liveTools = new Map();
+let stick = true;
+
+stream.addEventListener("scroll", () => {
+  // Scrolling up is a request to stay put; coming back to the bottom resumes.
+  stick = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 40;
+});
+
+function clearStream(message) {
+  stream.replaceChildren(el("p", "empty", message));
+  liveTools.clear();
+  stick = true;
+}
+
+function push(entry) {
+  const empty = stream.querySelector(".empty");
+  if (empty) empty.remove();
+  appendEntry(stream, entry, liveTools);
+  if (stick) stream.scrollTop = stream.scrollHeight;
+}
+
+const events = new EventSource(url("/api/events"));
+events.onmessage = (event) => {
+  let entry;
+  try { entry = JSON.parse(event.data); } catch (e) { return; }
+  if (!entry || entry.kind === "ping") return;
+  if (entry.kind === "run") { clearStream("Session starting…"); return; }
+  push(entry);
+};
+
+/* ---------------------------------------------------------- status card */
+const card = $("status");
+let snap = null; // the last status object, for the one-second ticker
+
+// `utilization` (0..1) is the ratio the meter wants, straight from the
+// payload -- no window-length table to reconstruct it from resetsAt, and no
+// guessing for a rateLimitType nobody's seen (there was one: WINDOWS, keyed
+// on "five_hour" / "weekly" / "opus_weekly", none of which is the real
+// "seven_day"; it always fell through to a zero-length window and rendered
+// an empty track). Older payloads without the field, or a value outside
+// 0..1, degrade to "no fill" rather than a misleading one.
+function clampUtilization(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
+}
+
+// rateLimitType is a machine name ("seven_day", "five_hour") with no fixed
+// vocabulary -- a lookup table missed "seven_day" once already. Spell out
+// the number word it's built from instead of mapping the whole name, so a
+// type nobody's seen ("ten_day") still reads fine rather than falling off
+// a map.
+const NUMBER_WORDS = {
+  one: "1", two: "2", three: "3", four: "4", five: "5",
+  six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
+};
+function formatRateLimitType(type) {
+  return String(type)
+    .split("_")
+    .map((word) => NUMBER_WORDS[word.toLowerCase()] || word)
+    .join(" ");
+}
+
+// Self-check for the pure logic above: cheap enough to leave in, delete if
+// either contract changes on purpose. The page has no test framework and
+// isn't getting one for this.
+console.assert(clampUtilization(0.8) === 0.8, "utilization passes through unchanged");
+console.assert(clampUtilization(1.4) === 1, "utilization clamps above 1");
+console.assert(clampUtilization(-0.2) === 0, "utilization clamps below 0");
+console.assert(clampUtilization(undefined) === null, "missing utilization is null, not 0");
+console.assert(clampUtilization("nope") === null, "non-numeric utilization is null");
+console.assert(formatRateLimitType("seven_day") === "7 day", "seven_day should read as '7 day'");
+console.assert(formatRateLimitType("five_hour") === "5 hour", "five_hour should read as '5 hour'");
+console.assert(formatRateLimitType("opus_weekly") === "opus weekly", "unknown type still renders");
+
+const LABELS = {
+  running: "Running",
+  waiting: "Waiting for quota",
+  idle: "Idle",
+  error: "Error",
+};
+
+function renderStatus(s) {
+  snap = s;
+  // A stale heartbeat means the loop died while this web thread lived. It
+  // overrides every other state: a green light over a dead orchestrator is
+  // the one thing this page must never show.
+  const state = s.stale ? "stale" : (LABELS[s.state] ? s.state : "idle");
+  card.dataset.state = state;
+  $("state-label").textContent = s.stale ? "Loop not responding" : LABELS[state];
+
+  // attempt is resumes + waits, so zero is the first run and says nothing.
+  $("attempt").hidden = !(s.attempt > 0);
+  $("attempt").textContent = "attempt " + (s.attempt + 1);
+
+  const task = $("task-text");
+  task.textContent = s.task_text || "No task in flight";
+  task.classList.toggle("none", !s.task_text);
+
+  const problem = s.stale
+    ? "The loop stopped refreshing its heartbeat. Check the process."
+      + (s.last_error ? "\n" + s.last_error : "")
+    : (state === "error" ? s.last_error : null);
+  $("detail").hidden = !problem;
+  $("detail").textContent = problem || "";
+
+  $("session").textContent = s.session_id ? s.session_id.slice(0, 8) : "—";
+  $("session-fig").hidden = !s.session_id;
+  $("figures").hidden = !(s.started_at || s.wait_until);
+
+  const limit = s.rate_limit || null;
+  const resets = limit ? Number(limit.resetsAt) || 0 : 0;
+  const utilization = limit ? clampUtilization(limit.utilization) : null;
+  // Nothing to show at all: neither a countdown nor a fill.
+  $("quota").hidden = !limit || (!resets && utilization === null);
+  if (limit) {
+    const status = typeof limit.status === "string" ? limit.status : "";
+    // Same read as blocking_reset() in loop.py: "allowed"-shaped is
+    // headroom, anything else is a block. A status this page has never
+    // seen lands in the same bucket the loop itself would put it in.
+    const level = status === "allowed" ? "" : status.startsWith("allowed") ? "warn" : "bad";
+    $("quota").dataset.level = level;
+    $("quota-type").textContent =
+      formatRateLimitType(limit.rateLimitType || status || "quota") + " limit";
+
+    // Older payloads carry no utilization -- hide the track rather than
+    // show a fill that would just be wrong (0% looks like "empty", not
+    // "unknown").
+    $("meter").hidden = utilization === null;
+    if (utilization !== null) {
+      $("meter-fill").style.width = (utilization * 100).toFixed(1) + "%";
+    }
+    const threshold = clampUtilization(limit.surpassedThreshold);
+    $("meter-threshold").hidden = threshold === null;
+    if (threshold !== null) {
+      $("meter-threshold").style.left = (threshold * 100).toFixed(1) + "%";
+    }
+  }
+  if (!resets) $("quota-left").textContent = "—";
+  tick();
+}
+
+// One second, one job: move the numbers. Everything else waits for the poll.
+function tick() {
+  if (!snap) return;
+  const t = now();
+  if (snap.wait_until) {
+    $("elapsed").textContent = clock(snap.wait_until - t);
+    $("elapsed-label").textContent = "Until resume";
+  } else if (snap.started_at) {
+    $("elapsed").textContent = clock(t - snap.started_at);
+    $("elapsed-label").textContent = "Elapsed";
+  }
+  // resetsAt is independent of utilization -- one says how much is left,
+  // the other when it comes back -- so the countdown ticks every second
+  // regardless of whether the meter fill above is showing.
+  const resets = snap.rate_limit ? Number(snap.rate_limit.resetsAt) || 0 : 0;
+  if (resets) $("quota-left").textContent = coarse(resets - t);
+}
+setInterval(tick, 1000);
+
+/* ---------------------------------------------------------------- lists */
+// Rebuilt only when the contents actually change, so the poll never yanks an
+// open <details> shut mid-read.
+let pendingKey = "";
+function renderPending(items) {
+  $("pending-count").textContent = items.length;
+  const key = items.map((t) => t.id).join(",");
+  if (key === pendingKey) return;
+  pendingKey = key;
+  const list = $("pending");
+  list.replaceChildren();
+  if (!items.length) {
+    list.appendChild(el("li", "empty-row", "Nothing queued."));
+    return;
+  }
+  items.forEach((task, i) => {
+    const row = el("li");
+    row.appendChild(el("span", "n", String(i + 1).padStart(2, "0")));
+    row.appendChild(el("span", null, task.text));
+    list.appendChild(row);
+  });
+}
+
+const MARKS = { done: "✓", failed: "×", error: "×", blocked: "?", interrupted: "!" };
+const REASON_CLASS = { RateLimited: "limited", Fail: "failed", Crash: "failed" };
+let completedKey = "";
+
+function renderCompleted(items) {
+  $("completed-count").textContent = items.length;
+  const key = items.map((t) => t.id + ":" + t.status).join(",");
+  if (key === completedKey) return;
+  completedKey = key;
+  const host = $("completed");
+  host.replaceChildren();
+  if (!items.length) {
+    host.appendChild(el("p", "empty-row", "Nothing finished yet."));
+    return;
+  }
+  for (const task of items) host.appendChild(completedRow(task));
+}
+
+function completedRow(task) {
+  const box = el("details", "done-item");
+  box.dataset.status = task.status || "";
+
+  const head = el("summary");
+  head.appendChild(el("span", "mark", MARKS[task.status] || "·"));
+  head.appendChild(el("span", "done-title", task.text));
+  head.appendChild(el("span", "done-cost", money(task.cost_usd)));
+  box.appendChild(head);
+
+  const body = el("div", "done-body");
+  if (task.question) body.appendChild(el("p", "note q", task.question));
+  else if (task.summary) body.appendChild(el("p", "note", task.summary));
+  body.appendChild(el("p", "note stamp", stamp(task)));
+  box.appendChild(body);
+
+  box.addEventListener("toggle", () => {
+    if (!box.open || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    loadTask(task.id, body);
+  });
+  return box;
+}
+
+function stamp(task) {
+  const started = task.started_at
+    ? new Date(task.started_at * 1000).toLocaleString() : "";
+  const took = task.finished_at && task.started_at
+    ? " · " + coarse(task.finished_at - task.started_at) : "";
+  return (started + took) || "no timing recorded";
+}
+
+async function loadTask(id, body) {
+  const note = el("p", "note", "Loading run history…");
+  body.appendChild(note);
+  let data;
+  try {
+    const response = await fetch(
+      url("/api/tasks/" + encodeURIComponent(id)), { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (e) {
+    note.textContent = "Could not load this task: " + e.message;
+    return;
+  }
+  note.remove();
+
+  const runs = data.runs || [];
+  if (runs.length) {
+    const list = el("div", "runs");
+    runs.forEach((run, i) => {
+      const row = el("div", "run " + (REASON_CLASS[run.exit_reason] || ""));
+      row.appendChild(el("span", "idx", "run " + (i + 1)));
+      if (run.started_at && run.ended_at) {
+        row.appendChild(el("span", null, coarse(run.ended_at - run.started_at)));
+      }
+      row.appendChild(el("span", "reason", run.exit_reason || "—"));
+      // resume_count is the loop's own attempt counter, which normally just
+      // restates the row number. It is worth a chip only when it disagrees --
+      // that means this task was picked up again by a later loop process.
+      if (run.resume_count !== i) {
+        row.appendChild(el("span", null, "attempt " + (run.resume_count + 1)));
+      }
+      list.appendChild(row);
+    });
+    body.appendChild(list);
+  }
+
+  const log = el("div", "log");
+  const tools = new Map();
+  const entries = data.log || [];
+  if (!entries.length) log.appendChild(el("p", "note", "No output was recorded."));
+  else for (const entry of entries) appendEntry(log, entry, tools);
+  body.appendChild(log);
+}
+
+/* ----------------------------------------------------------------- poll */
+async function poll() {
+  try {
+    const response = await fetch(url("/api/state"), { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json();
+    skew = data.now * 1000 - Date.now();
+    $("offline").hidden = true;
+    renderStatus(data.status);
+    renderPending(data.pending || []);
+    renderCompleted(data.completed || []);
+  } catch (e) {
+    // `stale` is the loop's health; this badge is the page losing the server.
+    $("offline").hidden = false;
+  }
+}
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>
