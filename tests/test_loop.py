@@ -1231,12 +1231,26 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.fake.chmod(0o755)
 
         with mock.patch.object(FileSource, "reopen", side_effect=OSError("disk gone")):
-            with self.assertLogs("claudeloop", level="WARNING"):
+            with self.assertLogs("claudeloop", level="WARNING") as logs:
                 asyncio.run(loop.main_loop(self.cfg, once=True))
 
+        self.assertTrue(
+            any("could not reopen" in line for line in logs.output), logs.output
+        )
         row = State(self.cfg.home / "state.db").db.execute(
             "SELECT status FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
+
+    def test_a_fault_in_the_answered_scan_does_not_stop_ordinary_work(self):
+        # A locked database or a Jira fault must cost this poll its answer
+        # check, not the loop's ability to do ordinary pending work.
+        self.tasks.write_text("- [ ] first thing\n")
+
+        with mock.patch.object(loop, "find_answered", side_effect=RuntimeError("boom")):
+            with self.assertLogs("claudeloop", level="ERROR"):
+                asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
 
 
 if __name__ == "__main__":

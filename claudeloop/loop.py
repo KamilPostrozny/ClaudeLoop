@@ -537,7 +537,7 @@ def read_answer(run_dir: Path) -> str | None:
     """
     path = run_dir / "answer.json"
     try:
-        raw = path.read_text()
+        raw = path.read_text(errors="replace")
     except OSError:
         return None
     path.unlink(missing_ok=True)
@@ -555,11 +555,17 @@ def find_answered(cfg: Config, state: State, source: TaskSource) -> tuple[Task, 
     Blocking on both counts -- sqlite3 on this connection and, under the Jira
     source, one HTTP round trip per parked task -- so the loop calls this
     through asyncio.to_thread. The Jira reads are only paid while something
-    is actually parked.
+    is actually parked, and only for a task with no answer file waiting.
     """
     for row in state.blocked():
         task = Task(row["id"], row["text"], row["source"], row["source_ref"])
-        answer = read_answer(cfg.home / "runs" / task.id) or source.answer(task)
+        try:
+            answer = read_answer(cfg.home / "runs" / task.id) or source.answer(task)
+        except Exception as error:
+            # Confined to this row on purpose: one faulty task must not hide
+            # every later parked task's answer from the same scan.
+            log.warning("could not check task %s for an answer (%s)", task.id, error)
+            continue
         if answer:
             return task, answer
     return None
@@ -617,7 +623,13 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                 # snapshot rather than re-reading the task source itself,
                 # since under the Jira source that would be a network call on
                 # the web thread. As a result the list is only as fresh as
-                # the start of the current task, not live.
+                # the start of the current task, not live -- under the file
+                # source that's a small step back from the old per-request
+                # re-read (an edit to tasks.md mid-task won't show until the
+                # next task starts); under the Jira source a per-request
+                # re-read would mean a network round trip on the web thread,
+                # which is the whole reason this rides on the snapshot
+                # instead.
                 status_module.set_status(
                     pending=tuple((t.id, t.text) for t in pending)
                 )
