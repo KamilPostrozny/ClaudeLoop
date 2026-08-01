@@ -111,6 +111,21 @@ thread — the loop — calls `set_status`. A human answering from the web threa
 is a second writer, and `set_status` is a read-modify-write. Its docstring says
 so; S2b has to solve it rather than rediscover it.
 
+**What S3 leaves it, and the trap in it.** The session can already talk on a
+ticket — `python -m claudeloop.jira comment KEY -` — so a Jira question has an
+obvious home, and a human's reply has an obvious place to live. But a `blocked`
+task today gets the `claudeloop-blocked` label, and `pending()` excludes that
+label permanently. Answering a blocked question therefore has to *remove* the
+label, or the answered task can never be picked up again — and under the file
+source the equivalent is rewriting `- [!]` back to `- [ ]`. Neither source
+does that today. Whatever S2b builds, resuming an answered task is a
+task-source operation, not just a loop one, so the `TaskSource` protocol
+probably grows a third verb.
+
+**Also worth knowing:** the protocol gained `start(task)` and `mark(..., cost)`
+in S3, and `JiraSource` shows the shape a non-file source takes — including
+that everything it does must be safe to call from `asyncio.to_thread`.
+
 ### S5 — Setup wizard and config schema
 
 An in-browser first-run wizard for operators who should not have to hand-edit
