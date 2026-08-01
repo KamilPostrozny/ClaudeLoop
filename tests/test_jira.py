@@ -604,6 +604,21 @@ class QuestionCommentTest(unittest.TestCase):
                     if path == "/issue/OPS-1/comment"]
         self.assertIn("finished this task", comments[0]["body"])
 
+    def test_a_failed_task_gets_the_closing_comment(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(Task("abc", "OPS-1: thing", "jira", "OPS-1"), "failed", "gave up", 0.5)
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertIn("finished this task", comments[0]["body"])
+        self.assertIn("*failed*", comments[0]["body"])
+
 
 class ReopenTest(unittest.TestCase):
     def test_reopen_removes_only_the_blocked_label(self):

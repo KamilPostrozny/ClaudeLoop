@@ -202,6 +202,19 @@ class BlockedTest(unittest.TestCase):
 
         self.assertIsNone(self.state.last_session("aaaa"))
 
+    def test_blocked_ignores_a_task_interrupted_by_a_dead_process(self):
+        # State.__init__ rewrites 'running' to 'interrupted' when a previous
+        # process died mid-task. That task never finished, so it is not
+        # parked on a question.
+        self.state.start_task("aaaa", "file", "- [ ] x", "x")
+
+        reopened = State(self.tmp / "state.db")
+
+        status = reopened.db.execute(
+            "SELECT status FROM tasks WHERE id='aaaa'").fetchone()["status"]
+        self.assertEqual(status, "interrupted")
+        self.assertEqual(reopened.blocked(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
