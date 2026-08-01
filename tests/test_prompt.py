@@ -98,6 +98,35 @@ class PromptTest(unittest.TestCase):
         self.assertIn("forge CLI", BUILTIN_DEFINITION_OF_DONE)
         self.assertIn("name in your summary exactly what was missing", BUILTIN_DEFINITION_OF_DONE)
 
+    def test_the_escape_hatch_names_done_and_rules_out_blocked(self):
+        # The smoke test found two sessions that both finished the work and
+        # both stopped short of a PR for lack of a remote, and neither wrote
+        # "done" -- one asked a human in prose and burned its result file
+        # entirely, the other wrote "blocked" and posed the missing remote
+        # as a question. The old text said "stop after committing" and never
+        # named a status, so both readings were defensible. This pins the
+        # fix: the status to write is spelled out, and "blocked" is
+        # explicitly ruled out with the reason (nobody is present mid-run to
+        # answer).
+        self.assertIn("that is not blocked", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("no human is present mid-run", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn(
+            'write status "done" (not "blocked")', BUILTIN_DEFINITION_OF_DONE
+        )
+
+    def test_the_escape_hatch_closes_the_stop_and_ask_reading(self):
+        # PROTOCOL already says writing the result file is what ends the
+        # task and that nobody is watching -- the old escape-hatch text
+        # ("stop after committing") nonetheless read, to one session, as
+        # permission to stop and ask a human in prose instead of writing the
+        # file. The fix restates the point inline rather than assuming the
+        # reader connects it back to PROTOCOL.
+        self.assertIn("Write that result file and stop there", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn(
+            "do not instead end your turn by asking a human what to do next",
+            BUILTIN_DEFINITION_OF_DONE,
+        )
+
     def test_the_builtin_requires_a_new_branch_from_the_default(self):
         # "committed on a branch" was satisfiable by committing to main
         # itself, or by branching a second task off the first task's branch.
