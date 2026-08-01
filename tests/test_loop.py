@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from claudeloop import loop, status
-from claudeloop.config import Config
+from claudeloop.config import Config, JiraConfig
+from claudeloop.jira import JiraSource
 from claudeloop.loop import (
     FALLBACK_WAIT_S,
     MAX_WAIT_S,
@@ -25,7 +26,7 @@ from claudeloop.loop import (
     sleep_delay,
     total_cost,
 )
-from claudeloop.source import FileSource, task_id
+from claudeloop.source import FileSource, Task, task_id
 from claudeloop.state import State
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -770,6 +771,86 @@ class RunTaskResetsBranchBeforeEachTaskTest(unittest.TestCase):
                 stdin=subprocess.DEVNULL,
             ).stdout.strip()
             self.assertEqual(ahead, "1", f"{branch} should carry only its own commit")
+
+
+class BuildSourceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        self.state = State(self.tmp / "state.db")
+
+    def test_file_config_builds_a_file_source(self):
+        cfg = Config(repo=self.repo, tasks_file=self.tmp / "tasks.md", home=self.tmp)
+        source = loop.build_source(cfg, self.state)
+        self.assertIsInstance(source, FileSource)
+
+    def test_jira_config_builds_a_jira_source_wired_to_the_database(self):
+        cfg = Config(
+            repo=self.repo,
+            home=self.tmp,
+            source="jira",
+            jira=JiraConfig("https://example.atlassian.net", "me@example.com",
+                            "secret", "project = OPS", "In Progress", "Done"),
+        )
+        source = loop.build_source(cfg, self.state)
+        self.assertIsInstance(source, JiraSource)
+        self.assertEqual(source.jql, "project = OPS")
+        self.assertEqual(source.transition_start, "In Progress")
+        self.assertEqual(source.transition_done, "Done")
+        self.assertIs(source.state, self.state)
+
+
+class RecordingSource:
+    """A TaskSource that records the lifecycle calls run_task makes on it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def pending(self):
+        return []
+
+    def start(self, task):
+        self.calls.append(("start", task.id))
+
+    def mark(self, task, status, summary, cost=0.0):
+        self.calls.append(("mark", status, cost))
+
+
+class SourceLifecycleTest(unittest.TestCase):
+    """run_task must tell the source when work starts, and what it cost.
+
+    Same fake-CLI harness as MainLoopTest above: tests/fake_claude.sh writes
+    a done result with summary "fake work" and a total_cost_usd of 0.5.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tmp / "tasks.md",
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+
+    def test_start_comes_first_and_mark_carries_the_cost(self):
+        state = State(self.cfg.home / "state.db")
+        source = RecordingSource()
+        task = Task("abcd1234abcd1234", "OPS-1: do it", "jira", "OPS-1")
+        asyncio.run(loop.run_task(self.cfg, state, source, task))
+        self.assertEqual(source.calls[0], ("start", task.id))
+        self.assertEqual(source.calls[-1][:2], ("mark", "done"))
+        self.assertAlmostEqual(source.calls[-1][2], 0.5)
 
 
 if __name__ == "__main__":

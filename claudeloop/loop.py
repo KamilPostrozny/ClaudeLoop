@@ -17,6 +17,7 @@ from . import session
 from . import status as status_module
 from . import web
 from .config import DEFAULT_CONFIG, Config, load_config
+from .jira import JiraClient, JiraSource
 from .source import FileSource, Task, TaskSource
 from .state import State
 
@@ -343,6 +344,19 @@ def reset_to_default_branch(repo: Path) -> None:
         )
 
 
+def build_source(cfg: Config, state: State) -> TaskSource:
+    """The one place that knows which task source a config selects."""
+    if cfg.source == "jira" and cfg.jira is not None:
+        return JiraSource(
+            JiraClient(cfg.jira.site, cfg.jira.email, cfg.jira.token),
+            cfg.jira.jql,
+            state,
+            cfg.jira.transition_start,
+            cfg.jira.transition_done,
+        )
+    return FileSource(cfg.tasks_file)
+
+
 async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) -> dict:
     """Run one task to a terminal status, resuming through rate limits."""
     run_dir = cfg.home / "runs" / task.id
@@ -360,6 +374,10 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     # thread: it shells out to git synchronously, and this coroutine must
     # not block the event loop the heartbeat task and the dashboard share.
     await asyncio.to_thread(reset_to_default_branch, cfg.repo)
+    # Offloaded for the same reason as the git call above: under the Jira
+    # source this is a blocking HTTP round trip, and this coroutine shares
+    # its thread with the heartbeat and the dashboard.
+    await asyncio.to_thread(source.start, task)
     log.info("task %s starting: %s", task.id, task.text)
     status_module.set_status(
         state="running",
@@ -433,7 +451,9 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     state.finish_task(
         task.id, result["status"], result["summary"], cost, result.get("question")
     )
-    source.mark(task, result["status"], result["summary"])
+    await asyncio.to_thread(
+        source.mark, task, result["status"], result["summary"], cost
+    )
     log.info("task %s %s ($%.4f): %s", task.id, result["status"], cost, result["summary"])
     return result
 
@@ -444,11 +464,11 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
     `once` drains the tasks pending right now and returns, for tests.
     """
     state = State(cfg.home / "state.db")
-    source = FileSource(cfg.tasks_file)
+    source = build_source(cfg, state)
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         while True:
-            pending = source.pending()
+            pending = await asyncio.to_thread(source.pending)
             if not pending:
                 if once:
                     status_module.set_status(**IDLE_FIELDS)
