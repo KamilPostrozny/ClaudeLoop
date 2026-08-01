@@ -935,5 +935,126 @@ class SourceLifecycleTest(unittest.TestCase):
         self.assertAlmostEqual(source.calls[-1][2], 0.5)
 
 
+class ResumeWithAnswerTest(unittest.TestCase):
+    """Same fake-CLI fixture as MainLoopTest, deliberately duplicated rather
+    than inherited: subclassing a TestCase re-runs every parent test."""
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n")
+        self.cfg = Config(
+            repo=repo,
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+        self.args_out = self.tmp / "args.txt"
+        os.environ["FAKE_ARGS_OUT"] = str(self.args_out)
+        self.state = State(self.cfg.home / "state.db")
+        self.source = FileSource(self.tasks)
+        self.task = self.source.pending()[0]
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_ARGS_OUT", None)
+
+    def park(self) -> str:
+        """Leave the task parked with a known session, as a blocked run does."""
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.start_run(self.task.id, "session-that-asked", 0)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+        return "session-that-asked"
+
+    def args(self) -> str:
+        return self.args_out.read_text()
+
+    def test_a_resume_reuses_the_session_that_asked(self):
+        session = self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertIn(f"--resume {session}", self.args())
+        runs = self.state.db.execute(
+            "SELECT session_id FROM runs ORDER BY id").fetchall()
+        self.assertEqual([row["session_id"] for row in runs], [session, session])
+
+    def test_a_resume_sends_the_answer_prompt(self):
+        self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertIn("use EUR", self.args())
+        self.assertIn("check out the branch you were working on", self.args())
+
+    def test_a_resume_does_not_reset_the_working_tree(self):
+        called = []
+        with mock.patch.object(loop, "reset_to_default_branch",
+                               side_effect=lambda repo: called.append(repo)):
+            self.park()
+            asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                      resume_with="use EUR"))
+
+        self.assertEqual(called, [], "a resume must not check out the default branch")
+
+    def test_a_resume_does_not_re_fire_the_source_start_hook(self):
+        started = []
+        self.source.start = lambda task: started.append(task)
+        self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertEqual(started, [])
+
+    def test_a_normal_task_still_resets_the_tree_and_fires_start(self):
+        started = []
+        self.source.start = lambda task: started.append(task)
+        called = []
+        with mock.patch.object(loop, "reset_to_default_branch",
+                               side_effect=lambda repo: called.append(repo)):
+            asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertEqual(called, [self.cfg.repo])
+        self.assertEqual(started, [self.task])
+        self.assertNotIn("--resume", self.args())
+
+    def test_a_parked_task_with_no_session_starts_over_carrying_the_answer(self):
+        # A state.db from before this slice, or a task whose runs were pruned.
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertNotIn("--resume", self.args())
+        self.assertIn("use EUR", self.args())
+        self.assertIn("first thing", self.args())
+
+    def test_a_resumed_task_reaches_a_verdict_like_any_other(self):
+        self.park()
+
+        result = asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                           resume_with="use EUR"))
+
+        self.assertEqual(result["status"], "done")
+        row = self.state.db.execute("SELECT * FROM tasks WHERE id=?",
+                                    (self.task.id,)).fetchone()
+        self.assertEqual(row["status"], "done")
+
+
 if __name__ == "__main__":
     unittest.main()

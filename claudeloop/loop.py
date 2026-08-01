@@ -396,28 +396,54 @@ def build_source(cfg: Config, state: State) -> TaskSource:
     return FileSource(cfg.tasks_file)
 
 
-async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) -> dict:
-    """Run one task to a terminal status, resuming through rate limits."""
+async def run_task(
+    cfg: Config,
+    state: State,
+    source: TaskSource,
+    task: Task,
+    resume_with: str | None = None,
+) -> dict:
+    """Run one task to a terminal status, resuming through rate limits.
+
+    `resume_with` is a human's answer to a question this task parked on. It
+    continues the session that asked -- which still holds the repository
+    context and the name of the branch it created -- rather than starting the
+    task over.
+    """
     run_dir = cfg.home / "runs" / task.id
     result_path = run_dir / "result.json"
     run_dir.mkdir(parents=True, exist_ok=True)
     # A previous attempt's verdict would otherwise end this one immediately.
+    # For an answered task that previous verdict is the `blocked` result the
+    # session wrote before it parked, so this matters more, not less.
     result_path.unlink(missing_ok=True)
 
-    session_id = str(uuid.uuid4())
+    # None when there is no session to resume: a state.db from before S2b, or
+    # a task whose runs were pruned. The answer still gets through, only the
+    # context is lost.
+    resumed = state.last_session(task.id) if resume_with is not None else None
+    session_id = resumed or str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
-    # After start_task, so a fault here (reset_to_default_branch is
-    # defensive and shouldn't raise, but this is not load-bearing on that)
-    # lands against a real task row like every other crash, rather than
-    # main_loop's crash handler finding nothing to update. Offloaded to a
-    # thread: it shells out to git synchronously, and this coroutine must
-    # not block the event loop the heartbeat task and the dashboard share.
-    await asyncio.to_thread(reset_to_default_branch, cfg.repo)
-    # Offloaded for the same reason as the git call above: under the Jira
-    # source this is a blocking HTTP round trip, and this coroutine shares
-    # its thread with the heartbeat and the dashboard.
-    await asyncio.to_thread(source.start, task)
-    log.info("task %s starting: %s", task.id, task.text)
+    if resume_with is None:
+        # Skipped on a resume. reset_to_default_branch exists to stop task N
+        # inheriting task N-1's branch, and a resume is not a new task -- it
+        # is the same one, continuing. source.start would likewise re-fire
+        # transition_start against an issue already in that status; reopen()
+        # covers the source-side state instead.
+        #
+        # Offloaded to a thread: it shells out to git synchronously, and this
+        # coroutine must not block the event loop the heartbeat task and the
+        # dashboard share.
+        await asyncio.to_thread(reset_to_default_branch, cfg.repo)
+        # Offloaded for the same reason: under the Jira source this is a
+        # blocking HTTP round trip.
+        await asyncio.to_thread(source.start, task)
+    log.info(
+        "task %s %s: %s",
+        task.id,
+        "resuming with an answer" if resume_with is not None else "starting",
+        task.text,
+    )
     status_module.set_status(
         state="running",
         task_id=task.id,
@@ -433,8 +459,13 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     resume_count = 0  # plain nudges: no result, no rate limit
     wait_count = 0  # quota waits: bounded separately, see decide()
     cost = 0.0
-    prompt = task.text
-    resume = False
+    if resume_with is None:
+        prompt, resume = task.text, False
+    elif resumed:
+        prompt, resume = ANSWER_PROMPT.format(answer=resume_with), True
+    else:
+        prompt = FRESH_ANSWER_PROMPT.format(task=task.text, answer=resume_with)
+        resume = False
     while True:
         attempt = resume_count + wait_count
         run_id = state.start_run(task.id, session_id, attempt)
