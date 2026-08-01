@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from .config import Config
+from .prompt import compose
 
 MAX_LINE = 16 * 1024 * 1024
 """asyncio's default 64 KiB line buffer is too small: a single stream-json line
@@ -20,18 +21,6 @@ never happens if a grandchild (a hung MCP server, say) survives the kill and
 keeps the pipe's write end open -- bounded so that alone can't hang run()
 forever."""
 
-PROTOCOL = (
-    "You are running unattended under ClaudeLoop. Follow this repository's "
-    "CLAUDE.md end to end — it defines what \"done\" means here, including its "
-    "testing and verification requirements. Nobody is watching, so decide open "
-    "questions yourself rather than waiting. When the task is fully complete, "
-    "or provably cannot be completed, write a JSON object to the path in the "
-    "CLAUDELOOP_RESULT environment variable with keys \"status\" (one of "
-    "\"done\", \"failed\", \"blocked\"), \"summary\" (one paragraph on what you "
-    "did), and, when blocked, \"question\" (the one thing a human must answer). "
-    "Writing that file is what ends the task; do not stop without it."
-)
-
 log = logging.getLogger("claudeloop")
 
 
@@ -41,13 +30,35 @@ def build_command(cfg: Config, session_id: str, prompt: str, resume: bool) -> li
     # passing both is a conflict.
     command += ["--resume", session_id] if resume else ["--session-id", session_id]
     command += [
-        "--append-system-prompt", PROTOCOL,
+        "--append-system-prompt", compose(cfg),
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
         "--model", cfg.model,
     ]
+    # Each of these appears only when configured, so an unconfigured
+    # ClaudeLoop produces the same command line it always did.
+    if cfg.settings_file:
+        command += ["--settings", str(cfg.settings_file)]
+    if cfg.mcp_config:
+        command += ["--mcp-config", str(cfg.mcp_config)]
+    if cfg.strict_mcp:
+        command += ["--strict-mcp-config"]
     return command
+
+
+def child_env(cfg: Config, run_dir: Path) -> dict[str, str]:
+    """The environment the session runs in.
+
+    CLAUDELOOP_RESULT is merged last on purpose: a misconfigured session_env
+    must not be able to redirect the result file, which is the only thing the
+    loop uses to decide a task is finished.
+    """
+    return (
+        os.environ
+        | dict(cfg.session_env)
+        | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
+    )
 
 
 def _overrun_marker(limit: int) -> bytes:
@@ -116,7 +127,7 @@ async def run(
     nudge -- the caller never sees the timeout as an exception.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = os.environ | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
+    env = child_env(cfg, run_dir)
     process = await asyncio.create_subprocess_exec(
         *build_command(cfg, session_id, prompt, resume),
         cwd=cfg.repo,

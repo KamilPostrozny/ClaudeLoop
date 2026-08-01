@@ -11,6 +11,7 @@ from pathlib import Path
 
 from claudeloop import session
 from claudeloop.config import Config
+from claudeloop.prompt import compose
 
 FAKE = Path(__file__).parent / "fake_claude.sh"
 
@@ -46,11 +47,9 @@ class BuildCommandTest(unittest.TestCase):
         self.assertIn("--verbose", cmd)
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "bypassPermissions")
         self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet")
-        self.assertEqual(cmd[cmd.index("--append-system-prompt") + 1], session.PROTOCOL)
-
-    def test_protocol_names_the_result_variable_and_every_status(self):
-        for token in ("CLAUDELOOP_RESULT", "CLAUDE.md", "done", "failed", "blocked"):
-            self.assertIn(token, session.PROTOCOL)
+        self.assertEqual(
+            cmd[cmd.index("--append-system-prompt") + 1], compose(self.cfg)
+        )
 
 
 class RunTest(unittest.TestCase):
@@ -247,6 +246,63 @@ class OverlongLineTest(unittest.TestCase):
         self.assertIn("short line", text)
         self.assertIn("after the overrun", text)
         self.assertIn("exceeded", text)
+
+
+class SessionEnvironmentTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.run_dir = self.tmp / "run"
+
+    def cfg(self, **overrides) -> Config:
+        base = {
+            "repo": self.tmp / "repo",
+            "tasks_file": self.tmp / "tasks.md",
+            "home": self.tmp / "home",
+        }
+        return Config(**{**base, **overrides})
+
+    def test_no_new_flags_when_nothing_is_configured(self):
+        cmd = session.build_command(self.cfg(), "uuid-1", "do it", resume=False)
+        self.assertNotIn("--settings", cmd)
+        self.assertNotIn("--mcp-config", cmd)
+        self.assertNotIn("--strict-mcp-config", cmd)
+
+    def test_settings_flag_only_when_set(self):
+        cfg = self.cfg(settings_file=self.tmp / "settings.json")
+        cmd = session.build_command(cfg, "uuid-1", "do it", resume=False)
+        self.assertEqual(cmd[cmd.index("--settings") + 1], str(self.tmp / "settings.json"))
+
+    def test_mcp_config_flag_only_when_set(self):
+        cfg = self.cfg(mcp_config=self.tmp / "mcp.json")
+        cmd = session.build_command(cfg, "uuid-1", "do it", resume=False)
+        self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(self.tmp / "mcp.json"))
+
+    def test_strict_mcp_flag_only_when_set(self):
+        cfg = self.cfg(mcp_config=self.tmp / "mcp.json", strict_mcp=True)
+        cmd = session.build_command(cfg, "uuid-1", "do it", resume=False)
+        self.assertIn("--strict-mcp-config", cmd)
+
+    def test_the_composed_prompt_is_what_is_sent(self):
+        (self.tmp / "repo" / "CLAUDE.md").write_text("# rules")
+        cfg = self.cfg()
+        cmd = session.build_command(cfg, "uuid-1", "do it", resume=False)
+        sent = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertEqual(sent, compose(cfg))
+        self.assertIn("CLAUDE.md", sent)
+
+    def test_session_env_reaches_the_child(self):
+        cfg = self.cfg(session_env={"GH_TOKEN": "ghp_abc"})
+        self.assertEqual(session.child_env(cfg, self.run_dir)["GH_TOKEN"], "ghp_abc")
+
+    def test_the_ambient_environment_is_preserved(self):
+        env = session.child_env(self.cfg(), self.run_dir)
+        self.assertEqual(env["PATH"], os.environ["PATH"])
+
+    def test_claudeloop_result_wins_over_session_env(self):
+        cfg = self.cfg(session_env={"CLAUDELOOP_RESULT": "/tmp/hijacked.json"})
+        env = session.child_env(cfg, self.run_dir)
+        self.assertEqual(env["CLAUDELOOP_RESULT"], str(self.run_dir / "result.json"))
 
 
 if __name__ == "__main__":
