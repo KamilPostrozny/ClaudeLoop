@@ -45,6 +45,25 @@ disjunct is not defensive padding, it is the only correct idiom."""
 _ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
 
 
+def _in_string(text: str) -> bool:
+    """Whether `text` ends inside a quoted value.
+
+    JQL uses both " and ' as string delimiters, so counting them
+    independently is wrong: an apostrophe inside a double-quoted value
+    (`status != "Won't Do"`) makes the double-quote count look unbalanced on
+    its own even though nothing is actually open. Tracking the single
+    delimiter that is currently open handles both quote characters and
+    values that mix them. Escaped quotes inside a value remain unhandled.
+    """
+    quote = None
+    for ch in text:
+        if quote is None and ch in "\"'":
+            quote = ch
+        elif ch == quote:
+            quote = None
+    return quote is not None
+
+
 def _split_order_by(jql: str) -> tuple[str, str]:
     """Split on the first ORDER BY that is not inside a quoted value.
 
@@ -54,7 +73,7 @@ def _split_order_by(jql: str) -> tuple[str, str]:
     """
     for match in _ORDER_BY.finditer(jql):
         before = jql[:match.start()]
-        if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
+        if not _in_string(before):
             return before, jql[match.end():]
     return jql, ""
 
@@ -126,8 +145,14 @@ class JiraClient:
             request.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             raw = response.read()
-        # 204 with no body is how a successful PUT /issue/{key} answers.
-        return json.loads(raw) if raw else {}
+        # 204 with no body is how a successful PUT /issue/{key} answers. A
+        # 200 whose body is JSON but not a JSON *object* -- null, a list, a
+        # bare string, the shape an SSO interstitial or a misrouting gateway
+        # answers with -- must not reach a caller that assumes dict, or
+        # pending()'s data.get("issues") raises AttributeError somewhere
+        # main_loop does not have wrapped in a try.
+        parsed = json.loads(raw) if raw else {}
+        return parsed if isinstance(parsed, dict) else {}
 
     def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
         for attempt in range(self.retries):
@@ -298,14 +323,17 @@ class JiraSource:
         try:
             offered = self.client.transitions(key)
             match = next(
-                (t for t in offered if str(t.get("name", "")).casefold() == name.casefold()),
+                (t for t in offered
+                 if isinstance(t, dict) and str(t.get("name", "")).casefold() == name.casefold()),
                 None,
             )
             if match is None:
                 log.warning(
                     "%s: Jira does not offer a %r transition from its current"
                     " status (offered: %s) -- leaving the issue where it is",
-                    key, name, ", ".join(str(t.get("name")) for t in offered) or "none",
+                    key, name,
+                    ", ".join(str(t.get("name")) for t in offered if isinstance(t, dict))
+                    or "none",
                 )
                 return
             transition_id = match.get("id")

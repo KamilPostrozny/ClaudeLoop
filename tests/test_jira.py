@@ -96,6 +96,15 @@ class JiraClientTest(unittest.TestCase):
         with self.assertRaises(JiraError):
             client.search("project = OPS")
 
+    def test_a_non_dict_json_body_returns_empty_rather_than_raising(self):
+        # A 200 whose body is a JSON list (an SSO interstitial, a gateway
+        # answering something that isn't Jira's JSON) must not reach a
+        # caller that assumes dict -- pending() does data.get("issues") on
+        # whatever this returns, and an AttributeError there escapes past
+        # main_loop's try/except.
+        client = self.client({f"POST {SEARCH_PATH}": (200, ["not", "a", "dict"])})
+        self.assertEqual(client.search("project = OPS"), {})
+
 
 class ComposeJqlTest(unittest.TestCase):
     def test_appends_the_guard_to_a_plain_query(self):
@@ -138,6 +147,23 @@ class ComposeJqlTest(unittest.TestCase):
 
     def test_an_empty_query_yields_the_guard_alone(self):
         self.assertEqual(compose_jql("   "), GUARD)
+
+    def test_an_apostrophe_inside_a_double_quoted_value_still_splits(self):
+        # Counting " and ' independently sees an "unbalanced" double quote
+        # here (the ' inside "Won't Do" throws off nothing, but the old
+        # implementation checked both counts were even, and this string's
+        # apostrophe count is odd) -- so ORDER BY was never recognised and
+        # ended up composed inside the parenthesised WHERE clause.
+        composed = compose_jql(
+            'project = "OPS" AND status != "Won\'t Do" ORDER BY created ASC'
+        )
+        self.assertTrue(composed.endswith(" ORDER BY created ASC"), composed)
+        self.assertNotIn("ORDER BY", composed[:composed.index(" ORDER BY created ASC")])
+
+    def test_an_apostrophe_in_a_name_still_splits(self):
+        composed = compose_jql("assignee = \"o'brien\" ORDER BY created")
+        self.assertTrue(composed.endswith(" ORDER BY created"), composed)
+        self.assertIn("assignee = \"o'brien\"", composed)
 
 
 class TaskTextTest(unittest.TestCase):
@@ -322,6 +348,13 @@ class JiraSourceTest(unittest.TestCase):
         with self.assertLogs("claudeloop", level="WARNING"):
             source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
 
+    def test_pending_survives_a_non_dict_json_body(self):
+        # Same shape as an SSO interstitial answering 200 with JSON that
+        # isn't Jira's: JiraClient now folds it to {}, and pending() must
+        # treat that like an empty backlog rather than raising.
+        source = self.source({f"POST {SEARCH_PATH}": (200, ["nope"])})
+        self.assertEqual(source.pending(), [])
+
     def test_pending_survives_a_malformed_payload(self):
         source = self.source({f"POST {SEARCH_PATH}": (200, {"issues": "not a list"})})
         with self.assertLogs("claudeloop", level="WARNING"):
@@ -341,6 +374,25 @@ class JiraSourceTest(unittest.TestCase):
                              state=BrokenState())
         with self.assertLogs("claudeloop", level="WARNING"):
             self.assertEqual(len(source.pending()), 2)
+
+    def test_a_non_dict_entry_among_offered_transitions_does_not_raise(self):
+        # A transitions payload with one malformed entry alongside a valid
+        # one must still find and use the valid one -- an AttributeError
+        # here would escape past `except JiraError` in _transition, out of
+        # mark(), after the true verdict was already written, and get
+        # overwritten by main_loop's crash handler with status 'failed' and
+        # cost 0.0.
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [
+                "not a dict", {"id": "31", "name": "Done"}]}),
+            "POST /issue/OPS-1/transitions": (204, {}),
+        }, transition_done="Done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        source.mark(task, "done", "went fine", 0.5)
+        _, _, move = self.fake.requests[-1]
+        self.assertEqual(move, {"transition": {"id": "31"}})
 
     def test_a_transition_without_an_id_does_not_raise(self):
         source = self.source({
@@ -363,11 +415,15 @@ class CliTest(unittest.TestCase):
         self.fake = FakeJira(routes)
         self.addCleanup(self.fake.close)
         path = self.tmp / "config.toml"
+        # A real config's site is always https:// (config.py now refuses
+        # anything else). FakeJira only ever speaks plain http, so run_cli
+        # below points the constructed client at the fake's real address --
+        # this string just has to pass load_config's scheme check.
         path.write_text(
             f'repo = "{self.repo}"\n'
             'source = "jira"\n'
             "[jira]\n"
-            f'site = "{self.fake.url}"\n'
+            'site = "https://fake.invalid"\n'
             'email = "me@example.com"\n'
             'token = "secret"\n'
             'jql = "project = OPS"\n'
@@ -377,9 +433,17 @@ class CliTest(unittest.TestCase):
 
     def run_cli(self, args, stdin=""):
         out = io.StringIO()
+        fake_url = self.fake.url
+
+        def client_pointed_at_the_fake(site, email, token, *a, **kw):
+            return JiraClient(fake_url, email, token, *a, **kw)
+
         with contextlib.redirect_stdout(out):
             with unittest.mock.patch("sys.stdin", io.StringIO(stdin)):
-                code = main(args)
+                with unittest.mock.patch(
+                    "claudeloop.jira.JiraClient", client_pointed_at_the_fake
+                ):
+                    code = main(args)
         return code, out.getvalue()
 
     def test_show_prints_the_ticket_and_its_comments(self):
