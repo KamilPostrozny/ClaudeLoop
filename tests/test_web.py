@@ -113,14 +113,24 @@ class StateRouteTest(WebTestBase):
         payload = self.get_json("/api/state")
         self.assertTrue(payload["status"]["stale"])
 
-    def test_pending_comes_from_the_task_file(self):
+    def test_pending_comes_from_the_status_snapshot(self):
+        # Not the task file: under the Jira source cfg.tasks_file is None, so
+        # web must never re-read a task source itself. The loop publishes the
+        # list it already computed onto the snapshot each poll.
+        status.set_status(pending=(("aaa", "first thing"), ("bbb", "second thing")))
         payload = self.get_json("/api/state")
-        self.assertEqual([t["text"] for t in payload["pending"]], ["first thing"])
+        self.assertEqual(
+            [t["text"] for t in payload["pending"]], ["first thing", "second thing"]
+        )
 
     def test_the_running_task_is_not_listed_as_pending(self):
         # Otherwise the same task shows as both in-flight (the beacon) and
         # queued (position 01), and inflates "Pending N" for the whole run.
-        status.set_status(state="running", task_id=task_id("first thing"))
+        status.set_status(
+            state="running",
+            task_id=task_id("first thing"),
+            pending=((task_id("first thing"), "first thing"),),
+        )
         payload = self.get_json("/api/state")
         self.assertEqual(payload["pending"], [])
 
@@ -140,6 +150,35 @@ class StateRouteTest(WebTestBase):
 
     def test_a_missing_database_is_not_an_error(self):
         self.assertEqual(self.get_json("/api/state")["completed"], [])
+
+
+class JiraSourceStateTest(unittest.TestCase):
+    """Regression: under source = "jira", cfg.tasks_file is None. api_state
+    used to build a FileSource(None) to compute pending, and
+    FileSource.pending() only catches FileNotFoundError -- so this raised
+    AttributeError on every request and took the whole dashboard down
+    whenever Jira was the backlog. Fails against the pre-fix code."""
+
+    def setUp(self):
+        status.reset()
+        self.addCleanup(status.reset)
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=None,
+            home=self.tmp / "home",
+            source="jira",
+        )
+
+    def test_api_state_does_not_raise_and_pending_is_empty(self):
+        payload = web.api_state(self.cfg)
+        self.assertEqual(payload["pending"], [])
+
+    def test_pending_published_by_the_loop_still_comes_through(self):
+        status.set_status(pending=(("abc", "do the jira thing"),))
+        payload = web.api_state(self.cfg)
+        self.assertEqual([t["text"] for t in payload["pending"]], ["do the jira thing"])
 
 
 class TaskRouteTest(WebTestBase):

@@ -403,6 +403,29 @@ class StatusWiringTest(unittest.TestCase):
         self.assertEqual(self.status.current.state, "error")
         self.assertIn("claude", self.status.current.last_error or "")
 
+    def test_pending_is_published_on_the_snapshot_and_cleared_on_idle(self):
+        # web reads pending off the status snapshot instead of re-reading the
+        # task source, so main_loop must publish the whole source-order list
+        # -- including the task about to run -- at some point during the run,
+        # and clear it once the backlog is drained.
+        seen: list[tuple[tuple[str, str], ...]] = []
+
+        real_set_status = self.status.set_status
+
+        def recording_set_status(**changes):
+            result = real_set_status(**changes)
+            seen.append(result.pending)
+            return result
+
+        with mock.patch("claudeloop.status.set_status", side_effect=recording_set_status):
+            asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        # Both tasks, in source order, on the same snapshot -- the first
+        # poll's pending list, before either task has run.
+        texts_by_snapshot = [tuple(text for _id, text in pending) for pending in seen]
+        self.assertIn(("first thing", "second thing"), texts_by_snapshot)
+        self.assertEqual(self.status.current.pending, ())
+
 
 class LatestRateLimitTest(unittest.TestCase):
     def test_returns_the_last_one(self):

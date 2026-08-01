@@ -195,6 +195,7 @@ IDLE_FIELDS = {
     "session_id": None,
     "started_at": None,
     "wait_until": None,
+    "pending": (),
 }
 """set_status carries unnamed fields over, so going idle has to clear the
 task fields explicitly or the dashboard shows a task that finished an hour
@@ -478,6 +479,12 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                 continue
             # Re-read after every task: the file may have been edited meanwhile.
             task = pending[0]
+            # Published for the dashboard: web reads this off the snapshot
+            # rather than re-reading the task source itself, since under the
+            # Jira source that would be a network call on the web thread.
+            status_module.set_status(
+                pending=tuple((t.id, t.text) for t in pending)
+            )
             try:
                 await run_task(cfg, state, source, task)
             except Exception as error:
