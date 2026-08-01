@@ -329,13 +329,19 @@ class SessionEnvironmentTest(unittest.TestCase):
 
 
 class PythonPathTest(unittest.TestCase):
+    """PYTHONPATH is only ClaudeLoop's business under source = "jira" -- that
+    is the only source whose sessions call `python -m claudeloop.jira`. Every
+    cfg() here is source="jira" on purpose; FileSourcePythonPathTest below
+    covers the source = "file" case these used to also (wrongly) cover."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.repo = self.tmp / "repo"
         (self.repo / ".git").mkdir(parents=True)
 
     def cfg(self, **kwargs):
-        return Config(repo=self.repo, tasks_file=self.tmp / "t.md", **kwargs)
+        return Config(repo=self.repo, tasks_file=self.tmp / "t.md",
+                      source="jira", **kwargs)
 
     def test_the_package_parent_is_importable_from_the_session(self):
         env = session.child_env(self.cfg(), self.tmp / "run")
@@ -375,6 +381,36 @@ class PythonPathTest(unittest.TestCase):
         self.assertEqual(Path(parts[0]), Path(session.PACKAGE_PARENT))
         self.assertIn("/opt/theirs", parts)
         self.assertNotIn("/opt/ambient", parts)
+
+
+class FileSourcePythonPathTest(unittest.TestCase):
+    """source = "file" sessions get no ClaudeLoop-added PYTHONPATH: they have
+    no use for `python -m claudeloop.jira`, and putting ClaudeLoop's own repo
+    root -- which contains an importable tests/ package -- on the import path
+    of a session working in an unrelated repository is just contamination."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg(self, **kwargs):
+        return Config(repo=self.repo, tasks_file=self.tmp / "t.md", **kwargs)
+
+    def test_the_package_parent_is_not_added(self):
+        env = session.child_env(self.cfg(), self.tmp / "run")
+        self.assertNotIn(session.PACKAGE_PARENT, env.get("PYTHONPATH", ""))
+
+    def test_the_ambient_pythonpath_is_untouched(self):
+        with patch.dict(os.environ, {"PYTHONPATH": "/opt/ambient"}):
+            env = session.child_env(self.cfg(), self.tmp / "run")
+        self.assertEqual(env["PYTHONPATH"], "/opt/ambient")
+
+    def test_an_absent_ambient_pythonpath_stays_absent(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTHONPATH", None)
+            env = session.child_env(self.cfg(), self.tmp / "run")
+        self.assertNotIn("PYTHONPATH", env)
 
 
 if __name__ == "__main__":

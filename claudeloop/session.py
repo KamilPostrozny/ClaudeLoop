@@ -62,14 +62,20 @@ def child_env(cfg: Config, run_dir: Path) -> dict[str, str]:
     must not be able to redirect the result file, which is the only thing the
     loop uses to decide a task is finished.
 
-    PYTHONPATH is prepended rather than replaced, so an operator who set one
-    in [session_env] for the repository's own needs keeps it.
+    PYTHONPATH only gets ClaudeLoop's own package parent prepended under the
+    Jira source, which is the only one whose sessions call `python -m
+    claudeloop.jira`. Under source = "file" this would otherwise put
+    ClaudeLoop's repo root -- which contains an importable tests/ package --
+    on the import path of a session working in an unrelated repository.
+    Prepended rather than replaced, so an operator who set one in
+    [session_env] for the repository's own needs keeps it.
     """
     env = os.environ | dict(cfg.session_env)
-    inherited = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        os.pathsep.join([PACKAGE_PARENT, inherited]) if inherited else PACKAGE_PARENT
-    )
+    if cfg.source == "jira":
+        inherited = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            os.pathsep.join([PACKAGE_PARENT, inherited]) if inherited else PACKAGE_PARENT
+        )
     return env | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
 
 
