@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 
 from claudeloop.jira import (
@@ -263,6 +264,10 @@ class JiraSourceTest(unittest.TestCase):
         task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
         with self.assertLogs("claudeloop", level="WARNING"):
             source.mark(task, "done", "went fine")  # must not raise
+        # The label failing must not stop the comment: the label write and
+        # the comment are independent, and only the label is load-bearing.
+        self.assertIn(("POST", "/issue/OPS-1/comment"),
+                       [(m, p) for m, p, _ in self.fake.requests])
 
     def test_a_transition_jira_does_not_offer_is_a_warning_not_a_failure(self):
         source = self.source({
@@ -302,3 +307,33 @@ class JiraSourceTest(unittest.TestCase):
         source = JiraSource(client, "project = OPS", transition_start="In Progress")
         with self.assertLogs("claudeloop", level="WARNING"):
             source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
+
+    def test_pending_survives_a_malformed_payload(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, {"issues": "not a list"})})
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual(source.pending(), [])
+
+    def test_pending_skips_an_issue_of_the_wrong_shape(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, {"issues": [
+            "junk", {"key": "OPS-7", "fields": None}]})})
+        self.assertEqual([t.source_ref for t in source.pending()], ["OPS-7"])
+
+    def test_pending_survives_a_database_that_will_not_answer(self):
+        # a state whose terminal_ids() raises sqlite3.Error
+        class BrokenState:
+            def terminal_ids(self):
+                raise sqlite3.OperationalError("database is locked")
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+                             state=BrokenState())
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual(len(source.pending()), 2)
+
+    def test_a_transition_without_an_id_does_not_raise(self):
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [{"name": "Done"}]}),
+        }, transition_done="Done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.mark(task, "done", "went fine")

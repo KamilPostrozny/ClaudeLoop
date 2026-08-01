@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import re
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -204,9 +205,30 @@ class JiraSource:
             # main_loop's task handler on every poll.
             log.warning("could not read the Jira backlog (%s); retrying later", error)
             return []
-        done = self.state.terminal_ids() if self.state is not None else set()
+        done = set()
+        if self.state is not None:
+            try:
+                done = self.state.terminal_ids()
+            except sqlite3.Error as error:
+                # A locked or corrupt database is not a reason to crash the
+                # loop -- it just means this poll has no backstop against a
+                # label write that never landed.
+                log.warning(
+                    "could not read state.db terminal ids (%s); continuing"
+                    " without that backstop this poll", error,
+                )
+                done = set()
+        issues = data.get("issues")
+        if not isinstance(issues, list):
+            log.warning(
+                "Jira returned no issues list (got %s); treating the"
+                " backlog as empty", type(issues).__name__,
+            )
+            return []
         tasks = []
-        for issue in data.get("issues", []):
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
             key = issue.get("key")
             if not key:
                 continue
@@ -220,7 +242,9 @@ class JiraSource:
                     " failed to write", key,
                 )
                 continue
-            fields = issue.get("fields") or {}
+            fields = issue.get("fields")
+            if not isinstance(fields, dict):
+                fields = {}
             tasks.append(Task(
                 identifier,
                 task_text(key, fields.get("summary"), fields.get("description")),
@@ -276,6 +300,13 @@ class JiraSource:
                     key, name, ", ".join(str(t.get("name")) for t in offered) or "none",
                 )
                 return
-            self.client.transition(key, match["id"])
+            transition_id = match.get("id")
+            if transition_id is None:
+                log.warning(
+                    "%s: Jira's %r transition has no id in its payload --"
+                    " leaving the issue where it is", key, name,
+                )
+                return
+            self.client.transition(key, transition_id)
         except JiraError as error:
             log.warning("could not transition %s to %r (%s)", key, name, error)
