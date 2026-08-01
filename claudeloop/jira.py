@@ -37,6 +37,20 @@ disjunct is not defensive padding, it is the only correct idiom."""
 _ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
 
 
+def _split_order_by(jql: str) -> tuple[str, str]:
+    """Split on the first ORDER BY that is not inside a quoted value.
+
+    JQL string values can contain the words "order by" -- splitting on
+    one silently produces an unbalanced quote, which Jira answers with a
+    400 and the loop reads as an empty backlog.
+    """
+    for match in _ORDER_BY.finditer(jql):
+        before = jql[:match.start()]
+        if before.count('"') % 2 == 0 and before.count("'") % 2 == 0:
+            return before, jql[match.end():]
+    return jql, ""
+
+
 def compose_jql(operator_jql: str) -> str:
     """Splice the guard into the operator's query, keeping their ordering.
 
@@ -44,11 +58,9 @@ def compose_jql(operator_jql: str) -> str:
     gets an infinite loop over one finished ticket, so this must not be
     something they can leave out.
     """
-    # ponytail: a literal "ORDER BY" inside a quoted JQL string value would
-    # split wrongly. Full tokenisation if that ever shows up in practice.
-    parts = _ORDER_BY.split(operator_jql, maxsplit=1)
-    where = parts[0].strip()
-    order = parts[1].strip() if len(parts) > 1 else ""
+    where, order = _split_order_by(operator_jql)
+    where = where.strip()
+    order = order.strip()
     composed = f"({where}) AND {GUARD}" if where else GUARD
     return f"{composed} ORDER BY {order}" if order else composed
 

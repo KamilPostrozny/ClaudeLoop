@@ -1,7 +1,7 @@
 import unittest
 
 from claudeloop.jira import (
-    BLOCKED_LABEL, DONE_LABEL, SEARCH_PATH, JiraClient, JiraError,
+    BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
     closing_comment, compose_jql, task_text,
 )
 
@@ -109,6 +109,20 @@ class ComposeJqlTest(unittest.TestCase):
         self.assertTrue(composed.startswith("(labels IS EMPTY"), composed)
         self.assertTrue(composed.endswith(" ORDER BY created"), composed)
 
+    def test_an_order_by_inside_a_quoted_value_does_not_split(self):
+        composed = compose_jql('summary ~ "please order by priority"')
+        self.assertIn('summary ~ "please order by priority"', composed)
+        self.assertEqual(composed.count('"') % 2, 0)
+        self.assertNotIn("ORDER BY", composed[composed.index("labels IS EMPTY"):])
+
+    def test_a_real_ordering_after_a_quoted_one_still_splits(self):
+        composed = compose_jql('summary ~ "order by x" ORDER BY created ASC')
+        self.assertTrue(composed.endswith(" ORDER BY created ASC"), composed)
+        self.assertIn('summary ~ "order by x"', composed)
+
+    def test_an_empty_query_yields_the_guard_alone(self):
+        self.assertEqual(compose_jql("   "), GUARD)
+
 
 class TaskTextTest(unittest.TestCase):
     def test_key_leads_so_the_session_can_find_it(self):
@@ -122,6 +136,9 @@ class TaskTextTest(unittest.TestCase):
 
     def test_a_whitespace_only_description_counts_as_absent(self):
         self.assertEqual(task_text("OPS-2", "Fix it", "   \n  "), "OPS-2: Fix it")
+
+    def test_task_text_tolerates_a_missing_summary(self):
+        self.assertEqual(task_text("OPS-3", None, None), "OPS-3:")
 
 
 class ClosingCommentTest(unittest.TestCase):
