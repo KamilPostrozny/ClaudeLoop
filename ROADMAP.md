@@ -149,6 +149,20 @@ non-obvious interactions between them.
   authors, different lifetimes. That adds a fourth prompt layer, slotting below
   the operator layer and above the definition of done, since it is ClaudeLoop's
   advice about its own tooling and the operator must be able to override it.
+- **`superpowers` is in the proposed set, and its usage file carries a
+  question-discipline rule.** Its `brainstorming` skill asks the human one
+  question at a time, which is right at a keyboard and wrong under an
+  orchestrator where nobody answers. The rule to ship: *if the answer lives in
+  the repository, the docs, the roadmap or the git history, go read it and
+  never ask; ask only when the answer lives solely in the operator's head —
+  priorities, money, who is watching, what "good" means here.* Delegating to a
+  subagent is for breadth, not for dodging a question: a fresh agent starts
+  cold, costs real money to re-derive context the asking agent already has,
+  and cannot answer a preference question anyway. This is written as plugin
+  usage instructions in config, not as an edit to the plugin's own files —
+  nothing in the addon image may depend on a patched plugin cache. Its worth
+  was measured on this repository: brainstorming S2b asked five questions and
+  two were answerable from `CLAUDE.md` and `ROADMAP.md` alone.
 
 ### S4 — Home Assistant OS addon
 
