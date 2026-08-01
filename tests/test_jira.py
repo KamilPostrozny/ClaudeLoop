@@ -1,9 +1,14 @@
+import contextlib
+import io
 import sqlite3
+import tempfile
 import unittest
+import unittest.mock
+from pathlib import Path
 
 from claudeloop.jira import (
     BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
-    JiraSource, closing_comment, compose_jql, task_text,
+    JiraSource, closing_comment, compose_jql, main, task_text,
 )
 from claudeloop.source import Task, task_id
 
@@ -337,3 +342,90 @@ class JiraSourceTest(unittest.TestCase):
         task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
         with self.assertLogs("claudeloop", level="WARNING"):
             source.mark(task, "done", "went fine")
+
+
+class CliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def configured(self, routes):
+        self.fake = FakeJira(routes)
+        self.addCleanup(self.fake.close)
+        path = self.tmp / "config.toml"
+        path.write_text(
+            f'repo = "{self.repo}"\n'
+            'source = "jira"\n'
+            "[jira]\n"
+            f'site = "{self.fake.url}"\n'
+            'email = "me@example.com"\n'
+            'token = "secret"\n'
+            'jql = "project = OPS"\n'
+        )
+        path.chmod(0o600)
+        return path
+
+    def run_cli(self, args, stdin=""):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with unittest.mock.patch("sys.stdin", io.StringIO(stdin)):
+                code = main(args)
+        return code, out.getvalue()
+
+    def test_show_prints_the_ticket_and_its_comments(self):
+        config = self.configured({
+            "GET /issue/OPS-1": (200, fixture("issue")),
+            "GET /issue/OPS-1/comment": (200, fixture("comments")),
+        })
+        code, out = self.run_cli(["--config", str(config), "show", "OPS-1"])
+        self.assertEqual(code, 0)
+        self.assertIn("OPS-1", out)
+        issue_summary = fixture("issue")["fields"]["summary"]
+        self.assertIn(issue_summary, out)
+
+    def test_comment_posts_the_body_from_stdin(self):
+        config = self.configured({"POST /issue/OPS-1/comment": (201, {})})
+        code, _ = self.run_cli(["--config", str(config), "comment", "OPS-1", "-"],
+                               stdin="found the cause: a stale lockfile\n")
+        self.assertEqual(code, 0)
+        _, path, payload = self.fake.requests[0]
+        self.assertEqual(path, "/issue/OPS-1/comment")
+        self.assertEqual(payload["body"], "found the cause: a stale lockfile")
+
+    def test_comment_accepts_a_literal_body(self):
+        config = self.configured({"POST /issue/OPS-1/comment": (201, {})})
+        code, _ = self.run_cli(["--config", str(config), "comment", "OPS-1", "hello"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.requests[0][2]["body"], "hello")
+
+    def test_an_empty_comment_is_refused_without_calling_jira(self):
+        config = self.configured({"POST /issue/OPS-1/comment": (201, {})})
+        code, _ = self.run_cli(["--config", str(config), "comment", "OPS-1", "-"],
+                               stdin="   \n")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_jira_error_exits_non_zero(self):
+        config = self.configured({"GET /issue/OPS-9": (404, {"errorMessages": ["gone"]})})
+        code, _ = self.run_cli(["--config", str(config), "show", "OPS-9"])
+        self.assertNotEqual(code, 0)
+
+    def test_a_trailing_colon_on_the_key_is_stripped(self):
+        # The prompt layer tells the session the key is the part before the
+        # colon in the task text ("OPS-42: Fix the widget" -> OPS-42), but a
+        # literal-minded session may still pass "OPS-1:" with the colon
+        # attached. This must hit /issue/OPS-1, not /issue/OPS-1:.
+        config = self.configured({
+            "GET /issue/OPS-1": (200, fixture("issue")),
+            "GET /issue/OPS-1/comment": (200, fixture("comments")),
+        })
+        code, _ = self.run_cli(["--config", str(config), "show", "OPS-1: "])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.requests[0][:2], ("GET", "/issue/OPS-1"))
+
+    def test_comment_strips_a_trailing_colon_from_the_key_too(self):
+        config = self.configured({"POST /issue/OPS-1/comment": (201, {})})
+        code, _ = self.run_cli(["--config", str(config), "comment", "OPS-1:", "hello"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.fake.requests[0][1], "/issue/OPS-1/comment")

@@ -7,15 +7,19 @@ and takes a plain-string comment body, where v3 returns and demands ADF JSON.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import json
 import logging
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
+from .config import DEFAULT_CONFIG, load_config
 from .source import Task, task_id
 
 log = logging.getLogger("claudeloop")
@@ -310,3 +314,87 @@ class JiraSource:
             self.client.transition(key, transition_id)
         except JiraError as error:
             log.warning("could not transition %s to %r (%s)", key, name, error)
+
+
+def _normalize_key(key: str) -> str:
+    """Strip a trailing colon (and surrounding whitespace) from an issue key.
+
+    The prompt layer tells the session the key is the part before the colon
+    in the task text ("OPS-42: Fix the widget" -> OPS-42), but a
+    literal-minded session may still pass "OPS-42:" with the colon attached.
+    Both subcommands go through this so neither hits /issue/OPS-42: instead
+    of /issue/OPS-42.
+    """
+    return key.strip().rstrip(":").strip()
+
+
+def _client(config_path) -> JiraClient:
+    cfg = load_config(config_path)
+    if cfg.jira is None:
+        raise SystemExit(
+            f'{config_path}: no [jira] table -- this command only works when'
+            ' source = "jira"'
+        )
+    return JiraClient(cfg.jira.site, cfg.jira.email, cfg.jira.token)
+
+
+def _show(client: JiraClient, key: str) -> None:
+    issue = client.issue(key)
+    fields = issue.get("fields") or {}
+    status = ((fields.get("status") or {}).get("name")) or "unknown"
+    labels = ", ".join(fields.get("labels") or []) or "none"
+    print(f"{key}  [{status}]  labels: {labels}")
+    print(fields.get("summary") or "")
+    description = (fields.get("description") or "").strip()
+    if description:
+        print()
+        print(description)
+    comments = (client.comments(key).get("comments")) or []
+    if comments:
+        print("\n--- comments ---")
+    for comment in comments:
+        author = ((comment.get("author") or {}).get("displayName")) or "someone"
+        print(f"\n[{comment.get('created', '')} {author}]")
+        print((comment.get("body") or "").strip())
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The session's own Jira access: read a ticket, say something on it.
+
+    Deliberately two subcommands. Transitions and labels belong to the
+    orchestrator, so a confused session cannot park a ticket somewhere the
+    operator did not expect.
+    """
+    parser = argparse.ArgumentParser(prog="python -m claudeloop.jira")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    show = sub.add_parser("show", help="print an issue and its comments")
+    show.add_argument("key")
+
+    comment = sub.add_parser("comment", help="post a comment")
+    comment.add_argument("key")
+    comment.add_argument("body", nargs="?", default="-",
+                         help="the comment body, or - to read it from stdin")
+
+    args = parser.parse_args(argv)
+    key = _normalize_key(args.key)
+    client = _client(Path(args.config))
+    try:
+        if args.command == "show":
+            _show(client, key)
+            return 0
+        body = (sys.stdin.read() if args.body == "-" else args.body).strip()
+        if not body:
+            print("refusing to post an empty comment", file=sys.stderr)
+            return 2
+        client.add_comment(key, body)
+        print(f"commented on {key}")
+        return 0
+    except JiraError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
