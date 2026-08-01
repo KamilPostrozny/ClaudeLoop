@@ -44,6 +44,75 @@ must be `chmod 600`; ClaudeLoop refuses to load it otherwise.
 One instance serves one repository. For a second repository, run a second
 instance with its own config.
 
+## Taking tasks from Jira
+
+Instead of a checklist, ClaudeLoop can take its backlog from a Jira Cloud
+project. `source` selects the task source, `"file"` or `"jira"`, and defaults
+to `"file"`. `tasks_file` is required only under `source = "file"`; `[jira]`
+is required only under `source = "jira"`.
+
+```toml
+source = "jira"
+
+[jira]
+site    = "https://yourcompany.atlassian.net"   # no /jira suffix
+email   = "you@yourcompany.com"
+token   = "ATATT..."          # id.atlassian.com -> Security -> API tokens
+project = "OPS"               # which project to take work from
+status  = "To Do"             # optional; the exact status name on your board
+transition_start = "In Progress"   # optional; skipped if unset or unavailable
+transition_done  = "Done"          # optional; same
+```
+
+That composes `project = "OPS" AND status = "To Do" ORDER BY created ASC`. If
+you want something the two keys cannot say — an assignee, a label, a priority
+ordering — give `jql` instead and it wins outright:
+
+```toml
+[jira]
+site  = "https://yourcompany.atlassian.net"
+email = "you@yourcompany.com"
+token = "ATATT..."
+jql   = "project = OPS AND assignee = currentUser() ORDER BY priority DESC"
+```
+
+Jira refuses a query with no restriction in it at all, so a hand-written
+`jql` must narrow something.
+
+Each matching issue becomes one task, whose text is the issue key, its
+summary and its description. When a task starts, ClaudeLoop moves the issue
+to `transition_start` if the workflow offers that transition from where it
+currently sits. When a task ends, in order: ClaudeLoop labels the issue
+`claudeloop-done` or `claudeloop-blocked`, posts a closing comment carrying
+the status, the summary and the cost, then moves the issue to
+`transition_done` the same way `transition_start` was tried. A transition
+Jira doesn't offer from the issue's current status just logs a warning and
+is not a failure — Jira, not ClaudeLoop, decides whether a transition is
+permitted.
+
+**The label is how ClaudeLoop knows a ticket is finished, not the status:**
+it composes `(labels IS EMPTY OR labels NOT IN ("claudeloop-done",
+"claudeloop-blocked"))` into your JQL, keeping your `ORDER BY`. You cannot
+turn that off — without it a workflow that refuses the done transition would
+run the same ticket forever. To re-run a ticket, remove the label. A second
+backstop covers the label write itself failing: a task whose id already has
+a terminal row in `state.db` is skipped even if Jira never took the label.
+
+The session can read and comment on the ticket while it works:
+
+```bash
+python -m claudeloop.jira show OPS-42
+python -m claudeloop.jira comment OPS-42 -   # body on stdin
+```
+
+`--config` points either subcommand at a config file other than the default.
+The session cannot transition issues or change labels — ClaudeLoop does that
+itself.
+
+An unreachable Jira, a 401, or a JQL Jira rejects all look like an empty
+backlog: ClaudeLoop logs it, idles, and tries again on the next poll. It
+never burns through tasks.
+
 ## The session's instructions
 
 Every session carries a system prompt assembled from three layers, in this
