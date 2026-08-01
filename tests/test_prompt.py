@@ -1,8 +1,9 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from claudeloop.config import Config
+from claudeloop.config import Config, JiraConfig
 from claudeloop.prompt import (
     BUILTIN_DEFINITION_OF_DONE,
     PROTOCOL,
@@ -215,6 +216,52 @@ class PromptTest(unittest.TestCase):
         # documentation" was wrong whenever it wasn't a repo CLAUDE.md.
         self.assertNotIn("repository's own documentation", precedence(has_operator=True))
         self.assertNotIn("repository's own documentation", precedence(has_operator=False))
+
+
+class TaskSourceSectionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg(self, **kwargs):
+        return Config(repo=self.repo, tasks_file=self.tmp / "t.md",
+                      home=self.tmp, **kwargs)
+
+    def jira_cfg(self):
+        return self.cfg(source="jira", jira=JiraConfig(
+            "https://example.atlassian.net", "me@example.com", "secret",
+            "project = OPS"))
+
+    def test_absent_for_the_file_source(self):
+        self.assertNotIn("Task source", compose(self.cfg()))
+
+    def test_present_for_the_jira_source(self):
+        text = compose(self.jira_cfg())
+        self.assertIn("## Task source", text)
+        self.assertIn("claudeloop.jira show", text)
+        self.assertIn("claudeloop.jira comment", text)
+
+    def test_names_this_interpreter_not_bare_python(self):
+        self.assertIn(sys.executable, compose(self.jira_cfg()))
+
+    def test_says_the_key_is_the_first_token_of_the_task_text(self):
+        self.assertIn("first token", compose(self.jira_cfg()))
+
+    def test_forbids_the_session_transitioning_or_relabelling(self):
+        text = compose(self.jira_cfg())
+        self.assertIn("Do not transition", text)
+        self.assertIn("labels", text)
+
+    def test_says_a_comment_is_not_how_a_task_ends(self):
+        # A session told it may talk on the ticket is exactly the session
+        # that ends its turn with a comment instead of the result file.
+        self.assertIn("Commenting is not how a task ends", compose(self.jira_cfg()))
+
+    def test_sits_below_the_protocol(self):
+        text = compose(self.jira_cfg())
+        self.assertLess(text.index("unattended under ClaudeLoop"),
+                        text.index("## Task source"))
 
 
 if __name__ == "__main__":

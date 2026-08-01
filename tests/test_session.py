@@ -327,5 +327,37 @@ class SessionEnvironmentTest(unittest.TestCase):
         self.assertEqual(env["CLAUDELOOP_RESULT"], str(self.run_dir / "result.json"))
 
 
+class PythonPathTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg(self, **kwargs):
+        return Config(repo=self.repo, tasks_file=self.tmp / "t.md", **kwargs)
+
+    def test_the_package_parent_is_importable_from_the_session(self):
+        env = session.child_env(self.cfg(), self.tmp / "run")
+        first = env["PYTHONPATH"].split(os.pathsep)[0]
+        self.assertEqual(Path(first), Path(session.PACKAGE_PARENT))
+        self.assertTrue((Path(first) / "claudeloop" / "jira.py").exists())
+
+    def test_an_operators_pythonpath_survives_in_front_of_nothing(self):
+        env = session.child_env(
+            self.cfg(session_env={"PYTHONPATH": "/opt/theirs"}), self.tmp / "run"
+        )
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(Path(parts[0]), Path(session.PACKAGE_PARENT))
+        self.assertIn("/opt/theirs", parts)
+
+    def test_claudeloop_result_is_still_merged_last(self):
+        env = session.child_env(
+            self.cfg(session_env={"CLAUDELOOP_RESULT": "/tmp/hijacked",
+                                  "PYTHONPATH": "/opt/theirs"}),
+            self.tmp / "run",
+        )
+        self.assertEqual(env["CLAUDELOOP_RESULT"], str(self.tmp / "run" / "result.json"))
+
+
 if __name__ == "__main__":
     unittest.main()

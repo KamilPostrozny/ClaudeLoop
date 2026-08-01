@@ -14,6 +14,7 @@ a bug in loop.decide() would be.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from .config import Config
@@ -57,6 +58,33 @@ BUILTIN_DEFINITION_OF_DONE = (
 )
 
 CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
+
+JIRA_TASK_SOURCE = """## Task source
+
+This task is a Jira issue. Its key is the first token of the task text.
+
+Read the full ticket, including its comments:
+    {python} -m claudeloop.jira show <KEY>
+Post a comment (its body is read from stdin):
+    {python} -m claudeloop.jira comment <KEY> -
+
+Comment when you find something a human should see, or before a long step.
+Do not transition the issue or edit its labels -- ClaudeLoop does that when
+the task ends. Commenting is not how a task ends: the result file still is."""
+"""Read by a literal-minded agent, so the last sentence is not decoration --
+a session told it may talk on the ticket is exactly the session that ends its
+turn with a comment instead of the result file."""
+
+
+def task_source_section(cfg: Config) -> str:
+    """Empty for every source that needs no explanation, which today is the
+    checklist."""
+    if cfg.source != "jira":
+        return ""
+    # sys.executable, not "python": the box may have several interpreters and
+    # only this one is running ClaudeLoop, hence only this one has the
+    # package parent on its path via PYTHONPATH.
+    return JIRA_TASK_SOURCE.format(python=sys.executable)
 
 
 def repo_claude_md(repo: Path) -> Path | None:
@@ -104,6 +132,10 @@ def precedence(has_operator: bool) -> str:
 def compose(cfg: Config) -> str:
     operator = _read(cfg.instructions_file)
     parts = [PROTOCOL, precedence(has_operator=bool(operator))]
+
+    task_source = task_source_section(cfg)
+    if task_source:
+        parts.append(task_source)
 
     if operator:
         parts.append(f"## Operator instructions\n\n{operator}")
