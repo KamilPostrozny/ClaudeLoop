@@ -116,5 +116,30 @@ class StateTest(unittest.TestCase):
         self.assertEqual(reopened.task("abc")["text"], "do it")
 
 
+class TerminalIdsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "state.db")
+
+    def finished(self, task_id: str, status: str) -> None:
+        self.state.start_task(task_id, "jira", "OPS-1", "text")
+        self.state.finish_task(task_id, status, "summary", 0.0)
+
+    def test_collects_every_terminal_status(self):
+        self.finished("aaaa", "done")
+        self.finished("bbbb", "failed")
+        self.finished("cccc", "blocked")
+        self.assertEqual(self.state.terminal_ids(), {"aaaa", "bbbb", "cccc"})
+
+    def test_running_and_interrupted_are_not_terminal(self):
+        self.state.start_task("dddd", "jira", "OPS-2", "text")
+        self.state.db.execute("UPDATE tasks SET status='interrupted' WHERE id='dddd'")
+        self.state.start_task("eeee", "jira", "OPS-3", "text")
+        self.assertEqual(self.state.terminal_ids(), set())
+
+    def test_is_empty_on_a_fresh_database(self):
+        self.assertEqual(self.state.terminal_ids(), set())
+
+
 if __name__ == "__main__":
     unittest.main()

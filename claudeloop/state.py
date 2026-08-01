@@ -94,3 +94,15 @@ class State:
 
     def task(self, task_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+    def terminal_ids(self) -> set[str]:
+        """Task ids that reached a verdict, for a source that needs a backstop
+        against re-running finished work.
+
+        'interrupted' is excluded on purpose: State.__init__ writes it when a
+        previous process died mid-task, and that task never finished.
+        """
+        rows = self.db.execute(
+            "SELECT id FROM tasks WHERE status IN ('done', 'failed', 'blocked')"
+        )
+        return {row["id"] for row in rows}
