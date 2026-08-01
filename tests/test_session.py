@@ -103,6 +103,28 @@ class RunTest(unittest.TestCase):
         lines = (self.run_dir / "events.jsonl").read_text().splitlines()
         self.assertEqual(len(lines), 6)
 
+    def test_run_dir_is_created_owner_only(self):
+        # The permissions guard in config.py refuses a config.toml readable
+        # beyond its owner because it holds [session_env] credentials; those
+        # same credentials end up in this directory's log files, so the
+        # directory itself must not be world- or group-readable either.
+        self.run_once()
+        self.assertEqual(self.run_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_log_files_are_created_owner_only(self):
+        self.run_once()
+        self.assertEqual((self.run_dir / "events.jsonl").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.run_dir / "stderr.log").stat().st_mode & 0o777, 0o600)
+
+    def test_run_dir_is_still_locked_down_if_it_pre_existed_world_readable(self):
+        # run_task (loop.py) creates run_dir before session.run does, with
+        # the default umask -- mkdir(exist_ok=True) alone would leave an
+        # already-existing directory's mode untouched.
+        self.run_dir.mkdir(parents=True)
+        self.run_dir.chmod(0o755)
+        self.run_once()
+        self.assertEqual(self.run_dir.stat().st_mode & 0o777, 0o700)
+
     def test_survives_a_non_zero_exit(self):
         flag = self.tmp / "limit.flag"
         flag.write_text("")

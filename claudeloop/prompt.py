@@ -5,6 +5,11 @@ invariant; the operator's instructions, which outrank the repository because
 the operator runs the machine; and the definition of done, which is the
 repository's own CLAUDE.md when it has one. Pure, so every combination is
 testable without spawning anything.
+
+PROTOCOL, PRECEDENCE and BUILTIN_DEFINITION_OF_DONE are not documentation --
+they are instructions a capable but literal-minded agent executes unattended
+for hours with bypassed permissions. Ambiguity here is a defect the same way
+a bug in loop.decide() would be.
 """
 
 from __future__ import annotations
@@ -15,31 +20,37 @@ from .config import Config
 
 PROTOCOL = (
     "You are running unattended under ClaudeLoop. Nobody is watching, so "
-    "decide open questions yourself rather than waiting. When the task is "
-    "fully complete, or provably cannot be completed, write a JSON object to "
-    "the path in the CLAUDELOOP_RESULT environment variable with keys "
-    "\"status\" (one of \"done\", \"failed\", \"blocked\"), \"summary\" (one "
-    "paragraph on what you did), and, when blocked, \"question\" (the one "
-    "thing a human must answer). Writing that file is what ends the task; do "
-    "not stop without it."
-)
-
-PRECEDENCE = (
-    "These instructions are layered. The ClaudeLoop protocol above is "
-    "invariant and overrides everything below it. The operator instructions "
-    "outrank the repository's own documentation. The definition of done is "
-    "the base. Where two layers conflict, follow the higher one and say so in "
-    "your summary."
+    "decide open questions yourself rather than waiting; reserve \"blocked\" "
+    "for the narrow case where a human, not you, must decide something (a "
+    "missing credential, a choice with no way to infer the right answer) -- "
+    "an ordinary judgment call is not that. When the task is fully complete, "
+    "or provably cannot be completed, write a JSON object to the path in the "
+    "CLAUDELOOP_RESULT environment variable with keys \"status\" (one of "
+    "\"done\", \"failed\", \"blocked\" -- \"failed\" means you tried and "
+    "could not finish, \"blocked\" means a human must decide something "
+    "before you can), \"summary\" (one paragraph on what you did), and, when "
+    "blocked, \"question\" (the one thing a human must answer). Writing that "
+    "file is what ends the task; do not stop without it."
 )
 
 BUILTIN_DEFINITION_OF_DONE = (
-    "Done means: the change is implemented; the repository's tests pass; the "
-    "work is committed on a branch; and a pull request is open. If the "
-    "repository has no remote configured, stop after committing and say so in "
-    "your summary."
+    "Done means: the change is implemented; the repository's own tests and "
+    "checks, if it has any, pass; the work is committed on a new branch "
+    "created from the repository's default branch (create one for this task "
+    "-- do not commit to the default branch itself); and a pull request is "
+    "open. If the repository has no remote configured, or a remote is "
+    "configured but push credentials or a forge CLI (gh, glab, or similar) "
+    "to open a pull request with are not available, stop after committing "
+    "and name in your summary exactly what was missing. Never git add, "
+    "stage, commit, stash, or revert ClaudeLoop's own task-tracking file if "
+    "one lives in this repository -- it is not part of the work, and "
+    "ClaudeLoop rewrites it itself once you finish; a broad `git add -A` or "
+    "branch-cleanup commands like `git checkout -- .` or `git stash` can "
+    "silently make already-finished work look pending again. Prefer staging "
+    "files by name over `git add -A`."
 )
 
-CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md")
+CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 
 
 def repo_claude_md(repo: Path) -> Path | None:
@@ -62,22 +73,49 @@ def _read(path: Path | None) -> str:
         return ""
 
 
-def compose(cfg: Config) -> str:
-    parts = [PROTOCOL, PRECEDENCE]
+def precedence(has_operator: bool) -> str:
+    """Precedence text naming only the layers actually present.
 
+    Asserting that the operator layer outranks the repository when there is
+    no operator instructions file (and no repository documentation, either)
+    leaves an unattended session reconciling a conflict between two
+    documents it cannot find.
+    """
+    parts = [
+        "These instructions are layered. The ClaudeLoop protocol above is "
+        "invariant and overrides everything below it."
+    ]
+    if has_operator:
+        parts.append(
+            "The operator instructions outrank the definition of done below."
+        )
+    parts.append(
+        "The definition of done is the base. Where layers conflict, follow "
+        "the higher one and say so in your summary."
+    )
+    return " ".join(parts)
+
+
+def compose(cfg: Config) -> str:
     operator = _read(cfg.instructions_file)
+    parts = [PROTOCOL, precedence(has_operator=bool(operator))]
+
     if operator:
         parts.append(f"## Operator instructions\n\n{operator}")
 
     claude_md = repo_claude_md(cfg.repo)
     if claude_md is not None:
         # The repository documents itself; point at it rather than imposing
-        # a definition of done over the top of one it already has.
+        # a definition of done over the top of one it already has. Most
+        # CLAUDE.md files are architecture and style notes that never say
+        # when work is finished, so the built-in rides along as a fallback
+        # -- costless when the repository's file already covers it.
         parts.append(
             "## Definition of done\n\nThis repository has its own instructions "
             f"at {claude_md}. Follow that file end to end — it defines what "
             "\"done\" means here, including its testing and verification "
-            "requirements."
+            "requirements. If it does not say when the work is finished, use "
+            "this instead:\n\n" + BUILTIN_DEFINITION_OF_DONE
         )
     else:
         parts.append(

@@ -166,6 +166,8 @@ class SessionEnvironmentConfigTest(unittest.TestCase):
         self.assertFalse(cfg.strict_mcp)
 
     def test_plugin_and_mcp_keys_are_read(self):
+        (self.tmp / "settings.json").write_text("{}")
+        (self.tmp / "mcp.json").write_text("{}")
         cfg = load_config(
             self.write(
                 f'settings_file = "{self.tmp}/settings.json"\n'
@@ -181,6 +183,25 @@ class SessionEnvironmentConfigTest(unittest.TestCase):
     def test_strict_mcp_without_mcp_config_is_refused(self):
         with self.assertRaises(ValueError) as caught:
             load_config(self.write("strict_mcp = true\n"), home=self.home)
+        self.assertIn("mcp_config", str(caught.exception))
+
+    def test_a_settings_file_that_does_not_exist_is_refused(self):
+        # load_config validates repo up front precisely so a typo surfaces
+        # at startup rather than making `claude` exit immediately on every
+        # single task, with main_loop retrying forever and never marking the
+        # task -- check settings_file the same way.
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write(f'settings_file = "{self.tmp}/nope-settings.json"\n'),
+                home=self.home,
+            )
+        self.assertIn("settings_file", str(caught.exception))
+
+    def test_an_mcp_config_that_does_not_exist_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write(f'mcp_config = "{self.tmp}/nope-mcp.json"\n'), home=self.home
+            )
         self.assertIn("mcp_config", str(caught.exception))
 
     def test_session_env_defaults_empty(self):

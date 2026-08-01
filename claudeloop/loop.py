@@ -382,6 +382,13 @@ def main() -> None:
         raise SystemExit(
             f"no config file at {DEFAULT_CONFIG} -- see README.md to set one up"
         )
+    except ValueError as error:
+        # load_config's own validation (the permissions guard, a bad
+        # settings_file/mcp_config path, strict_mcp without mcp_config, ...)
+        # raises ValueError with a message already written for a human. A
+        # config.toml at the default umask (0644) is the common case here --
+        # every such install must get that message, not a raw traceback.
+        raise SystemExit(str(error))
     # After the config validates, so a non-loopback bind with no token fails
     # before anything is listening.
     _serve_dashboard(cfg)

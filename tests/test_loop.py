@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from claudeloop import loop, status
 from claudeloop.config import Config
@@ -481,6 +482,22 @@ class HeartbeatTest(unittest.TestCase):
 
         pending = asyncio.run(scenario())
         self.assertEqual(pending, [])
+
+
+class MainConfigErrorTest(unittest.TestCase):
+    """A pre-existing config.toml at the default umask (0644) makes
+    load_config raise ValueError from the permissions guard. Before the fix,
+    main() only caught FileNotFoundError, so every current operator's next
+    start died with a raw traceback instead of the guard's own message."""
+
+    def test_a_value_error_from_load_config_exits_cleanly_with_its_message(self):
+        with mock.patch(
+            "claudeloop.loop.load_config",
+            side_effect=ValueError("config.toml: ... Run: chmod 600 ..."),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                loop.main()
+        self.assertIn("chmod 600", str(caught.exception))
 
 
 class ServeDashboardTest(unittest.TestCase):

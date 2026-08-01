@@ -5,9 +5,9 @@ from pathlib import Path
 from claudeloop.config import Config
 from claudeloop.prompt import (
     BUILTIN_DEFINITION_OF_DONE,
-    PRECEDENCE,
     PROTOCOL,
     compose,
+    precedence,
     repo_claude_md,
 )
 
@@ -26,10 +26,11 @@ class PromptTest(unittest.TestCase):
         }
         return Config(**{**base, **overrides})
 
-    def test_protocol_and_precedence_are_always_present(self):
+    def test_protocol_and_base_precedence_are_always_present(self):
         text = compose(self.cfg())
         self.assertIn(PROTOCOL, text)
-        self.assertIn(PRECEDENCE, text)
+        self.assertIn("ClaudeLoop protocol above is invariant", text)
+        self.assertIn("definition of done is the base", text)
 
     def test_protocol_still_names_the_result_contract(self):
         for token in ("CLAUDELOOP_RESULT", "done", "failed", "blocked"):
@@ -40,11 +41,29 @@ class PromptTest(unittest.TestCase):
         # points at the repository's file when the repository has one.
         self.assertNotIn("CLAUDE.md", PROTOCOL)
 
+    def test_protocol_distinguishes_blocked_from_failed(self):
+        # PROTOCOL named both statuses without ever saying what tells them
+        # apart, and separately told the session to "decide open questions
+        # yourself rather than waiting" -- in tension with a status that
+        # waits on a human. This resolves both: blocked is reserved for what
+        # only a human can decide.
+        self.assertIn("means a human must decide something", PROTOCOL)
+        self.assertIn("means you tried and could not finish", PROTOCOL)
+        self.assertIn("decide open questions yourself rather than waiting", PROTOCOL)
+
     def test_a_repo_claude_md_is_pointed_at(self):
         (self.repo / "CLAUDE.md").write_text("# rules")
         text = compose(self.cfg())
         self.assertIn(str(self.repo / "CLAUDE.md"), text)
-        self.assertNotIn(BUILTIN_DEFINITION_OF_DONE, text)
+
+    def test_a_repo_claude_md_still_carries_the_builtin_as_a_fallback(self):
+        # Most CLAUDE.md files are architecture/style notes that never say
+        # when work is finished -- without this, those repositories get the
+        # pointer and no fallback, reopening the gap this branch exists to
+        # close.
+        (self.repo / "CLAUDE.md").write_text("# rules, no mention of done")
+        text = compose(self.cfg())
+        self.assertIn(BUILTIN_DEFINITION_OF_DONE, text)
 
     def test_a_dot_claude_claude_md_is_found(self):
         (self.repo / ".claude").mkdir()
@@ -52,6 +71,14 @@ class PromptTest(unittest.TestCase):
         self.assertEqual(
             repo_claude_md(self.repo), self.repo / ".claude" / "CLAUDE.md"
         )
+
+    def test_an_agents_md_is_found(self):
+        # AGENTS.md is auto-loaded into the session's context by Claude Code
+        # itself; without this, a repository with only AGENTS.md would get
+        # both that file and the built-in definition of done, with no stated
+        # precedence between them.
+        (self.repo / "AGENTS.md").write_text("# agent rules")
+        self.assertEqual(repo_claude_md(self.repo), self.repo / "AGENTS.md")
 
     def test_no_claude_md_anywhere_returns_none(self):
         self.assertIsNone(repo_claude_md(self.repo))
@@ -61,6 +88,35 @@ class PromptTest(unittest.TestCase):
 
     def test_the_builtin_covers_the_no_remote_case(self):
         self.assertIn("no remote", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_builtin_also_covers_missing_credentials_and_forge_cli(self):
+        # A literal reading of "no remote configured" gives no permission to
+        # stop when the remote exists but push credentials or a forge CLI
+        # are the thing actually missing -- the case the S4 box hits. The
+        # session must also be told to say what was missing.
+        self.assertIn("push credentials", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("forge CLI", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("name in your summary exactly what was missing", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_builtin_requires_a_new_branch_from_the_default(self):
+        # "committed on a branch" was satisfiable by committing to main
+        # itself, or by branching a second task off the first task's branch.
+        self.assertIn("new branch", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("default branch", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_builtin_qualifies_the_tests_requirement(self):
+        # The target case for this feature -- a scratch repo -- very likely
+        # has no test suite at all; a literal "the tests pass" sends the
+        # session hunting indefinitely or writing speculative tests.
+        self.assertIn("if it has any", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_builtin_forbids_touching_the_task_list(self):
+        # Sequence this guards against: a `git add -A` sweeps ClaudeLoop's
+        # own tasks file into a commit, then a later session's branch
+        # cleanup (`git checkout -- .` / `git stash`) discards the `- [x]`
+        # mark, and main_loop re-reads the file and repeats the task forever.
+        self.assertIn("task-tracking file", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("git add -A", BUILTIN_DEFINITION_OF_DONE)
 
     def test_a_definition_of_done_file_wins_over_the_builtin(self):
         dod = self.tmp / "dod.md"
@@ -95,6 +151,27 @@ class PromptTest(unittest.TestCase):
         text = compose(self.cfg(instructions_file=None, definition_of_done_file=None))
         self.assertIn(BUILTIN_DEFINITION_OF_DONE, text)
         self.assertNotIn("Operator instructions", text)
+
+    def test_precedence_names_the_operator_layer_when_present(self):
+        self.assertIn("operator instructions outrank", precedence(has_operator=True))
+
+    def test_precedence_omits_the_operator_layer_when_absent(self):
+        self.assertNotIn("outrank", precedence(has_operator=False))
+
+    def test_composed_precedence_reflects_whether_the_operator_layer_ran(self):
+        instructions = self.tmp / "mine.md"
+        instructions.write_text("Never push to main.")
+        with_operator = compose(self.cfg(instructions_file=instructions))
+        without_operator = compose(self.cfg(instructions_file=self.tmp / "nope.md"))
+        self.assertIn("outrank", with_operator)
+        self.assertNotIn("outrank", without_operator)
+
+    def test_precedence_never_misnames_the_base_layer(self):
+        # The base is whichever of built-in / definition_of_done_file /
+        # repo CLAUDE.md actually supplied it -- "the repository's own
+        # documentation" was wrong whenever it wasn't a repo CLAUDE.md.
+        self.assertNotIn("repository's own documentation", precedence(has_operator=True))
+        self.assertNotIn("repository's own documentation", precedence(has_operator=False))
 
 
 if __name__ == "__main__":

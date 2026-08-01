@@ -69,10 +69,26 @@ def _overrun_marker(limit: int) -> bytes:
     return f"<claudeloop: line exceeded {limit} byte limit, discarded>\n".encode()
 
 
+def _open_log(path: Path):
+    """Open (or create) a run log for append, restricted to the owner.
+
+    These logs carry a session's raw stdout/stderr verbatim, and that
+    session was handed [session_env] credentials -- a run that executes
+    `env`, `git config --list --show-origin`, or echoes a failing `gh`
+    invocation writes a credential straight into this file. The default
+    umask (0644) would make it world-readable, which is exactly what the
+    config.toml permissions guard refuses to allow for the same secrets one
+    step earlier. Explicit mode on os.open, not a chmod after: still subject
+    to umask, but umask can only clear bits from 0o600, never add ones.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "ab")
+
+
 async def _read_events(
     stream: asyncio.StreamReader, path: Path, out: list[dict], limit: int = MAX_LINE
 ) -> None:
-    with open(path, "ab") as log:
+    with _open_log(path) as log:
         while True:
             try:
                 raw = await stream.readline()
@@ -98,7 +114,7 @@ async def _read_events(
 
 
 async def _drain(stream: asyncio.StreamReader, path: Path, limit: int = MAX_LINE) -> None:
-    with open(path, "ab") as log:
+    with _open_log(path) as log:
         while True:
             try:
                 raw = await stream.readline()
@@ -127,6 +143,12 @@ async def run(
     nudge -- the caller never sees the timeout as an exception.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
+    # Unconditional, not just on creation: mkdir(exist_ok=True) leaves an
+    # already-existing directory's mode untouched (e.g. run_task creating it
+    # first), and events.jsonl/stderr.log below inherit the same secrets
+    # concern _open_log documents -- nothing under here should be group- or
+    # world-readable.
+    run_dir.chmod(0o700)
     env = child_env(cfg, run_dir)
     process = await asyncio.create_subprocess_exec(
         *build_command(cfg, session_id, prompt, resume),

@@ -104,7 +104,21 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
             " deliberate act."
         )
 
+    # Checked here, same as repo above, so a typo'd path fails loudly at
+    # startup: unchecked, it makes `claude` exit immediately on every task,
+    # and main_loop deliberately does not source.mark on that kind of crash,
+    # so the loop would retry every 30s forever with the dashboard stuck in
+    # 'error'. Unlike instructions_file/definition_of_done_file, these two
+    # are never optional once named -- a missing one is a config mistake,
+    # not an absent optional layer.
+    settings_file = _optional_path(data, "settings_file")
+    if settings_file is not None and not settings_file.exists():
+        raise ValueError(f"{path}: settings_file {settings_file} does not exist")
+
     mcp_config = _optional_path(data, "mcp_config")
+    if mcp_config is not None and not mcp_config.exists():
+        raise ValueError(f"{path}: mcp_config {mcp_config} does not exist")
+
     strict_mcp = bool(data.get("strict_mcp", False))
     if strict_mcp and mcp_config is None:
         raise ValueError(
@@ -128,7 +142,7 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         or home / "instructions.md",
         definition_of_done_file=_optional_path(data, "definition_of_done_file")
         or home / "definition-of-done.md",
-        settings_file=_optional_path(data, "settings_file"),
+        settings_file=settings_file,
         mcp_config=mcp_config,
         strict_mcp=strict_mcp,
         session_env=_session_env(data, path),
