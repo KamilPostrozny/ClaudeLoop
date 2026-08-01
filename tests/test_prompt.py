@@ -278,5 +278,32 @@ class TaskSourceSectionTest(unittest.TestCase):
                         text.index("## Task source"))
 
 
+class BlockedWordingTest(unittest.TestCase):
+    """These pin specific sentences on purpose. Every live failure this
+    project has had traced back to prompt text that could be read two ways,
+    so a reworded claim must break a test and get looked at."""
+
+    def test_the_protocol_no_longer_claims_nobody_can_answer(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertNotIn("Nobody is watching, so", PROTOCOL)
+
+    def test_the_protocol_says_blocking_parks_the_task_and_costs_time(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("parks this task until a human", PROTOCOL)
+        self.assertIn("may be hours", PROTOCOL)
+
+    def test_the_protocol_says_the_answer_comes_back_to_this_session(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("this same session is resumed with their answer", PROTOCOL)
+
+    def test_the_protocol_still_reserves_blocked_for_a_human_decision(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("an ordinary judgment call is not that", PROTOCOL)
+
+
 if __name__ == "__main__":
     unittest.main()

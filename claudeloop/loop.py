@@ -46,15 +46,49 @@ NUDGE_PROMPT = (
     "at the path in the CLAUDELOOP_RESULT environment variable -- not your "
     "last message -- is what ends this task; write it now. If the work is "
     "already complete and committed, do not redo it: write status \"done\" "
-    "and say so in the summary. Nobody is available to answer a question, "
-    "so do not end your turn asking what to do next -- write the result "
-    "file instead."
+    "and say so in the summary. If instead you genuinely need a human to "
+    "decide something, that is also the result file's job: write status "
+    "\"blocked\" with the one thing you need decided in the \"question\" "
+    "field, and a human will answer it. Either way, do not end your turn "
+    "with a question in your last message -- nobody reads it."
 )
 """Sent after a resume with no result file and no rate limit -- a nudge. Two
 live smoke-test sessions read the old \"Continue.\" prompt as confirmation
 there was nothing left to do and ended their turn with prose instead of the
 result file, burning every resume at $0.10 despite finished, committed work.
-This names the actual problem instead."""
+This names the actual problem instead. S2b reworded the tail: "nobody is
+available to answer a question" stopped being true once a human could
+answer one, and a session with a real question now has somewhere to put it."""
+
+ANSWER_PROMPT = (
+    "A human has answered the question you were blocked on.\n\n"
+    "Their answer: {answer}\n\n"
+    "Act on that answer and finish the task. Note that time has passed since "
+    "you stopped and other tasks have run in this repository meanwhile, so "
+    "the working tree is probably no longer on the branch you created: check "
+    "out the branch you were working on before you continue -- your commits "
+    "on it are intact. When the work is complete, write the result file at "
+    "the path in the CLAUDELOOP_RESULT environment variable exactly as "
+    "before; that file, not your last message, is what ends the task."
+)
+"""Sent when resuming a parked task whose question has been answered.
+
+The branch sentence is load-bearing and cannot be replaced by anything the
+orchestrator does itself: every task that ran while this one was parked
+called reset_to_default_branch on the way in, so the tree has moved, and
+ClaudeLoop never learns what the session named its branch. The session does
+-- which is the main reason an answered task resumes its original session
+rather than starting fresh."""
+
+FRESH_ANSWER_PROMPT = (
+    "{task}\n\n"
+    "A human has already answered a question about this task: {answer}\n\n"
+    "The session that asked that question is no longer available, so start "
+    "this task from the beginning, using that answer."
+)
+"""For the edge case where a parked task has no session to resume -- a
+state.db from before this slice, or a task whose runs were pruned. The work
+is not lost, only the context."""
 
 
 @dataclass(frozen=True)

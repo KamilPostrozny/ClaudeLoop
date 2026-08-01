@@ -118,6 +118,53 @@ class BlockingResetTest(unittest.TestCase):
         self.assertEqual(blocking_reset(events), 1785600000.0)
 
 
+class ResumePromptTest(unittest.TestCase):
+    def test_the_nudge_no_longer_claims_nobody_can_answer(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertNotIn("Nobody is available to answer", NUDGE_PROMPT)
+
+    def test_the_nudge_points_a_stuck_session_at_the_blocked_status(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn('status "blocked"', NUDGE_PROMPT)
+        self.assertIn('"question"', NUDGE_PROMPT)
+
+    def test_the_nudge_still_refuses_a_question_in_the_last_message(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn("do not end your turn", NUDGE_PROMPT)
+
+    def test_the_answer_prompt_carries_the_answer(self):
+        from claudeloop.loop import ANSWER_PROMPT
+
+        rendered = ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("use EUR", rendered)
+
+    def test_the_answer_prompt_warns_that_the_branch_may_not_be_checked_out(self):
+        # The sharpest consequence of parking: other tasks run meanwhile and
+        # each checks out the default branch, so the tree has moved. The
+        # orchestrator cannot fix this -- it never learns the branch name.
+        rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("check out the branch you were working on", rendered)
+        self.assertIn("commits on it are intact", rendered)
+
+    def test_the_answer_prompt_still_demands_the_result_file(self):
+        rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("CLAUDELOOP_RESULT", rendered)
+        self.assertIn("not your last message", rendered)
+
+    def test_the_fresh_answer_prompt_carries_the_task_and_the_answer(self):
+        rendered = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
+
+        self.assertIn("do a thing", rendered)
+        self.assertIn("use EUR", rendered)
+        self.assertIn("from the beginning", rendered)
+
+
 class SleepDelayTest(unittest.TestCase):
     def test_normal_wait_is_unclamped(self):
         self.assertAlmostEqual(sleep_delay(time.time() + 100), 100, delta=1)

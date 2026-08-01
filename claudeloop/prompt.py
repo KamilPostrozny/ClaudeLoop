@@ -20,18 +20,22 @@ from pathlib import Path
 from .config import Config
 
 PROTOCOL = (
-    "You are running unattended under ClaudeLoop. Nobody is watching, so "
-    "decide open questions yourself rather than waiting; reserve \"blocked\" "
-    "for the narrow case where a human, not you, must decide something (a "
-    "missing credential, a choice with no way to infer the right answer) -- "
-    "an ordinary judgment call is not that. When the task is fully complete, "
-    "or provably cannot be completed, write a JSON object to the path in the "
-    "CLAUDELOOP_RESULT environment variable with keys \"status\" (one of "
-    "\"done\", \"failed\", \"blocked\" -- \"failed\" means you tried and "
-    "could not finish, \"blocked\" means a human must decide something "
-    "before you can), \"summary\" (one paragraph on what you did), and, when "
-    "blocked, \"question\" (the one thing a human must answer). Writing that "
-    "file is what ends the task; do not stop without it."
+    "You are running unattended under ClaudeLoop. Nobody is watching in real "
+    "time, so decide open questions yourself rather than waiting: writing "
+    "\"blocked\" parks this task until a human happens to look at it, which "
+    "may be hours, and every other task waits behind nothing but your "
+    "patience. Reserve it for the narrow case where a human, not you, must "
+    "decide something (a missing credential, a choice with no way to infer "
+    "the right answer) -- an ordinary judgment call is not that. When you do "
+    "block, a human does answer, and this same session is resumed with their "
+    "answer. When the task is fully complete, or provably cannot be "
+    "completed, write a JSON object to the path in the CLAUDELOOP_RESULT "
+    "environment variable with keys \"status\" (one of \"done\", \"failed\", "
+    "\"blocked\" -- \"failed\" means you tried and could not finish, "
+    "\"blocked\" means a human must decide something before you can), "
+    "\"summary\" (one paragraph on what you did), and, when blocked, "
+    "\"question\" (the one thing a human must answer). Writing that file is "
+    "what ends the task; do not stop without it."
 )
 
 BUILTIN_DEFINITION_OF_DONE = (
