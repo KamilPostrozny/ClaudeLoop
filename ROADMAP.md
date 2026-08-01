@@ -85,6 +85,14 @@ need no changes — they already talk to `pending()` and `mark()`.
   keeps the id 16 hex characters, which `web.py`'s `TASK_ID_RE` requires as a
   path-traversal guard, and means editing a ticket does not mint a new task.
   The issue key is the `source_ref`.
+- **The orchestrator embeds the ticket, and the session talks to Jira live.**
+  `pending()` fetches summary and description and composes them into the task
+  text, so the task is self-describing and testable against recorded fixtures.
+  The session additionally reads and posts comments as it works — it needs to
+  communicate on the ticket anyway, which is what S2b will build on.
+- **Still one repository per configuration.** A JQL query maps to one target
+  repository; a second repository means a second instance with its own config.
+  Unchanged from S1.
 - **ClaudeLoop composes the blocked-label exclusion into the operator's JQL**
   rather than trusting them to remember it, splitting on `ORDER BY` so their
   ordering survives. The guard cannot be accidentally disabled.
@@ -132,7 +140,8 @@ so; S2b has to solve it rather than rediscover it.
 ### S5 — Setup wizard and config schema
 
 An in-browser first-run wizard for operators who should not have to hand-edit
-TOML. The config surface is roughly 25 keys with non-obvious interactions.
+TOML. `Config` carries 16 keys today and will be around 25 after S3, with
+non-obvious interactions between them.
 
 **Decided:**
 

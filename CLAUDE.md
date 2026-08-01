@@ -23,7 +23,8 @@ same session, and it is designed to run for days with nobody watching.
 
 **The repository being worked on defines the work, not the orchestrator.**
 ClaudeLoop has no workflow engine, no phase machine, no checklist of its own.
-The per-task instruction points at the target repository's own `CLAUDE.md`, so
+The per-task instruction points at the target repository's own `CLAUDE.md`
+when it has one, and supplies a definition of done only when it does not. So
 different repositories get different behaviour for free. Resist every
 temptation to add workflow logic here.
 
@@ -92,8 +93,8 @@ and a live run afterwards.
 
 ## How work is done here
 
-The [superpowers](https://github.com/obra/superpowers) workflow, one slice at a
-time:
+The `superpowers` workflow — the plugin ships in the
+`anthropics/claude-plugins-official` marketplace — one slice at a time:
 
 1. **`superpowers:brainstorming`** — settle the design through questions, then
    write a spec to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`.
@@ -112,15 +113,25 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Four slices, four real defects that the passing suite could not have caught:
+Three slices have run one. Two of them surfaced defects the passing suite could
+not have caught — five between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
-  parking the loop for hours. The fixtures had only ever shown `allowed`.
-- The quota meter was keyed on `rateLimitType` names that do not exist.
+  parking the loop until the window reset. The fixtures had only ever shown
+  `allowed`, because that was all the design capture contained.
+- The quota meter was keyed on `rateLimitType` names that do not exist
+  (`weekly`, `opus_weekly`); the real value is `seven_day`, and the payload
+  carries `utilization` outright.
 - The built-in definition of done never said which status to write when a
   session stopped short of a pull request, so completed work landed as `- [!]`.
 - The resume nudge said `"Continue."` to a session that believed it had
   finished, which correctly answered that there was nothing to continue.
+- Each task branched off the previous task's branch rather than the default.
+
+The third — S1's — found nothing wrong, and was still worth running: it is what
+confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that
+`--resume` reattaches with the appended system prompt intact. Those were
+assumptions the whole recovery path rests on.
 
 Prompt text, live payload shapes, and what a session does when it thinks it is
 done are all invisible to a suite built on fixtures and a fake CLI — and
