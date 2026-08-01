@@ -23,7 +23,8 @@ class Task:
 
 class TaskSource(Protocol):
     def pending(self) -> list[Task]: ...
-    def mark(self, task: Task, status: str, summary: str) -> None: ...
+    def start(self, task: Task) -> None: ...
+    def mark(self, task: Task, status: str, summary: str, cost: float = 0.0) -> None: ...
 
 
 def task_id(text: str) -> str:
@@ -52,7 +53,11 @@ class FileSource:
                 tasks.append(Task(task_id(text), text, "file", stripped))
         return tasks
 
-    def mark(self, task: Task, status: str, summary: str) -> None:
+    def start(self, task: Task) -> None:
+        """A checklist has nothing to say when work begins. The Jira source
+        uses this to move the issue to its in-progress status."""
+
+    def mark(self, task: Task, status: str, summary: str, cost: float = 0.0) -> None:
         """Rewrite the task's line.
 
         Matched on exact line text rather than index, so a user editing the

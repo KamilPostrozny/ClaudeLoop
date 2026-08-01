@@ -80,5 +80,22 @@ class FileSourceTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(), "- [x] only thing")
 
 
+class FileSourceProtocolTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "tasks.md"
+        self.path.write_text("- [ ] first thing\n")
+        self.source = FileSource(self.path)
+
+    def test_start_is_a_no_op_that_does_not_touch_the_file(self):
+        before = self.path.read_text()
+        self.source.start(self.source.pending()[0])
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_mark_accepts_and_ignores_cost(self):
+        self.source.mark(self.source.pending()[0], "done", "went fine", 1.25)
+        self.assertEqual(self.path.read_text(), "- [x] first thing\n")
+
+
 if __name__ == "__main__":
     unittest.main()
