@@ -119,14 +119,18 @@ anything the loop is doing — every route is a read.
 
 ## Tasks
 
-Keep `tasks_file` **outside** the target repository. The built-in definition
-of done has each session commit its work on a branch, and a session working
-on a branch reasonably runs `git add -A`, or cleans up with `git checkout --
-.` or `git stash`, as ordinary branch hygiene. If `tasks_file` lives inside
-the repository, any of those can sweep ClaudeLoop's own `- [x]` mark into a
-commit or wipe it out entirely -- and since `main_loop` re-reads the file on
-every iteration, the next task would see the same line pending again and
-repeat finished work, unattended, with no bound on how many times.
+`tasks_file` must live **outside** the target repository -- `load_config`
+refuses to start if it resolves inside `repo`. The built-in definition of
+done has each session commit its work on a branch, and a session working on
+a branch reasonably runs `git add -A`, or cleans up with `git checkout --
+.` or `git stash`, as ordinary branch hygiene. If `tasks_file` lived inside
+the repository, any of those could sweep ClaudeLoop's own `- [x]` mark into
+a commit or wipe it out entirely -- and since `main_loop` re-reads the file
+on every iteration, the next task would see the same line pending again and
+repeat finished work, unattended, with no bound on how many times. If you
+followed an older version of this README that placed `tasks_file` inside
+the repository, move it out before upgrading -- ClaudeLoop will not start
+otherwise.
 
 A markdown checklist. Unchecked items run in file order.
 

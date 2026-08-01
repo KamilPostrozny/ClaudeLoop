@@ -125,13 +125,27 @@ class PromptTest(unittest.TestCase):
         self.assertIn("Done means the customer said so.", text)
         self.assertNotIn(BUILTIN_DEFINITION_OF_DONE, text)
 
-    def test_a_repo_claude_md_wins_over_the_definition_of_done_file(self):
+    def test_a_repo_claude_md_is_still_pointed_at_when_a_definition_of_done_file_is_set(self):
         (self.repo / "CLAUDE.md").write_text("# rules")
         dod = self.tmp / "dod.md"
         dod.write_text("Done means the customer said so.")
         text = compose(self.cfg(definition_of_done_file=dod))
         self.assertIn(str(self.repo / "CLAUDE.md"), text)
-        self.assertNotIn("Done means the customer said so.", text)
+
+    def test_a_definition_of_done_file_is_the_fallback_not_the_builtin(self):
+        # The operator outranks the repository. An architecture-only
+        # CLAUDE.md never says when work is finished, so the fallback used
+        # in its place must be whatever the operator configured -- the
+        # operator's own box may have no forge access, so the built-in's
+        # "and a pull request is open" cannot silently override them.
+        (self.repo / "CLAUDE.md").write_text("# architecture notes only")
+        dod = self.tmp / "dod.md"
+        dod.write_text("Done means: commit and stop, never open a pull request.")
+        text = compose(self.cfg(definition_of_done_file=dod))
+        self.assertIn(
+            "Done means: commit and stop, never open a pull request.", text
+        )
+        self.assertNotIn(BUILTIN_DEFINITION_OF_DONE, text)
 
     def test_operator_instructions_are_included(self):
         instructions = self.tmp / "mine.md"

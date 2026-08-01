@@ -6,9 +6,9 @@ the operator runs the machine; and the definition of done, which is the
 repository's own CLAUDE.md when it has one. Pure, so every combination is
 testable without spawning anything.
 
-PROTOCOL, PRECEDENCE and BUILTIN_DEFINITION_OF_DONE are not documentation --
-they are instructions a capable but literal-minded agent executes unattended
-for hours with bypassed permissions. Ambiguity here is a defect the same way
+PROTOCOL and BUILTIN_DEFINITION_OF_DONE are not documentation -- they are
+instructions a capable but literal-minded agent executes unattended for
+hours with bypassed permissions. Ambiguity here is a defect the same way
 a bug in loop.decide() would be.
 """
 
@@ -77,9 +77,8 @@ def precedence(has_operator: bool) -> str:
     """Precedence text naming only the layers actually present.
 
     Asserting that the operator layer outranks the repository when there is
-    no operator instructions file (and no repository documentation, either)
-    leaves an unattended session reconciling a conflict between two
-    documents it cannot find.
+    no operator instructions file leaves an unattended session reconciling
+    a conflict against a document it cannot find.
     """
     parts = [
         "These instructions are layered. The ClaudeLoop protocol above is "
@@ -115,7 +114,8 @@ def compose(cfg: Config) -> str:
             f"at {claude_md}. Follow that file end to end — it defines what "
             "\"done\" means here, including its testing and verification "
             "requirements. If it does not say when the work is finished, use "
-            "this instead:\n\n" + BUILTIN_DEFINITION_OF_DONE
+            "this instead:\n\n"
+            + (_read(cfg.definition_of_done_file) or BUILTIN_DEFINITION_OF_DONE)
         )
     else:
         parts.append(
