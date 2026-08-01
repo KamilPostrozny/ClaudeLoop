@@ -499,9 +499,12 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                 # a fork failing under memory pressure, ...) is an environment
                 # fault, not a task verdict. Deliberately no source.mark: marking
                 # it `- [!]` would burn through the whole task list in seconds if
-                # the fault is permanent. Recorded as failed so the row doesn't
-                # stay stuck at 'running', then retried slowly rather than taking
-                # the whole process down.
+                # the fault is permanent. Recorded as 'error', not 'failed': a
+                # crash outside the session state machine is not a verdict on
+                # the task, and State.terminal_ids() -- the backstop a task
+                # source uses to avoid re-offering work it already finished --
+                # is keyed on terminal statuses, which must be able to offer
+                # this task again rather than treat it as permanently done.
                 log.exception("task %s crashed outside the session state machine", task.id)
                 status_module.set_status(state="error", last_error=str(error))
                 try:
@@ -512,7 +515,7 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                         " WHERE task_id=? AND ended_at IS NULL",
                         (time.time(), task.id),
                     )
-                    state.finish_task(task.id, "failed", f"ClaudeLoop crashed: {error}", 0.0)
+                    state.finish_task(task.id, "error", f"ClaudeLoop crashed: {error}", 0.0)
                 except Exception:
                     # Recording a crash must never itself be able to crash the
                     # loop -- an unattended run has to survive even a state.db

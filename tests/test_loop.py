@@ -335,7 +335,11 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(self.tasks.read_text(), "- [ ] first thing\n- [ ] second thing\n")
         state = State(self.cfg.home / "state.db")
         row = state.db.execute("SELECT * FROM tasks").fetchone()
-        self.assertEqual(row["status"], "failed")
+        # 'error', not 'failed': a source with a re-run backstop keyed on
+        # terminal statuses (JiraSource, via State.terminal_ids()) must be
+        # able to offer this task again after an environment crash.
+        self.assertEqual(row["status"], "error")
+        self.assertNotIn(row["id"], State(self.cfg.home / "state.db").terminal_ids())
         self.assertIn("ClaudeLoop crashed", row["summary"])
 
     def tmp_empty_bin(self) -> str:
