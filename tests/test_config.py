@@ -378,6 +378,20 @@ class JiraConfigTest(unittest.TestCase):
         self.assertIn("jql", str(caught.exception))
         self.assertIn("project", str(caught.exception))
 
+    def test_a_non_https_site_is_refused(self):
+        # urllib's redirect handler forwards the Authorization header across
+        # hosts, so an http:// typo puts the Basic-auth API token on the
+        # wire in cleartext the first time Jira redirects it.
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(
+                'source = "jira"\n[jira]\n'
+                'site = "http://example.atlassian.net"\n'
+                'email = "me@example.com"\n'
+                'token = "secret"\n'
+                'project = "OPS"\n'
+            ), home=self.home)
+        self.assertIn("https://", str(caught.exception))
+
     def test_each_missing_jira_key_is_named(self):
         for key in ("site", "email", "token", "jql"):
             with self.subTest(key=key):

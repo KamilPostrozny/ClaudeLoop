@@ -104,8 +104,16 @@ def _jira(data: dict, path: Path) -> JiraConfig:
         raise ValueError(
             f"{path}: [jira] is missing required key(s): {', '.join(missing)}"
         )
+    site = str(table["site"])
+    if not site.startswith("https://"):
+        raise ValueError(
+            f"{path}: [jira] site {site!r} must start with https:// -- urllib"
+            " forwards the Authorization header across a redirect, so an"
+            " http:// site puts the Basic-auth API token on the wire in"
+            " cleartext the first time Jira redirects it."
+        )
     return JiraConfig(
-        site=str(table["site"]),
+        site=site,
         email=str(table["email"]),
         token=str(table["token"]),
         jql=_jql(table, path),
