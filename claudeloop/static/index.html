@@ -231,6 +231,7 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
    not a pie of two slices. The track is how much of the block has run. */
 .quota { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .meter {
+  position: relative;
   height: 6px; border-radius: 999px; overflow: hidden;
   background: var(--sunken);
   box-shadow: inset 0 0 0 1px var(--line);
@@ -239,6 +240,17 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   display: block; height: 100%; border-radius: 999px;
   background: var(--accent);
   transition: width .6s linear;
+}
+/* allowed_warning: still allowed, but worth a distinct colour so it doesn't
+   read as identical to plain headroom. A blocking status reuses the same
+   fill for the (rare) moment one is visible before the loop starts waiting. */
+.quota[data-level="warn"] .meter i { background: var(--warn); }
+.quota[data-level="bad"] .meter i { background: var(--bad); }
+/* Where surpassedThreshold sits: a thin still marker, not another fill --
+   it's a reference line, not a value. */
+#meter-threshold {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: var(--text); opacity: .35;
 }
 .quota-legend {
   display: flex; justify-content: space-between; gap: 10px; margin-top: 9px;
@@ -411,7 +423,10 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
       </div>
     </div>
     <div class="quota" id="quota" hidden>
-      <div class="meter"><i id="meter-fill" style="width:0%"></i></div>
+      <div class="meter" id="meter" hidden>
+        <i id="meter-fill" style="width:0%"></i>
+        <b id="meter-threshold" hidden></b>
+      </div>
       <div class="quota-legend">
         <span id="quota-type">Quota</span>
         <span>Resets in <b id="quota-left">—</b></span>
@@ -589,33 +604,47 @@ events.onmessage = (event) => {
 
 /* ---------------------------------------------------------- status card */
 const card = $("status");
-let snap = null;       // the last status object, for the one-second ticker
-let quotaWindow = null; // {resets, from}: the span the meter measures against
+let snap = null; // the last status object, for the one-second ticker
 
-// The subscription's own window names, in seconds. Only these exist today.
-const WINDOWS = {
-  five_hour: 5 * 3600,
-  weekly: 7 * 86400,
-  opus_weekly: 7 * 86400,
-};
-
-// The meter needs a denominator and the payload carries only a reset time,
-// so the window's start comes from subtracting its length back off the
-// reset. An unknown name has no length to subtract, so this collapses to
-// `resets` itself -- span is zero and the meter renders empty (the
-// Math.max(1, ...) in tick() below stops that from dividing by zero)
-// rather than guessing a length.
-function quotaFrom(resets, type) {
-  return resets - (WINDOWS[type] || 0);
+// `utilization` (0..1) is the ratio the meter wants, straight from the
+// payload -- no window-length table to reconstruct it from resetsAt, and no
+// guessing for a rateLimitType nobody's seen (there was one: WINDOWS, keyed
+// on "five_hour" / "weekly" / "opus_weekly", none of which is the real
+// "seven_day"; it always fell through to a zero-length window and rendered
+// an empty track). Older payloads without the field, or a value outside
+// 0..1, degrade to "no fill" rather than a misleading one.
+function clampUtilization(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
 }
 
-// Self-check, quota-window math only: cheap enough to leave in, delete if
-// WINDOWS or quotaFrom's contract ever changes on purpose. The page has no
-// test framework and isn't getting one for this.
-console.assert(quotaFrom(1000, "five_hour") === 1000 - 5 * 3600, "five_hour window math changed");
-console.assert(quotaFrom(1000, "weekly") === 1000 - 7 * 86400, "weekly window math changed");
-console.assert(quotaFrom(1000, "opus_weekly") === 1000 - 7 * 86400, "opus_weekly window math changed");
-console.assert(quotaFrom(1000, "some_unknown_type") === 1000, "unknown window should collapse to resets");
+// rateLimitType is a machine name ("seven_day", "five_hour") with no fixed
+// vocabulary -- a lookup table missed "seven_day" once already. Spell out
+// the number word it's built from instead of mapping the whole name, so a
+// type nobody's seen ("ten_day") still reads fine rather than falling off
+// a map.
+const NUMBER_WORDS = {
+  one: "1", two: "2", three: "3", four: "4", five: "5",
+  six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
+};
+function formatRateLimitType(type) {
+  return String(type)
+    .split("_")
+    .map((word) => NUMBER_WORDS[word.toLowerCase()] || word)
+    .join(" ");
+}
+
+// Self-check for the pure logic above: cheap enough to leave in, delete if
+// either contract changes on purpose. The page has no test framework and
+// isn't getting one for this.
+console.assert(clampUtilization(0.8) === 0.8, "utilization passes through unchanged");
+console.assert(clampUtilization(1.4) === 1, "utilization clamps above 1");
+console.assert(clampUtilization(-0.2) === 0, "utilization clamps below 0");
+console.assert(clampUtilization(undefined) === null, "missing utilization is null, not 0");
+console.assert(clampUtilization("nope") === null, "non-numeric utilization is null");
+console.assert(formatRateLimitType("seven_day") === "7 day", "seven_day should read as '7 day'");
+console.assert(formatRateLimitType("five_hour") === "5 hour", "five_hour should read as '5 hour'");
+console.assert(formatRateLimitType("opus_weekly") === "opus weekly", "unknown type still renders");
 
 const LABELS = {
   running: "Running",
@@ -654,16 +683,33 @@ function renderStatus(s) {
 
   const limit = s.rate_limit || null;
   const resets = limit ? Number(limit.resetsAt) || 0 : 0;
-  $("quota").hidden = !resets;
-  if (resets) {
-    const type = String(limit.rateLimitType || limit.status || "quota");
-    if (!quotaWindow || quotaWindow.resets !== resets) {
-      quotaWindow = { resets, from: quotaFrom(resets, type) };
+  const utilization = limit ? clampUtilization(limit.utilization) : null;
+  // Nothing to show at all: neither a countdown nor a fill.
+  $("quota").hidden = !limit || (!resets && utilization === null);
+  if (limit) {
+    const status = typeof limit.status === "string" ? limit.status : "";
+    // Same read as blocking_reset() in loop.py: "allowed"-shaped is
+    // headroom, anything else is a block. A status this page has never
+    // seen lands in the same bucket the loop itself would put it in.
+    const level = status === "allowed" ? "" : status.startsWith("allowed") ? "warn" : "bad";
+    $("quota").dataset.level = level;
+    $("quota-type").textContent =
+      formatRateLimitType(limit.rateLimitType || status || "quota") + " limit";
+
+    // Older payloads carry no utilization -- hide the track rather than
+    // show a fill that would just be wrong (0% looks like "empty", not
+    // "unknown").
+    $("meter").hidden = utilization === null;
+    if (utilization !== null) {
+      $("meter-fill").style.width = (utilization * 100).toFixed(1) + "%";
     }
-    $("quota-type").textContent = type.replace(/_/g, " ") + " limit";
-  } else {
-    quotaWindow = null;
+    const threshold = clampUtilization(limit.surpassedThreshold);
+    $("meter-threshold").hidden = threshold === null;
+    if (threshold !== null) {
+      $("meter-threshold").style.left = (threshold * 100).toFixed(1) + "%";
+    }
   }
+  if (!resets) $("quota-left").textContent = "—";
   tick();
 }
 
@@ -678,12 +724,11 @@ function tick() {
     $("elapsed").textContent = clock(t - snap.started_at);
     $("elapsed-label").textContent = "Elapsed";
   }
-  if (quotaWindow) {
-    const span = Math.max(1, quotaWindow.resets - quotaWindow.from);
-    const gone = Math.min(1, Math.max(0, (t - quotaWindow.from) / span));
-    $("meter-fill").style.width = (gone * 100).toFixed(1) + "%";
-    $("quota-left").textContent = coarse(quotaWindow.resets - t);
-  }
+  // resetsAt is independent of utilization -- one says how much is left,
+  // the other when it comes back -- so the countdown ticks every second
+  // regardless of whether the meter fill above is showing.
+  const resets = snap.rate_limit ? Number(snap.rate_limit.resetsAt) || 0 : 0;
+  if (resets) $("quota-left").textContent = coarse(resets - t);
 }
 setInterval(tick, 1000);
 

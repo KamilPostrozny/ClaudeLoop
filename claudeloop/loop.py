@@ -61,7 +61,27 @@ def blocking_reset(events: list[dict]) -> float | None:
         if event.get("type") != "rate_limit_event":
             continue
         info = event.get("rate_limit_info") or {}
-        if info.get("status") == "allowed":
+        status = info.get("status")
+        # The vocabulary here is thin -- "allowed" and "allowed_warning"
+        # (a live smoke test surfaced the latter: 80% of the seven-day
+        # window used, still allowed) plus "rejected" from this repo's own
+        # fake CLI -- so this keys off the "allowed" prefix rather than an
+        # exact-match list. Every headroom report seen so far is shaped
+        # "allowed*"; a blocking status uses an unrelated word. `utilization`
+        # and `surpassedThreshold` are informational and never looked at
+        # here -- they describe headroom, not whether a request went
+        # through.
+        #
+        # A status that is neither "allowed" nor "allowed*" -- including one
+        # this code has never seen -- falls on the blocking side. Of the two
+        # ways to be wrong: a false wait costs hours but is bounded
+        # (MAX_WAIT_S) and visible on the dashboard as "waiting", still
+        # making progress once it wakes up. A false non-wait would instead
+        # hammer the CLI through every remaining resume against a real
+        # block, burning max_resumes in seconds and failing the task
+        # outright -- the exact failure mode this whole recovery path
+        # exists to prevent. Blocking-by-default is the safer guess.
+        if isinstance(status, str) and status.startswith("allowed"):
             return None
         try:
             # resetsAt is documented as a unix timestamp in seconds; this is

@@ -63,6 +63,57 @@ class BlockingResetTest(unittest.TestCase):
             blocking_reset(events), time.time() + FALLBACK_WAIT_S, delta=1
         )
 
+    def test_allowed_warning_does_not_block(self):
+        # The real payload a live smoke test produced: 80% of the seven-day
+        # window used, status "allowed_warning" -- still allowed. Before the
+        # fix, anything other than an exact "allowed" was read as blocking,
+        # so this parked the loop until resetsAt for no reason.
+        self.assertIsNone(blocking_reset(load("allowed_warning.jsonl")))
+
+    def test_utilization_and_surpassed_threshold_do_not_affect_blocking(self):
+        # Informational fields, present or absent, must never flip the
+        # decision either way.
+        warning = {
+            "status": "allowed_warning",
+            "rateLimitType": "seven_day",
+            "resetsAt": 1785600000,
+            "utilization": 0.8,
+            "isUsingOverage": False,
+            "surpassedThreshold": 0.75,
+        }
+        bare_warning = {"status": "allowed_warning", "resetsAt": 1785600000}
+        self.assertIsNone(
+            blocking_reset([{"type": "rate_limit_event", "rate_limit_info": warning}])
+        )
+        self.assertIsNone(
+            blocking_reset([{"type": "rate_limit_event", "rate_limit_info": bare_warning}])
+        )
+
+        blocked = {
+            "status": "rejected",
+            "resetsAt": 1785600000,
+            "utilization": 1.0,
+            "surpassedThreshold": 0.75,
+        }
+        bare_blocked = {"status": "rejected", "resetsAt": 1785600000}
+        self.assertEqual(
+            blocking_reset([{"type": "rate_limit_event", "rate_limit_info": blocked}]),
+            1785600000.0,
+        )
+        self.assertEqual(
+            blocking_reset([{"type": "rate_limit_event", "rate_limit_info": bare_blocked}]),
+            1785600000.0,
+        )
+
+    def test_unrecognised_status_is_treated_as_blocking(self):
+        # Thin known vocabulary ("allowed", "allowed_warning", "rejected");
+        # anything else -- including a status nobody's seen -- must not be
+        # read as headroom. See the comment in blocking_reset for why this
+        # is the safer of the two ways to guess wrong.
+        info = {"status": "throttled", "resetsAt": 1785600000}
+        events = [{"type": "rate_limit_event", "rate_limit_info": info}]
+        self.assertEqual(blocking_reset(events), 1785600000.0)
+
 
 class SleepDelayTest(unittest.TestCase):
     def test_normal_wait_is_unclamped(self):
