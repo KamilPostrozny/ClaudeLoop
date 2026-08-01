@@ -15,6 +15,8 @@ import time
 import urllib.error
 import urllib.request
 
+from .source import Task, task_id
+
 log = logging.getLogger("claudeloop")
 
 SEARCH_PATH = "/search/jql"  # pinned by the live probe in Task 1
@@ -169,3 +171,111 @@ class JiraClient:
         return self._request("POST", f"/issue/{key}/transitions", {
             "transition": {"id": transition_id}
         })
+
+
+class JiraSource:
+    """A TaskSource over a Jira Cloud project.
+
+    Nothing here may raise into the loop: an unreachable Jira must look like
+    an empty backlog (so the loop idles and retries), and a Jira that refuses
+    a write must not turn finished work into a failure.
+    """
+
+    def __init__(
+        self,
+        client: JiraClient,
+        jql: str,
+        state=None,
+        transition_start: str = "",
+        transition_done: str = "",
+    ):
+        self.client = client
+        self.jql = jql
+        self.state = state
+        self.transition_start = transition_start
+        self.transition_done = transition_done
+
+    def pending(self) -> list[Task]:
+        try:
+            data = self.client.search(compose_jql(self.jql))
+        except JiraError as error:
+            # Deliberately indistinguishable from an empty backlog. The loop
+            # idles POLL_S and asks again; a raise here would instead crash
+            # main_loop's task handler on every poll.
+            log.warning("could not read the Jira backlog (%s); retrying later", error)
+            return []
+        done = self.state.terminal_ids() if self.state is not None else set()
+        tasks = []
+        for issue in data.get("issues", []):
+            key = issue.get("key")
+            if not key:
+                continue
+            identifier = task_id(key)
+            if identifier in done:
+                # The label write never landed, or someone cleared it. The
+                # database says this task already reached a verdict.
+                log.warning(
+                    "%s is still in the backlog but already finished in"
+                    " state.db -- skipping it; ClaudeLoop's label may have"
+                    " failed to write", key,
+                )
+                continue
+            fields = issue.get("fields") or {}
+            tasks.append(Task(
+                identifier,
+                task_text(key, fields.get("summary"), fields.get("description")),
+                "jira",
+                key,
+            ))
+        return tasks
+
+    def start(self, task: Task) -> None:
+        if self.transition_start:
+            self._transition(task.source_ref, self.transition_start)
+
+    def mark(self, task: Task, status: str, summary: str, cost: float = 0.0) -> None:
+        key = task.source_ref
+        label = DONE_LABEL if status == "done" else BLOCKED_LABEL
+        # First, and alone in mattering: the JQL guard keys on this label, so
+        # once it lands the ticket cannot be picked up again. The comment and
+        # the transition below are for humans.
+        try:
+            self.client.add_label(key, label)
+        except JiraError as error:
+            log.warning(
+                "could not label %s %s (%s) -- the ticket will look pending in"
+                " Jira; state.db is what stops it re-running", key, label, error,
+            )
+        try:
+            self.client.add_comment(key, closing_comment(status, summary, cost))
+        except JiraError as error:
+            log.warning("could not comment on %s (%s)", key, error)
+        if self.transition_done:
+            self._transition(key, self.transition_done)
+
+    def _transition(self, key: str, name: str) -> None:
+        """Move an issue by transition name, if Jira offers that name for this
+        issue right now.
+
+        Jira, not ClaudeLoop, decides whether a transition is permitted: the
+        workflow may not allow it from the issue's current status, its screen
+        may demand a field, the account may lack the permission. None of that
+        is a reason to fail work that is finished, so every failure here is a
+        warning.
+        """
+        try:
+            offered = self.client.transitions(key)
+            match = next(
+                (t for t in offered if str(t.get("name", "")).casefold() == name.casefold()),
+                None,
+            )
+            if match is None:
+                log.warning(
+                    "%s: Jira does not offer a %r transition from its current"
+                    " status (offered: %s) -- leaving the issue where it is",
+                    key, name, ", ".join(str(t.get("name")) for t in offered) or "none",
+                )
+                return
+            self.client.transition(key, match["id"])
+        except JiraError as error:
+            log.warning("could not transition %s to %r (%s)", key, name, error)

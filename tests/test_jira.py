@@ -2,8 +2,9 @@ import unittest
 
 from claudeloop.jira import (
     BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
-    closing_comment, compose_jql, task_text,
+    JiraSource, closing_comment, compose_jql, task_text,
 )
+from claudeloop.source import Task, task_id
 
 from .jira_fake import FakeJira, fixture
 
@@ -156,3 +157,148 @@ class LabelsTest(unittest.TestCase):
         self.assertEqual(BLOCKED_LABEL, "claudeloop-blocked")
         self.assertIn(DONE_LABEL, compose_jql("project = OPS"))
         self.assertIn(BLOCKED_LABEL, compose_jql("project = OPS"))
+
+
+class FakeState:
+    def __init__(self, ids=()):
+        self.ids = set(ids)
+
+    def terminal_ids(self):
+        return self.ids
+
+
+class JiraSourceTest(unittest.TestCase):
+    def source(self, routes, **kwargs):
+        self.fake = FakeJira(routes)
+        self.addCleanup(self.fake.close)
+        client = JiraClient(self.fake.url, "me@example.com", "token",
+                            sleep=lambda _: None)
+        return JiraSource(client, kwargs.pop("jql", "project = OPS"), **kwargs)
+
+    def test_pending_builds_one_task_per_issue(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        tasks = source.pending()
+        self.assertEqual(len(tasks), 2)
+        first = tasks[0]
+        self.assertEqual(first.source, "jira")
+        self.assertEqual(first.source_ref, "OPS-1")
+        self.assertEqual(first.id, task_id("OPS-1"))
+        self.assertEqual(len(first.id), 16)
+        self.assertTrue(first.text.startswith("OPS-1: "), first.text)
+
+    def test_pending_survives_the_null_description_in_the_fixture(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        self.assertTrue(all(task.text for task in source.pending()))
+
+    def test_pending_sends_the_composed_jql(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        source.pending()
+        _, _, payload = self.fake.requests[0]
+        self.assertIn("labels IS EMPTY", payload["jql"])
+        self.assertIn("project = OPS", payload["jql"])
+
+    def test_pending_drops_tasks_already_terminal_in_the_database(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+                             state=FakeState({task_id("OPS-1")}))
+        self.assertEqual([t.source_ref for t in source.pending()], ["OPS-2"])
+
+    def test_pending_returns_empty_on_an_http_error_rather_than_raising(self):
+        source = self.source({f"POST {SEARCH_PATH}": (401, {"errorMessages": ["nope"]})})
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual(source.pending(), [])
+
+    def test_pending_returns_empty_when_jira_is_unreachable(self):
+        fake = FakeJira({})
+        url = fake.url
+        fake.close()
+        client = JiraClient(url, "me@example.com", "token", sleep=lambda _: None,
+                            timeout=1.0)
+        source = JiraSource(client, "project = OPS")
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual(source.pending(), [])
+
+    def test_mark_labels_comments_and_transitions_in_that_order(self):
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [
+                {"id": "31", "name": "Done"}]}),
+            "POST /issue/OPS-1/transitions": (204, {}),
+        }, transition_done="Done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        source.mark(task, "done", "went fine", 0.5)
+        paths = [(method, path) for method, path, _ in self.fake.requests]
+        self.assertEqual(paths[0], ("PUT", "/issue/OPS-1"))
+        self.assertEqual(paths[1], ("POST", "/issue/OPS-1/comment"))
+        self.assertEqual(paths[-1], ("POST", "/issue/OPS-1/transitions"))
+        _, _, label = self.fake.requests[0]
+        self.assertEqual(label, {"update": {"labels": [{"add": "claudeloop-done"}]}})
+        _, _, comment = self.fake.requests[1]
+        self.assertIn("$0.5000", comment["body"])
+        _, _, move = self.fake.requests[-1]
+        self.assertEqual(move, {"transition": {"id": "31"}})
+
+    def test_mark_uses_the_blocked_label_for_failed_and_blocked(self):
+        for status in ("failed", "blocked"):
+            with self.subTest(status=status):
+                source = self.source({"PUT /issue/OPS-1": (204, {}),
+                                      "POST /issue/OPS-1/comment": (201, {})})
+                task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+                source.mark(task, status, "did not finish")
+                _, _, label = self.fake.requests[0]
+                self.assertEqual(label["update"]["labels"][0]["add"],
+                                 "claudeloop-blocked")
+
+    def test_mark_still_labels_when_the_comment_fails(self):
+        source = self.source({"PUT /issue/OPS-1": (204, {}),
+                              "POST /issue/OPS-1/comment": (500, {"e": 1})})
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.mark(task, "done", "went fine")
+        self.assertEqual(self.fake.requests[0][:2], ("PUT", "/issue/OPS-1"))
+
+    def test_mark_survives_a_label_write_that_never_lands(self):
+        source = self.source({"PUT /issue/OPS-1": (403, {"errorMessages": ["no"]}),
+                              "POST /issue/OPS-1/comment": (201, {})})
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.mark(task, "done", "went fine")  # must not raise
+
+    def test_a_transition_jira_does_not_offer_is_a_warning_not_a_failure(self):
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [
+                {"id": "11", "name": "In Review"}]}),
+        }, transition_done="Done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.mark(task, "done", "went fine")
+        self.assertIn("Done", "".join(logs.output))
+        self.assertNotIn(("POST", "/issue/OPS-1/transitions"),
+                         [(m, p) for m, p, _ in self.fake.requests])
+
+    def test_transition_names_match_case_insensitively(self):
+        source = self.source({
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [
+                {"id": "21", "name": "In Progress"}]}),
+            "POST /issue/OPS-1/transitions": (204, {}),
+        }, transition_start="in progress")
+        source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
+        _, _, move = self.fake.requests[-1]
+        self.assertEqual(move, {"transition": {"id": "21"}})
+
+    def test_start_does_nothing_when_no_start_transition_is_configured(self):
+        source = self.source({})
+        source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
+        self.assertEqual(self.fake.requests, [])
+
+    def test_start_survives_jira_being_down(self):
+        fake = FakeJira({})
+        url = fake.url
+        fake.close()
+        client = JiraClient(url, "me@example.com", "token", sleep=lambda _: None,
+                            timeout=1.0)
+        source = JiraSource(client, "project = OPS", transition_start="In Progress")
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
