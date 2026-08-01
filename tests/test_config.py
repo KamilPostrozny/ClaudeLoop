@@ -14,6 +14,7 @@ class ConfigTest(unittest.TestCase):
     def write(self, body: str) -> Path:
         path = self.tmp / "config.toml"
         path.write_text(body)
+        path.chmod(0o600)
         return path
 
     def test_reads_values_and_applies_defaults(self):
@@ -77,6 +78,7 @@ class WebConfigTest(unittest.TestCase):
             f'repo = "{self.repo}"\n'
             f'tasks_file = "{self.tmp}/tasks.md"\n' + extra
         )
+        path.chmod(0o600)
         return path
 
     def test_web_defaults_are_loopback(self):
@@ -123,6 +125,98 @@ class WebConfigTest(unittest.TestCase):
                 self.write(f'web_host = "{host}"\n'), home=self.tmp / "home"
             )
             self.assertEqual(cfg.web_host, host)
+
+
+class SessionEnvironmentConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        self.home = self.tmp / "home"
+
+    def write(self, extra: str = "", mode: int = 0o600) -> Path:
+        path = self.tmp / "config.toml"
+        path.write_text(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n' + extra
+        )
+        path.chmod(mode)
+        return path
+
+    def test_instruction_paths_default_under_home(self):
+        cfg = load_config(self.write(), home=self.home)
+        self.assertEqual(cfg.instructions_file, self.home / "instructions.md")
+        self.assertEqual(cfg.definition_of_done_file, self.home / "definition-of-done.md")
+
+    def test_instruction_paths_can_be_overridden(self):
+        cfg = load_config(
+            self.write(
+                f'instructions_file = "{self.tmp}/mine.md"\n'
+                f'definition_of_done_file = "{self.tmp}/dod.md"\n'
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.instructions_file, self.tmp / "mine.md")
+        self.assertEqual(cfg.definition_of_done_file, self.tmp / "dod.md")
+
+    def test_plugin_and_mcp_keys_default_to_unset(self):
+        cfg = load_config(self.write(), home=self.home)
+        self.assertIsNone(cfg.settings_file)
+        self.assertIsNone(cfg.mcp_config)
+        self.assertFalse(cfg.strict_mcp)
+
+    def test_plugin_and_mcp_keys_are_read(self):
+        cfg = load_config(
+            self.write(
+                f'settings_file = "{self.tmp}/settings.json"\n'
+                f'mcp_config = "{self.tmp}/mcp.json"\n'
+                "strict_mcp = true\n"
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.settings_file, self.tmp / "settings.json")
+        self.assertEqual(cfg.mcp_config, self.tmp / "mcp.json")
+        self.assertTrue(cfg.strict_mcp)
+
+    def test_strict_mcp_without_mcp_config_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write("strict_mcp = true\n"), home=self.home)
+        self.assertIn("mcp_config", str(caught.exception))
+
+    def test_session_env_defaults_empty(self):
+        self.assertEqual(load_config(self.write(), home=self.home).session_env, {})
+
+    def test_session_env_is_read_as_strings(self):
+        cfg = load_config(
+            self.write(
+                "[session_env]\n"
+                'GH_TOKEN = "ghp_abc"\n'
+                'GIT_CONFIG_COUNT = 1\n'
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.session_env, {"GH_TOKEN": "ghp_abc", "GIT_CONFIG_COUNT": "1"})
+
+    def test_session_env_rejects_a_nested_table(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write("[session_env.nested]\nA = \"b\"\n"), home=self.home
+            )
+        self.assertIn("session_env", str(caught.exception))
+
+    def test_a_group_readable_config_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(mode=0o640), home=self.home)
+        message = str(caught.exception)
+        self.assertIn("chmod 600", message)
+
+    def test_a_world_readable_config_is_refused(self):
+        with self.assertRaises(ValueError):
+            load_config(self.write(mode=0o644), home=self.home)
+
+    def test_an_owner_only_config_is_accepted(self):
+        cfg = load_config(self.write(mode=0o600), home=self.home)
+        self.assertEqual(cfg.repo, self.repo)
 
 
 if __name__ == "__main__":
