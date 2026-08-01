@@ -35,6 +35,19 @@ retrofitted to Jira. **S5 follows S3** so its config schema is written once
 against the complete key set; S5 absorbs the cost of folding S1.1's and S3's
 hand-written validation into that schema.
 
+S5 should also offer a curated **proposed plugin set**: the wizard presents
+plugins ClaudeLoop suggests rather than leaving the operator to discover them,
+and each carries optional default instructions on how to use it. Those
+instructions live in their **own file, separate from `instructions.md`**, so
+ClaudeLoop's suggested plugin guidance never gets tangled with the operator's
+own policy — the two have different authors and different lifetimes, and an
+operator editing their instructions should not be editing ours.
+
+That adds a fourth prompt layer to the three S1.1 established (protocol,
+operator, definition of done). It slots below the operator layer and above the
+definition of done: it is ClaudeLoop's advice about its own tooling, so the
+operator must be able to override it.
+
 S5 also carries two constraints settled in advance. It is the first slice to
 **write** anything from the browser, deliberately breaking S2a's global
 read-only rule, and it writes a file containing tokens. And it has a bootstrap
