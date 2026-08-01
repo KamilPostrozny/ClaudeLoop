@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -154,12 +155,15 @@ class JiraClient:
         })
 
     def issue(self, key: str) -> dict:
+        key = urllib.parse.quote(key, safe="")
         return self._request("GET", f"/issue/{key}?fields=summary,description,status,labels")
 
     def comments(self, key: str) -> dict:
+        key = urllib.parse.quote(key, safe="")
         return self._request("GET", f"/issue/{key}/comment")
 
     def add_comment(self, key: str, body: str) -> dict:
+        key = urllib.parse.quote(key, safe="")
         return self._request("POST", f"/issue/{key}/comment", {"body": body})
 
     def add_label(self, key: str, label: str) -> dict:
@@ -316,16 +320,31 @@ class JiraSource:
             log.warning("could not transition %s to %r (%s)", key, name, error)
 
 
-def _normalize_key(key: str) -> str:
-    """Strip a trailing colon (and surrounding whitespace) from an issue key.
+_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*-\d+")
+
+
+def _normalize_key(key: str) -> str | None:
+    """Strip a single trailing colon (and surrounding whitespace) from an
+    issue key, then check its shape.
 
     The prompt layer tells the session the key is the part before the colon
     in the task text ("OPS-42: Fix the widget" -> OPS-42), but a
     literal-minded session may still pass "OPS-42:" with the colon attached.
     Both subcommands go through this so neither hits /issue/OPS-42: instead
     of /issue/OPS-42.
+
+    Also the only gate before a key reaches JiraClient: unlike every other
+    caller, which passes keys straight from Jira's own search results, this
+    one originates from raw argv in a session running with bypassed
+    permissions. Returns None -- rather than raising -- when the result is
+    not a Jira issue key (PROJECT-123), so the caller can fail with a
+    readable message instead of forwarding something like
+    "OPS-1/../../issue/OPS-2" into a URL path.
     """
-    return key.strip().rstrip(":").strip()
+    normalized = key.strip().removesuffix(":").strip()
+    if not _KEY_RE.fullmatch(normalized):
+        return None
+    return normalized
 
 
 def _client(config_path) -> JiraClient:
@@ -379,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     key = _normalize_key(args.key)
+    if key is None:
+        print(f"not a Jira issue key: {args.key!r}", file=sys.stderr)
+        return 2
     client = _client(Path(args.config))
     try:
         if args.command == "show":

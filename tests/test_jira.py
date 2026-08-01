@@ -38,6 +38,15 @@ class JiraClientTest(unittest.TestCase):
         # base64("me@example.com:token")
         self.assertEqual(client.header, "Basic bWVAZXhhbXBsZS5jb206dG9rZW4=")
 
+    def test_issue_percent_encodes_a_key_needing_it(self):
+        # A key reaching JiraClient is not always one Jira itself produced --
+        # the CLI's is raw argv. Every path-building method must encode it
+        # rather than splice it in verbatim.
+        client = self.client({"GET /issue/OPS%201": (200, fixture("issue"))})
+        client.issue("OPS 1")
+        _, path, _ = self.fake.requests[0]
+        self.assertIn("OPS%201", path)
+
     def test_transitions_returns_the_list(self):
         client = self.client({"GET /issue/OPS-1/transitions": (200, fixture("transitions"))})
         names = [t["name"] for t in client.transitions("OPS-1")]
@@ -429,3 +438,25 @@ class CliTest(unittest.TestCase):
         code, _ = self.run_cli(["--config", str(config), "comment", "OPS-1:", "hello"])
         self.assertEqual(code, 0)
         self.assertEqual(self.fake.requests[0][1], "/issue/OPS-1/comment")
+
+    def test_a_path_traversal_key_is_rejected_without_calling_jira(self):
+        # If anything in front of Jira normalises dot segments, a key like
+        # this could put a comment on a different issue than the one named.
+        # It must never reach JiraClient at all.
+        config = self.configured({})
+        code, _ = self.run_cli(
+            ["--config", str(config), "comment", "OPS-1/../../issue/OPS-2", "hello"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_a_key_that_is_not_shaped_like_one_is_rejected(self):
+        config = self.configured({})
+        code, _ = self.run_cli(["--config", str(config), "show", "not a key"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_an_empty_key_is_rejected(self):
+        config = self.configured({})
+        code, _ = self.run_cli(["--config", str(config), "show", ""])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.fake.requests, [])
