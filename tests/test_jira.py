@@ -555,3 +555,88 @@ class CliTest(unittest.TestCase):
         code, _ = self.run_cli(["--config", str(config), "show", ""])
         self.assertNotEqual(code, 0)
         self.assertEqual(self.fake.requests, [])
+
+
+class QuestionCommentTest(unittest.TestCase):
+    def test_it_carries_the_summary_and_teaches_the_reply_syntax(self):
+        from claudeloop.jira import QUESTION_HEADING, QUESTION_MARKER, question_comment
+
+        body = question_comment("I stopped.\n\nQuestion: which currency?", 0.25)
+
+        self.assertTrue(body.startswith(QUESTION_HEADING))
+        self.assertIn("Question: which currency?", body)
+        self.assertIn(QUESTION_MARKER, body)
+        self.assertIn("0.2500", body)
+
+    def test_a_blocked_task_gets_the_question_comment_not_the_closing_one(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(
+            Task("abc", "OPS-1: thing", "jira", "OPS-1"),
+            "blocked",
+            "I stopped.\n\nQuestion: which currency?",
+            0.25,
+        )
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertEqual(len(comments), 1)
+        from claudeloop.jira import QUESTION_HEADING
+        self.assertTrue(comments[0]["body"].startswith(QUESTION_HEADING))
+        self.assertNotIn("finished this task", comments[0]["body"])
+
+    def test_a_done_task_still_gets_the_closing_comment(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(Task("abc", "OPS-1: thing", "jira", "OPS-1"), "done", "did it", 0.5)
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertIn("finished this task", comments[0]["body"])
+
+
+class ReopenTest(unittest.TestCase):
+    def test_reopen_removes_only_the_blocked_label(self):
+        from claudeloop.jira import BLOCKED_LABEL
+
+        fake = FakeJira({"PUT /issue/OPS-1": (204, {})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.reopen(Task("abc", "OPS-1: thing", "jira", "OPS-1"))
+
+        puts = [payload for method, path, payload in fake.requests if method == "PUT"]
+        self.assertEqual(puts, [{"update": {"labels": [{"remove": BLOCKED_LABEL}]}}])
+
+    def test_reopen_survives_a_jira_that_refuses(self):
+        fake = FakeJira({"PUT /issue/OPS-1": (403, {"errorMessages": ["nope"]})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.reopen(Task("abc", "OPS-1: thing", "jira", "OPS-1"))
+
+    def test_an_issue_key_is_escaped_into_every_client_url(self):
+        # add_label / transitions / transition used to interpolate the key
+        # raw. Only JiraSource passed keys, always straight from Jira's own
+        # search results, so it was safe by accident rather than by design.
+        client = JiraClient("http://example.invalid", "e@x", "t")
+        seen = []
+        client._request = lambda method, path, payload=None: seen.append(path) or {}
+
+        client.add_label("OPS 1/x", "l")
+        client.remove_label("OPS 1/x", "l")
+        client.transitions("OPS 1/x")
+        client.transition("OPS 1/x", "31")
+
+        self.assertTrue(all("OPS%201%2Fx" in path for path in seen), seen)
