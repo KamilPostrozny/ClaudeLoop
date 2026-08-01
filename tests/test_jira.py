@@ -262,6 +262,18 @@ class JiraSourceTest(unittest.TestCase):
         tasks = asyncio.run(asyncio.to_thread(source.pending))
         self.assertEqual([t.source_ref for t in tasks], ["OPS-2"])
 
+    def test_pending_names_index_lag_before_a_failed_write(self):
+        # Reworded after the live smoke test: state.db's backstop matters
+        # most in the seconds right after mark() labels a ticket, while
+        # Jira's search index has not caught up yet -- not primarily because
+        # the label write failed. An operator reading this at 3am should be
+        # pointed at index lag first.
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+                             state=FakeState({task_id("OPS-1")}))
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.pending()
+        self.assertIn("index", "".join(logs.output).lower())
+
     def test_pending_returns_empty_on_an_http_error_rather_than_raising(self):
         source = self.source({f"POST {SEARCH_PATH}": (401, {"errorMessages": ["nope"]})})
         with self.assertLogs("claudeloop", level="WARNING"):

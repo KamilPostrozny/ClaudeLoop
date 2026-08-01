@@ -181,6 +181,11 @@ Real, deliberately deferred, tracked here so they are not lost.
   issue key into the URL unescaped — safe today only because `JiraSource` is
   their only caller and always passes keys straight from Jira's own search
   results.
+- A `claude -p` session survives its parent being killed abruptly: it runs
+  with `start_new_session=True`, and the loop's kill path only runs on its
+  own orderly exit. An operator who kills the orchestrator with SIGKILL must
+  also kill the session themselves. Observed during the Jira source's live
+  smoke test.
 
 ## Working notes
 

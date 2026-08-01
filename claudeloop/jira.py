@@ -213,6 +213,13 @@ class JiraSource:
     Nothing here may raise into the loop: an unreachable Jira must look like
     an empty backlog (so the loop idles and retries), and a Jira that refuses
     a write must not turn finished work into a failure.
+
+    Jira's search index is eventually consistent: `mark()` can label a ticket
+    `claudeloop-done` and the very next poll can still find it in JQL results,
+    because the index has not caught up yet. state.db's terminal_ids() backstop
+    (below) is what covers that window -- it is not merely insurance against a
+    label write that failed outright, it is load-bearing every time the loop
+    polls again shortly after finishing a task.
     """
 
     def __init__(
@@ -241,6 +248,10 @@ class JiraSource:
         done = set()
         if self.state is not None:
             try:
+                # The backstop for Jira's search-index lag: a ticket just
+                # labelled claudeloop-done can still match this JQL on the
+                # very next poll because the index has not caught up, and
+                # state.db is the only thing that catches that case.
                 done = self.state.terminal_ids()
             except sqlite3.Error as error:
                 # A locked or corrupt database is not a reason to crash the
@@ -267,12 +278,15 @@ class JiraSource:
                 continue
             identifier = task_id(key)
             if identifier in done:
-                # The label write never landed, or someone cleared it. The
+                # Most often Jira's search index has not yet caught up with
+                # a label write that already landed; less often the label
+                # write itself failed, or someone cleared it. Either way the
                 # database says this task already reached a verdict.
                 log.warning(
                     "%s is still in the backlog but already finished in"
-                    " state.db -- skipping it; ClaudeLoop's label may have"
-                    " failed to write", key,
+                    " state.db -- skipping it; likely Jira's search index"
+                    " has not caught up with ClaudeLoop's label yet (it can"
+                    " also mean the label write failed)", key,
                 )
                 continue
             fields = issue.get("fields")
