@@ -528,41 +528,101 @@ async def run_task(
     return result
 
 
+def read_answer(run_dir: Path) -> str | None:
+    """The dashboard's answer for a parked task, consumed as it is read.
+
+    Unlinked whatever it contained: a file left in place would resume the
+    task a second time on the next poll, or -- if it is malformed -- warn on
+    every poll forever.
+    """
+    path = run_dir / "answer.json"
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    path.unlink(missing_ok=True)
+    try:
+        answer = str(json.loads(raw)["answer"]).strip()
+    except (json.JSONDecodeError, TypeError, KeyError) as error:
+        log.warning("ignoring an unreadable answer file at %s (%s)", path, error)
+        return None
+    return answer or None
+
+
+def find_answered(cfg: Config, state: State, source: TaskSource) -> tuple[Task, str] | None:
+    """The first parked task with an answer waiting, through either channel.
+
+    Blocking on both counts -- sqlite3 on this connection and, under the Jira
+    source, one HTTP round trip per parked task -- so the loop calls this
+    through asyncio.to_thread. The Jira reads are only paid while something
+    is actually parked.
+    """
+    for row in state.blocked():
+        task = Task(row["id"], row["text"], row["source"], row["source_ref"])
+        answer = read_answer(cfg.home / "runs" / task.id) or source.answer(task)
+        if answer:
+            return task, answer
+    return None
+
+
+def _reopen(source: TaskSource, task: Task) -> None:
+    """Undo the source's blocked mark. Never raises: state.db is what drives
+    the resume, and the mark is only for humans."""
+    try:
+        source.reopen(task)
+    except Exception as error:
+        log.warning("could not reopen task %s in its source (%s)", task.id, error)
+
+
 async def main_loop(cfg: Config, once: bool = False) -> None:
     """Run pending tasks one at a time, forever.
 
-    `once` drains the tasks pending right now and returns, for tests.
+    A task parked on a question is checked for an answer before new work is
+    polled for, so an answered task resumes ahead of starting something
+    fresh.
+
+    `once` drains the tasks pending right now -- including any that have been
+    answered -- and returns, for tests.
     """
     state = State(cfg.home / "state.db")
     source = build_source(cfg, state)
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         while True:
-            pending = await asyncio.to_thread(source.pending)
-            if not pending:
-                if once:
-                    status_module.set_status(**IDLE_FIELDS)
-                    return
-                status_module.set_status(**IDLE_FIELDS)
-                await asyncio.sleep(POLL_S)
-                continue
-            # Re-read after every task: the file may have been edited meanwhile.
-            task = pending[0]
-            # Published for the dashboard: web reads this off the snapshot
-            # rather than re-reading the task source itself, since under the
-            # Jira source that would be a network call on the web thread.
-            # As a result the list is only as fresh as the start of the
-            # current task, not live -- under the file source that's a small
-            # step back from the old per-request re-read (an edit to
-            # tasks.md mid-task won't show until the next task starts); under
-            # the Jira source a per-request re-read would mean a network
-            # round trip on the web thread, which is the whole reason this
-            # rides on the snapshot instead.
-            status_module.set_status(
-                pending=tuple((t.id, t.text) for t in pending)
-            )
             try:
-                await run_task(cfg, state, source, task)
+                answered = await asyncio.to_thread(find_answered, cfg, state, source)
+            except Exception:
+                # A locked database or a Jira fault must not stop the loop
+                # from picking up ordinary pending work.
+                log.exception("could not check for answers to parked tasks")
+                answered = None
+            if answered is not None:
+                # Before new pending work on purpose: an answer a human has
+                # already given is worth more than starting something fresh.
+                # One per iteration, because the loop is serial.
+                task, resume_with = answered
+                await asyncio.to_thread(_reopen, source, task)
+            else:
+                pending = await asyncio.to_thread(source.pending)
+                if not pending:
+                    status_module.set_status(**IDLE_FIELDS)
+                    if once:
+                        return
+                    await asyncio.sleep(POLL_S)
+                    continue
+                # Re-read after every task: the file may have been edited
+                # meanwhile.
+                task, resume_with = pending[0], None
+                # Published for the dashboard: web reads this off the
+                # snapshot rather than re-reading the task source itself,
+                # since under the Jira source that would be a network call on
+                # the web thread. As a result the list is only as fresh as
+                # the start of the current task, not live.
+                status_module.set_status(
+                    pending=tuple((t.id, t.text) for t in pending)
+                )
+            try:
+                await run_task(cfg, state, source, task, resume_with=resume_with)
             except Exception as error:
                 # A crash here (claude missing from PATH, ENOSPC on events.jsonl,
                 # a fork failing under memory pressure, ...) is an environment

@@ -1056,5 +1056,188 @@ class ResumeWithAnswerTest(unittest.TestCase):
         self.assertEqual(row["status"], "done")
 
 
+class AnsweredScanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "runs" / "abcd"
+        self.run_dir.mkdir(parents=True)
+
+    def write(self, payload: str) -> Path:
+        path = self.run_dir / "answer.json"
+        path.write_text(payload)
+        return path
+
+    def test_an_answer_file_is_read(self):
+        self.write(json.dumps({"answer": "use EUR", "at": 1.0}))
+
+        self.assertEqual(loop.read_answer(self.run_dir), "use EUR")
+
+    def test_an_answer_file_is_consumed_so_it_cannot_fire_twice(self):
+        path = self.write(json.dumps({"answer": "use EUR"}))
+
+        loop.read_answer(self.run_dir)
+
+        self.assertFalse(path.exists())
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+    def test_no_answer_file_is_not_an_answer(self):
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+    def test_an_unreadable_answer_file_is_dropped_with_a_warning(self):
+        # Left in place it would re-warn on every poll forever.
+        path = self.write("{not json")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertIsNone(loop.read_answer(self.run_dir))
+
+        self.assertFalse(path.exists())
+
+    def test_an_empty_answer_is_not_an_answer(self):
+        self.write(json.dumps({"answer": "   "}))
+
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+
+class FindAnsweredTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tmp / "tasks.md",
+            home=self.tmp / "home",
+        )
+        self.cfg.tasks_file.write_text("- [ ] alpha\n")
+        (self.cfg.repo / ".git").mkdir(parents=True)
+        self.state = State(self.cfg.home / "state.db")
+        self.source = FileSource(self.cfg.tasks_file)
+        self.task = self.source.pending()[0]
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+
+    def answer_file(self, text: str) -> None:
+        run_dir = self.cfg.home / "runs" / self.task.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "answer.json").write_text(json.dumps({"answer": text}))
+
+    def test_no_answer_anywhere_finds_nothing(self):
+        self.assertIsNone(loop.find_answered(self.cfg, self.state, self.source))
+
+    def test_the_answer_file_wins(self):
+        self.answer_file("use EUR")
+
+        found = loop.find_answered(self.cfg, self.state, self.source)
+
+        self.assertIsNotNone(found)
+        task, answer = found
+        self.assertEqual(task.id, self.task.id)
+        self.assertEqual(task.source_ref, self.task.source_ref)
+        self.assertEqual(answer, "use EUR")
+
+    def test_the_source_channel_is_asked_when_there_is_no_answer_file(self):
+        self.source.answer = lambda task: "from the ticket"
+
+        found = loop.find_answered(self.cfg, self.state, self.source)
+
+        self.assertEqual(found[1], "from the ticket")
+
+    def test_a_task_that_is_not_blocked_is_not_scanned(self):
+        self.state.finish_task(self.task.id, "done", "did it", 0.1)
+        self.answer_file("use EUR")
+
+        self.assertIsNone(loop.find_answered(self.cfg, self.state, self.source))
+
+
+class AnsweredMainLoopTest(unittest.TestCase):
+    """The whole path, against the fake CLI."""
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        self.fake = bin_dir / "claude"
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+
+    def blocking_cli(self) -> None:
+        self.fake.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\' \'{"status":"blocked","summary":"stuck",'
+            '"question":"which currency?"}\' > "$CLAUDELOOP_RESULT"\n'
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
+        )
+        self.fake.chmod(0o755)
+
+    def test_a_blocked_task_parks_and_the_next_task_still_runs(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n- [ ] second thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(),
+                         "- [!] ambiguous thing\n- [!] second thing\n")
+        state = State(self.cfg.home / "state.db")
+        rows = state.db.execute("SELECT status FROM tasks").fetchall()
+        self.assertEqual([row["status"] for row in rows], ["blocked", "blocked"])
+
+    def test_an_answered_task_is_reopened_and_resumed_before_new_work(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n")
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertEqual(self.tasks.read_text(), "- [!] ambiguous thing\n")
+
+        # A human answers, exactly as the dashboard's POST route will.
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        run_dir = self.cfg.home / "runs" / parked["id"]
+        (run_dir / "answer.json").write_text(json.dumps({"answer": "use EUR"}))
+
+        # Back to a CLI that finishes.
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [x] ambiguous thing\n")
+        row = State(self.cfg.home / "state.db").db.execute(
+            "SELECT status FROM tasks").fetchone()
+        self.assertEqual(row["status"], "done")
+        self.assertFalse((run_dir / "answer.json").exists(),
+                         "the answer must be consumed, not left to fire again")
+
+    def test_a_source_that_cannot_be_reopened_still_resumes(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n")
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        (self.cfg.home / "runs" / parked["id"] / "answer.json").write_text(
+            json.dumps({"answer": "use EUR"}))
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        with mock.patch.object(FileSource, "reopen", side_effect=OSError("disk gone")):
+            with self.assertLogs("claudeloop", level="WARNING"):
+                asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        row = State(self.cfg.home / "state.db").db.execute(
+            "SELECT status FROM tasks").fetchone()
+        self.assertEqual(row["status"], "done")
+
+
 if __name__ == "__main__":
     unittest.main()
