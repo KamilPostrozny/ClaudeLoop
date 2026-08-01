@@ -70,7 +70,7 @@ Read the full ticket, including its comments:
 Post a comment (its body is read from stdin):
     {python} -m claudeloop.jira comment <KEY> -
 
-Comment when you find something a human should see, or before a long step.
+Comment when you find something a human should see.
 Do not transition the issue or edit its labels -- ClaudeLoop does that when
 the task ends. Commenting is not how a task ends: the result file still is."""
 """Read by a literal-minded agent, so the last sentence is not decoration --

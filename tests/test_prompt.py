@@ -264,6 +264,14 @@ class TaskSourceSectionTest(unittest.TestCase):
         # that ends its turn with a comment instead of the result file.
         self.assertIn("Commenting is not how a task ends", compose(self.jira_cfg()))
 
+    def test_does_not_leave_a_long_step_undefined(self):
+        # "or before a long step" gave a literal-minded session no way to
+        # tell how long is long, so it could read every file edit as
+        # qualifying and bill a Jira round trip before each one.
+        self.assertNotIn("a long step", compose(self.jira_cfg()))
+        self.assertIn("Comment when you find something a human should see.",
+                      compose(self.jira_cfg()))
+
     def test_sits_below_the_protocol(self):
         text = compose(self.jira_cfg())
         self.assertLess(text.index("unattended under ClaudeLoop"),

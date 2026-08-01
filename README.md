@@ -97,7 +97,9 @@ permitted.
 it composes `(labels IS EMPTY OR labels NOT IN ("claudeloop-done",
 "claudeloop-blocked"))` into your JQL, keeping your `ORDER BY`. You cannot
 turn that off — without it a workflow that refuses the done transition would
-run the same ticket forever. To re-run a ticket, remove the label. A second
+run the same ticket forever. To re-run a ticket, remove the label. A task
+that ends `failed` gets `claudeloop-blocked` too — the label only suppresses
+re-runs, it does not distinguish a blocked task from a failed one. A second
 backstop covers the label write itself failing: a task whose id already has
 a terminal row in `state.db` is skipped even if Jira never took the label.
 
