@@ -44,9 +44,11 @@ class Status:
     wait_until: float | None = None  # set while sleeping off a quota block
     rate_limit: dict | None = None  # last rate_limit_info seen, for the gauge
     last_error: str | None = None
-    # (task_id, task_text) pairs, source order, published by the loop each
-    # poll. A tuple, not a list: web reads this snapshot from another thread,
-    # and a list would be a mutable object the loop still holds open.
+    # (task_id, task_text) pairs, source order: the backlog as of the start
+    # of the current task, not live -- published once when that task starts,
+    # not re-read while it runs. A tuple, not a list: web reads this snapshot
+    # from another thread, and a list would be a mutable object the loop
+    # still holds open.
     pending: tuple[tuple[str, str], ...] = ()
     heartbeat: float = 0.0
 

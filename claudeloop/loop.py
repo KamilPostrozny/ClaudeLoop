@@ -482,6 +482,13 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
             # Published for the dashboard: web reads this off the snapshot
             # rather than re-reading the task source itself, since under the
             # Jira source that would be a network call on the web thread.
+            # As a result the list is only as fresh as the start of the
+            # current task, not live -- under the file source that's a small
+            # step back from the old per-request re-read (an edit to
+            # tasks.md mid-task won't show until the next task starts); under
+            # the Jira source a per-request re-read would mean a network
+            # round trip on the web thread, which is the whole reason this
+            # rides on the snapshot instead.
             status_module.set_status(
                 pending=tuple((t.id, t.text) for t in pending)
             )
