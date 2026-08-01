@@ -381,6 +381,46 @@ class JiraSource:
                 BLOCKED_LABEL, task.source_ref, error,
             )
 
+    def answer(self, task: Task) -> str | None:
+        """The human's reply to this task's question, if one has been posted.
+
+        The boundary is found in the comment list itself rather than stored:
+        ClaudeLoop's newest question comment, then the first comment after it
+        carrying QUESTION_MARKER. A task that blocked twice therefore reads
+        the second answer, not the first, across restarts and with nothing
+        persisted.
+        """
+        try:
+            comments = self.client.comments(task.source_ref).get("comments")
+        except JiraError as error:
+            # Indistinguishable from "no answer yet", exactly as pending()
+            # treats an unreachable Jira as an empty backlog.
+            log.warning(
+                "could not read comments on %s (%s); trying again later",
+                task.source_ref, error,
+            )
+            return None
+        if not isinstance(comments, list):
+            return None
+        bodies = [
+            str(comment.get("body") or "")
+            for comment in comments
+            if isinstance(comment, dict)
+        ]
+        asked = -1
+        for index, body in enumerate(bodies):
+            if body.lstrip().startswith(QUESTION_HEADING):
+                asked = index
+        if asked == -1:
+            return None
+        for body in bodies[asked + 1:]:
+            stripped = body.strip()
+            if stripped.casefold().startswith(QUESTION_MARKER):
+                answer = stripped[len(QUESTION_MARKER):].strip()
+                if answer:
+                    return answer
+        return None
+
     def _transition(self, key: str, name: str) -> None:
         """Move an issue by transition name, if Jira offers that name for this
         issue right now.

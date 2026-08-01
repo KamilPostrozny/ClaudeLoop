@@ -665,3 +665,89 @@ class ReopenTest(unittest.TestCase):
             ["/issue/OPS%201%2Fx"] * 2
             + ["/issue/OPS%201%2Fx/transitions"] * 2,
         )
+
+
+class JiraAnswerTest(unittest.TestCase):
+    task = Task("abc", "OPS-1: thing", "jira", "OPS-1")
+
+    def source_for(self, *bodies: str) -> JiraSource:
+        fake = FakeJira({
+            "GET /issue/OPS-1/comment": (200, {
+                "comments": [{"body": body} for body in bodies]
+            }),
+        })
+        self.addCleanup(fake.close)
+        return JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+    def test_a_marked_comment_after_the_question_is_the_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            "some earlier chatter",
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop: use EUR",
+        )
+
+        self.assertEqual(source.answer(self.task), "use EUR")
+
+    def test_an_unmarked_comment_is_not_an_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "nice catch, I'll look into it",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_a_marked_comment_before_the_question_is_ignored(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            "claudeloop: this answers an older question",
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_a_task_that_blocked_twice_reads_the_second_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop: use EUR",
+            f"{QUESTION_HEADING}\n\nQuestion: which rounding?",
+            "claudeloop: round half up",
+        )
+
+        self.assertEqual(source.answer(self.task), "round half up")
+
+    def test_no_question_comment_means_no_answer(self):
+        source = self.source_for("claudeloop: an answer to nothing")
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_the_marker_alone_is_not_an_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop:   ",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_an_unreachable_jira_means_no_answer_yet_not_a_raise(self):
+        fake = FakeJira({"GET /issue/OPS-1/comment": (500, {"errorMessages": ["boom"]})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t", retries=1), "project = OPS")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertIsNone(source.answer(self.task))
+
+    def test_a_comment_list_of_the_wrong_shape_means_no_answer(self):
+        fake = FakeJira({"GET /issue/OPS-1/comment": (200, {"comments": "nonsense"})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        self.assertIsNone(source.answer(self.task))
