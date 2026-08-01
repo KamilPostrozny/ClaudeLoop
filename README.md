@@ -76,8 +76,11 @@ token = "ATATT..."
 jql   = "project = OPS AND assignee = currentUser() ORDER BY priority DESC"
 ```
 
-Jira refuses a query with no restriction in it at all, so a hand-written
-`jql` must narrow something.
+ClaudeLoop always ANDs its label guard onto your query, and that guard is
+itself enough of a restriction for Jira to accept — so a `jql` that is only
+an `ORDER BY` still works. It still only fetches one page of 50 issues per
+poll, though, so an ordering that puts the work you want past the 50th row
+never reaches it.
 
 Each matching issue becomes one task, whose text is the issue key, its
 summary and its description. When a task starts, ClaudeLoop moves the issue

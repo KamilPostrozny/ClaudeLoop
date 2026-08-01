@@ -68,11 +68,11 @@ Spec: `docs/superpowers/specs/2026-07-31-claudeloop-web-dashboard-design.md`
 
 A second `TaskSource` implementation; the loop, session, database and
 dashboard needed no changes, since they already talk only to `pending()` and
-`mark()`. Jira Cloud, REST v2, API-token Basic auth over `urllib`. `pending()`
-composes the operator's `jql` — or a `project`/`status` shorthand — with a
-label-exclusion guard, so a finished ticket cannot be picked up again, and
-turns each matching issue into one task carrying its key, summary and
-description. `mark()` labels the issue `claudeloop-done` or
+`mark()`. Jira Cloud, REST v2, API-token Basic auth over `urllib`. `config.py`
+composes the operator's `jql` from a `project`/`status` shorthand when they
+don't give one outright, and `pending()` splices a label-exclusion guard onto
+that query so a finished ticket cannot be picked up again, then turns each
+matching issue into one task carrying its key, summary and description. `mark()` labels the issue `claudeloop-done` or
 `claudeloop-blocked`, posts a closing comment with status, summary and cost,
 then fires `transition_done` if the workflow offers it from the issue's
 current status; `start()` fires `transition_start` the same way. A row in
