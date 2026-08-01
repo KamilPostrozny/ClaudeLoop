@@ -19,16 +19,31 @@ reads the state it writes.
 ClaudeLoop as described spans five independent subsystems. Each gets its own
 spec, plan, and implementation cycle. This document covers S1 only.
 
-| Slice | Scope | Depends on |
-|---|---|---|
-| **S1** | Core loop: task source interface, file source, headless sessions, rate-limit recovery, state | — |
-| **S2** | Web UI: live status, streaming output, pending/completed lists, question display | S1 |
-| **S3** | Jira source: JQL-driven task pull, comment Q&A, status transitions | S1 |
-| **S4** | Home Assistant OS addon: Dockerfile, `config.yaml`, ingress sidebar, persistent `/data` | S1 + S2 |
-| **S5** | Config web UI: model, plugins, credentials via browser | S4 |
+| Slice | Scope | Depends on | Status |
+|---|---|---|---|
+| **S1** | Core loop: task source interface, file source, headless sessions, rate-limit recovery, state | — | merged |
+| **S1.1** | Session environment: instruction layering, definition of done, plugin/MCP passthrough, `[session_env]` | S1 | spec'd |
+| **S2a** | Read-only dashboard: live status, streaming output, pending/completed lists, quota gauge | S1 | merged |
+| **S3** | Jira source: JQL-driven task pull, transitions, a `claudeloop.jira` CLI the session uses for comments | S1.1 | designed |
+| **S2b** | Question and answer channel, across both the dashboard and Jira comments | S2a, S3 | — |
+| **S4** | Home Assistant OS addon: Dockerfile, `config.yaml`, ingress sidebar, persistent `/data` | S1, S2a | — |
+| **S5** | Setup wizard: a config schema that both validates and renders an in-browser first-run wizard | S2a, S3 | — |
 
-S5 is speculative. The addon can mount a prepared config directory; build S5
-only if hand-editing that directory proves painful in practice.
+Two orderings are deliberate. **S3 precedes S2b** so the answer channel is
+designed against two task sources at once rather than built for the web and
+retrofitted to Jira. **S5 follows S3** so its config schema is written once
+against the complete key set; S5 absorbs the cost of folding S1.1's and S3's
+hand-written validation into that schema.
+
+S5 also carries two constraints settled in advance. It is the first slice to
+**write** anything from the browser, deliberately breaking S2a's global
+read-only rule, and it writes a file containing tokens. And it has a bootstrap
+problem: with no configuration there is no `web_host`, `web_port` or
+`web_token`, so setup mode binds loopback unconditionally and additionally
+requires a one-time token printed to the console — two independent barriers,
+because an unauthenticated setup endpoint would let anyone reaching it
+configure an agent that runs with bypassed permissions against real
+credentials.
 
 ## Key insight
 
