@@ -184,6 +184,23 @@ native `--worktree` flag and an `EnterWorktree` tool, and the assimo repo
 already drives it with a `PreToolUse` hook. The orchestrator sets `cwd` to the
 repo root and lets the session decide.
 
+**Reversed 2026-08-01.** A live smoke run showed why branching itself can't
+be left entirely to the session: the built-in definition of done tells a
+session to branch from the repository's default branch, but each task is a
+fresh `claude -p` that inherits whatever branch the *previous* task's session
+happened to leave checked out, not the default. Across a smoke repo the git
+log came out linear -- `init → LICENSE → gitignore` -- one task's branch
+built on the last, instead of each task branching independently from the
+same base; over a real twenty-task run that stacks every task's changes onto
+one branch and every pull request onto the last. The orchestrator now runs
+`git checkout <default-branch>` before each task, best-effort: it never
+forces anything (no `-f`, no `reset --hard`, no `clean`), and a dirty tree,
+detached HEAD, or undeterminable default branch just logs a warning and
+leaves the task to run from wherever the repository currently sits. This is
+narrower than reversing the isolation decision above -- ClaudeLoop still
+does not create worktrees or manage branches *within* a task, it only
+resets the starting point *between* tasks.
+
 ### Blocking questions: not in S1
 
 The reference repo instructs the agent to decide for itself, treating an
