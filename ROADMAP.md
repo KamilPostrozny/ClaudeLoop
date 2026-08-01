@@ -66,17 +66,24 @@ Spec: `docs/superpowers/specs/2026-07-31-claudeloop-web-dashboard-design.md`
 
 ### S3 — Jira task source
 
-A second `TaskSource` implementation; the loop, session, database and
-dashboard needed no changes, since they already talk only to `pending()` and
-`mark()`. Jira Cloud, REST v2, API-token Basic auth over `urllib`. `config.py`
+A second `TaskSource` implementation. The protocol carried most of it — the
+loop still talks only to `pending()`, `start()` and `mark()` — but the design's
+claim that nothing else would change did not survive contact: `loop.py` now
+runs every source call through `asyncio.to_thread` (they are blocking HTTP
+under Jira), the dashboard's pending list moved onto the status snapshot
+because `cfg.tasks_file` is `None` here, and `state.db` gained
+`terminal_ids()`. Jira Cloud, REST v2, API-token Basic auth over `urllib`. `config.py`
 composes the operator's `jql` from a `project`/`status` shorthand when they
 don't give one outright, and `pending()` splices a label-exclusion guard onto
 that query so a finished ticket cannot be picked up again, then turns each
 matching issue into one task carrying its key, summary and description. `mark()` labels the issue `claudeloop-done` or
 `claudeloop-blocked`, posts a closing comment with status, summary and cost,
 then fires `transition_done` if the workflow offers it from the issue's
-current status; `start()` fires `transition_start` the same way. A row in
-`state.db` backstops a label write that never lands. The session reaches Jira
+current status; `start()` fires `transition_start` the same way. A terminal row
+in `state.db` is what actually stops a second run, and the live smoke test is
+what proved it load-bearing: Jira's search index is eventually consistent, so a
+ticket labelled `claudeloop-done` still matched the query 0.8 seconds later.
+The label closes the window; the database covers it. The session reaches Jira
 through `python -m claudeloop.jira show`/`comment`; it cannot transition
 issues or touch labels, so a confused session can't park a ticket somewhere
 the operator didn't expect. An unreachable Jira, a 401, or a JQL Jira rejects
