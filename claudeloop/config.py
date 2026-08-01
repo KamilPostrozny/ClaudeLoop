@@ -89,6 +89,22 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
     if not (repo / ".git").exists():
         raise ValueError(f"{path}: repo {repo} is not a git repository")
 
+    # Resolved so `..` segments and symlinks can't sneak a tasks_file that
+    # lands inside repo past this -- but the unresolved path is still what
+    # gets stored on Config below, matching repo itself. No trace of
+    # ClaudeLoop belongs in a repository it works in, the same reason
+    # result.json/events.jsonl/state.db all live under ~/.claudeloop/
+    # instead: a session doing ordinary branch hygiene (`git checkout .`,
+    # `git stash`, `git checkout main`) can revert ClaudeLoop's own `- [x]`
+    # mark, and the loop then re-runs work it already finished.
+    tasks_file = Path(data["tasks_file"]).expanduser()
+    if tasks_file.resolve().is_relative_to(repo.resolve()):
+        raise ValueError(
+            f"{path}: tasks_file {tasks_file} is inside repo {repo}. "
+            "ClaudeLoop's task list must live outside the repository it "
+            "works in."
+        )
+
     web_host = str(data.get("web_host", "127.0.0.1"))
     web_token = str(data.get("web_token", "")).strip()
     if not web_token.isascii():
@@ -130,7 +146,7 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
 
     return Config(
         repo=repo,
-        tasks_file=Path(data["tasks_file"]).expanduser(),
+        tasks_file=tasks_file,
         model=str(data.get("model", "opus")),
         max_resumes=int(data.get("max_resumes", 20)),
         max_waits=int(data.get("max_waits", 200)),

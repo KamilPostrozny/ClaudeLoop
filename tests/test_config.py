@@ -61,6 +61,38 @@ class ConfigTest(unittest.TestCase):
             load_config(path, home=self.tmp / "home")
         self.assertIn("git repository", str(caught.exception))
 
+    def test_rejects_a_tasks_file_directly_inside_repo(self):
+        # No trace of ClaudeLoop should live in a repository it works in --
+        # a session's ordinary branch hygiene (`git checkout .`, `git
+        # stash`, `git checkout main`) can revert ClaudeLoop's own `- [x]`
+        # mark, and the loop then re-runs work it already finished.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.repo}/tasks.md"\n'
+        )
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn("tasks_file", str(caught.exception))
+
+    def test_rejects_a_tasks_file_that_escapes_and_returns_via_dotdot(self):
+        # A naive string-prefix check would miss this; resolving first (and
+        # using is_relative_to) does not.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.repo}/../repo/tasks.md"\n'
+        )
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn("tasks_file", str(caught.exception))
+
+    def test_accepts_a_tasks_file_genuinely_outside_repo(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.tasks_file, self.tmp / "tasks.md")
+
     def test_config_is_frozen(self):
         with self.assertRaises(Exception):
             Config(repo=Path("/a"), tasks_file=Path("/b")).model = "x"
