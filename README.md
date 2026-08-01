@@ -19,19 +19,82 @@ Python 3.11 or newer, and the Claude Code CLI on `PATH`, already authenticated
 `~/.claudeloop/config.toml`:
 
 ```toml
-repo               = "/home/you/Projects/yourrepo"
-tasks_file         = "/home/you/Projects/yourrepo/.claudeloop-tasks.md"
-model              = "opus"   # optional, default "opus"
-max_resumes        = 20       # optional, default 20 -- bounds plain nudges
-max_waits          = 200      # optional, default 200 -- bounds quota waits, separately
-session_timeout_s  = 14400    # optional, default 14400 (4h) -- kills a wedged session
-web_host           = "127.0.0.1"  # optional, default "127.0.0.1" -- see Dashboard below
-web_port           = 8765         # optional, default 8765
-web_token          = ""           # optional, default "" -- required if web_host isn't loopback
+repo                     = "/home/you/Projects/yourrepo"
+tasks_file               = "/home/you/claudeloop-tasks/yourrepo.md"  # outside repo -- see Tasks below
+model                    = "opus"   # optional, default "opus"
+max_resumes              = 20       # optional, default 20 -- bounds plain nudges
+max_waits                = 200      # optional, default 200 -- bounds quota waits, separately
+session_timeout_s        = 14400    # optional, default 14400 (4h) -- kills a wedged session
+web_host                 = "127.0.0.1"  # optional, default "127.0.0.1" -- see Dashboard below
+web_port                 = 8765         # optional, default 8765
+web_token                = ""           # optional, default "" -- required if web_host isn't loopback
+instructions_file        = "~/.claudeloop/instructions.md"        # optional, this is the default
+definition_of_done_file  = "~/.claudeloop/definition-of-done.md"  # optional, this is the default
+settings_file            = ""     # optional, default unset -- passed to the CLI as --settings
+mcp_config               = ""     # optional, default unset -- passed to the CLI as --mcp-config
+strict_mcp               = false  # optional, default false -- requires mcp_config; passes --strict-mcp-config
+
+[session_env]              # optional, default empty -- extra environment variables for the session
+# GH_TOKEN = "ghp_..."
 ```
+
+`config.toml` holds secrets (`web_token`, anything in `[session_env]`) and
+must be `chmod 600`; ClaudeLoop refuses to load it otherwise.
 
 One instance serves one repository. For a second repository, run a second
 instance with its own config.
+
+## The session's instructions
+
+Every session carries a system prompt assembled from three layers, in this
+order of precedence:
+
+1. **The ClaudeLoop protocol** — invariant, not configurable. It tells the
+   session it's unattended and defines how a task ends (writing the result
+   file named in `CLAUDELOOP_RESULT`).
+2. **Operator instructions** — `instructions_file`, read from the machine
+   running ClaudeLoop. It outranks the repository because the operator, not
+   the repository, controls this machine. Optional: absent when the file is.
+3. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
+   or `AGENTS.md`, followed end to end when present (with the built-in as a
+   fallback, in case that file doesn't say when the work is finished).
+   A repository with none of those gets the built-in definition of done on
+   its own instead: implement the change, run the repository's own tests and
+   checks if it has any, commit on a new branch created from the default
+   branch, open a pull request — or, if there's no remote, or push
+   credentials or a forge CLI are missing, stop after committing and say
+   exactly what was missing. `definition_of_done_file` overrides the
+   built-in default; the repository's own file, if it has one, always wins
+   over both.
+
+Where layers conflict, the higher one wins and the session says so in its
+summary.
+
+`settings_file` and `mcp_config` are passed straight through to the `claude`
+CLI as `--settings` and `--mcp-config`; `strict_mcp` adds
+`--strict-mcp-config` and requires `mcp_config` to be set. `[session_env]`
+adds extra environment variables to the session — useful for a `GH_TOKEN` or
+similar the repository's workflow expects. It cannot override
+`CLAUDELOOP_RESULT`: that variable is always the path ClaudeLoop itself
+tracks, no matter what `[session_env]` says, since it's the only thing the
+loop uses to decide a task finished.
+
+Every key in this section is optional; an unconfigured ClaudeLoop behaves
+exactly as before.
+
+Three names in `[session_env]` deserve care before you set them. Only
+`CLAUDELOOP_RESULT` is actually protected (see above) -- these three aren't,
+and each breaks something different:
+
+- `PATH` — the child resolves `claude` through it; overriding it crash-loops
+  every task.
+- `HOME` — relocates `~/.claude`, so every session fails to authenticate.
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` — the
+  quiet one. These switch the session off your Claude subscription onto
+  per-token billing. ClaudeLoop's whole premise is sleeping through
+  *subscription* rate limits, so with one of these set the `rate_limit_event`s
+  the loop is built around simply stop arriving, and cost accrues silently
+  with nothing on the dashboard to say so.
 
 ## Dashboard
 
@@ -55,6 +118,19 @@ The dashboard cannot start or stop tasks, edit files, or otherwise change
 anything the loop is doing — every route is a read.
 
 ## Tasks
+
+`tasks_file` must live **outside** the target repository -- `load_config`
+refuses to start if it resolves inside `repo`. The built-in definition of
+done has each session commit its work on a branch, and a session working on
+a branch reasonably runs `git add -A`, or cleans up with `git checkout --
+.` or `git stash`, as ordinary branch hygiene. If `tasks_file` lived inside
+the repository, any of those could sweep ClaudeLoop's own `- [x]` mark into
+a commit or wipe it out entirely -- and since `main_loop` re-reads the file
+on every iteration, the next task would see the same line pending again and
+repeat finished work, unattended, with no bound on how many times. If you
+followed an older version of this README that placed `tasks_file` inside
+the repository, move it out before upgrading -- ClaudeLoop will not start
+otherwise.
 
 A markdown checklist. Unchecked items run in file order.
 

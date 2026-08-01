@@ -14,6 +14,7 @@ class ConfigTest(unittest.TestCase):
     def write(self, body: str) -> Path:
         path = self.tmp / "config.toml"
         path.write_text(body)
+        path.chmod(0o600)
         return path
 
     def test_reads_values_and_applies_defaults(self):
@@ -60,6 +61,38 @@ class ConfigTest(unittest.TestCase):
             load_config(path, home=self.tmp / "home")
         self.assertIn("git repository", str(caught.exception))
 
+    def test_rejects_a_tasks_file_directly_inside_repo(self):
+        # No trace of ClaudeLoop should live in a repository it works in --
+        # a session's ordinary branch hygiene (`git checkout .`, `git
+        # stash`, `git checkout main`) can revert ClaudeLoop's own `- [x]`
+        # mark, and the loop then re-runs work it already finished.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.repo}/tasks.md"\n'
+        )
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn("tasks_file", str(caught.exception))
+
+    def test_rejects_a_tasks_file_that_escapes_and_returns_via_dotdot(self):
+        # A naive string-prefix check would miss this; resolving first (and
+        # using is_relative_to) does not.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.repo}/../repo/tasks.md"\n'
+        )
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn("tasks_file", str(caught.exception))
+
+    def test_accepts_a_tasks_file_genuinely_outside_repo(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.tasks_file, self.tmp / "tasks.md")
+
     def test_config_is_frozen(self):
         with self.assertRaises(Exception):
             Config(repo=Path("/a"), tasks_file=Path("/b")).model = "x"
@@ -77,6 +110,7 @@ class WebConfigTest(unittest.TestCase):
             f'repo = "{self.repo}"\n'
             f'tasks_file = "{self.tmp}/tasks.md"\n' + extra
         )
+        path.chmod(0o600)
         return path
 
     def test_web_defaults_are_loopback(self):
@@ -123,6 +157,119 @@ class WebConfigTest(unittest.TestCase):
                 self.write(f'web_host = "{host}"\n'), home=self.tmp / "home"
             )
             self.assertEqual(cfg.web_host, host)
+
+
+class SessionEnvironmentConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        self.home = self.tmp / "home"
+
+    def write(self, extra: str = "", mode: int = 0o600) -> Path:
+        path = self.tmp / "config.toml"
+        path.write_text(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n' + extra
+        )
+        path.chmod(mode)
+        return path
+
+    def test_instruction_paths_default_under_home(self):
+        cfg = load_config(self.write(), home=self.home)
+        self.assertEqual(cfg.instructions_file, self.home / "instructions.md")
+        self.assertEqual(cfg.definition_of_done_file, self.home / "definition-of-done.md")
+
+    def test_instruction_paths_can_be_overridden(self):
+        cfg = load_config(
+            self.write(
+                f'instructions_file = "{self.tmp}/mine.md"\n'
+                f'definition_of_done_file = "{self.tmp}/dod.md"\n'
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.instructions_file, self.tmp / "mine.md")
+        self.assertEqual(cfg.definition_of_done_file, self.tmp / "dod.md")
+
+    def test_plugin_and_mcp_keys_default_to_unset(self):
+        cfg = load_config(self.write(), home=self.home)
+        self.assertIsNone(cfg.settings_file)
+        self.assertIsNone(cfg.mcp_config)
+        self.assertFalse(cfg.strict_mcp)
+
+    def test_plugin_and_mcp_keys_are_read(self):
+        (self.tmp / "settings.json").write_text("{}")
+        (self.tmp / "mcp.json").write_text("{}")
+        cfg = load_config(
+            self.write(
+                f'settings_file = "{self.tmp}/settings.json"\n'
+                f'mcp_config = "{self.tmp}/mcp.json"\n'
+                "strict_mcp = true\n"
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.settings_file, self.tmp / "settings.json")
+        self.assertEqual(cfg.mcp_config, self.tmp / "mcp.json")
+        self.assertTrue(cfg.strict_mcp)
+
+    def test_strict_mcp_without_mcp_config_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write("strict_mcp = true\n"), home=self.home)
+        self.assertIn("mcp_config", str(caught.exception))
+
+    def test_a_settings_file_that_does_not_exist_is_refused(self):
+        # load_config validates repo up front precisely so a typo surfaces
+        # at startup rather than making `claude` exit immediately on every
+        # single task, with main_loop retrying forever and never marking the
+        # task -- check settings_file the same way.
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write(f'settings_file = "{self.tmp}/nope-settings.json"\n'),
+                home=self.home,
+            )
+        self.assertIn("settings_file", str(caught.exception))
+
+    def test_an_mcp_config_that_does_not_exist_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write(f'mcp_config = "{self.tmp}/nope-mcp.json"\n'), home=self.home
+            )
+        self.assertIn("mcp_config", str(caught.exception))
+
+    def test_session_env_defaults_empty(self):
+        self.assertEqual(load_config(self.write(), home=self.home).session_env, {})
+
+    def test_session_env_is_read_as_strings(self):
+        cfg = load_config(
+            self.write(
+                "[session_env]\n"
+                'GH_TOKEN = "ghp_abc"\n'
+                'GIT_CONFIG_COUNT = 1\n'
+            ),
+            home=self.home,
+        )
+        self.assertEqual(cfg.session_env, {"GH_TOKEN": "ghp_abc", "GIT_CONFIG_COUNT": "1"})
+
+    def test_session_env_rejects_a_nested_table(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(
+                self.write("[session_env.nested]\nA = \"b\"\n"), home=self.home
+            )
+        self.assertIn("session_env", str(caught.exception))
+
+    def test_a_group_readable_config_is_refused(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(mode=0o640), home=self.home)
+        message = str(caught.exception)
+        self.assertIn("chmod 600", message)
+
+    def test_a_world_readable_config_is_refused(self):
+        with self.assertRaises(ValueError):
+            load_config(self.write(mode=0o644), home=self.home)
+
+    def test_an_owner_only_config_is_accepted(self):
+        cfg = load_config(self.write(mode=0o600), home=self.home)
+        self.assertEqual(cfg.repo, self.repo)
 
 
 if __name__ == "__main__":

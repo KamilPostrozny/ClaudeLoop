@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from .config import Config
+from .prompt import compose
 
 MAX_LINE = 16 * 1024 * 1024
 """asyncio's default 64 KiB line buffer is too small: a single stream-json line
@@ -20,18 +21,6 @@ never happens if a grandchild (a hung MCP server, say) survives the kill and
 keeps the pipe's write end open -- bounded so that alone can't hang run()
 forever."""
 
-PROTOCOL = (
-    "You are running unattended under ClaudeLoop. Follow this repository's "
-    "CLAUDE.md end to end — it defines what \"done\" means here, including its "
-    "testing and verification requirements. Nobody is watching, so decide open "
-    "questions yourself rather than waiting. When the task is fully complete, "
-    "or provably cannot be completed, write a JSON object to the path in the "
-    "CLAUDELOOP_RESULT environment variable with keys \"status\" (one of "
-    "\"done\", \"failed\", \"blocked\"), \"summary\" (one paragraph on what you "
-    "did), and, when blocked, \"question\" (the one thing a human must answer). "
-    "Writing that file is what ends the task; do not stop without it."
-)
-
 log = logging.getLogger("claudeloop")
 
 
@@ -41,13 +30,35 @@ def build_command(cfg: Config, session_id: str, prompt: str, resume: bool) -> li
     # passing both is a conflict.
     command += ["--resume", session_id] if resume else ["--session-id", session_id]
     command += [
-        "--append-system-prompt", PROTOCOL,
+        "--append-system-prompt", compose(cfg),
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
         "--model", cfg.model,
     ]
+    # Each of these appears only when configured, so an unconfigured
+    # ClaudeLoop produces the same command line it always did.
+    if cfg.settings_file:
+        command += ["--settings", str(cfg.settings_file)]
+    if cfg.mcp_config:
+        command += ["--mcp-config", str(cfg.mcp_config)]
+    if cfg.strict_mcp:
+        command += ["--strict-mcp-config"]
     return command
+
+
+def child_env(cfg: Config, run_dir: Path) -> dict[str, str]:
+    """The environment the session runs in.
+
+    CLAUDELOOP_RESULT is merged last on purpose: a misconfigured session_env
+    must not be able to redirect the result file, which is the only thing the
+    loop uses to decide a task is finished.
+    """
+    return (
+        os.environ
+        | dict(cfg.session_env)
+        | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
+    )
 
 
 def _overrun_marker(limit: int) -> bytes:
@@ -58,10 +69,26 @@ def _overrun_marker(limit: int) -> bytes:
     return f"<claudeloop: line exceeded {limit} byte limit, discarded>\n".encode()
 
 
+def _open_log(path: Path):
+    """Open (or create) a run log for append, restricted to the owner.
+
+    These logs carry a session's raw stdout/stderr verbatim, and that
+    session was handed [session_env] credentials -- a run that executes
+    `env`, `git config --list --show-origin`, or echoes a failing `gh`
+    invocation writes a credential straight into this file. The default
+    umask (0644) would make it world-readable, which is exactly what the
+    config.toml permissions guard refuses to allow for the same secrets one
+    step earlier. Explicit mode on os.open, not a chmod after: still subject
+    to umask, but umask can only clear bits from 0o600, never add ones.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "ab")
+
+
 async def _read_events(
     stream: asyncio.StreamReader, path: Path, out: list[dict], limit: int = MAX_LINE
 ) -> None:
-    with open(path, "ab") as log:
+    with _open_log(path) as log:
         while True:
             try:
                 raw = await stream.readline()
@@ -87,7 +114,7 @@ async def _read_events(
 
 
 async def _drain(stream: asyncio.StreamReader, path: Path, limit: int = MAX_LINE) -> None:
-    with open(path, "ab") as log:
+    with _open_log(path) as log:
         while True:
             try:
                 raw = await stream.readline()
@@ -116,7 +143,13 @@ async def run(
     nudge -- the caller never sees the timeout as an exception.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = os.environ | {"CLAUDELOOP_RESULT": str(run_dir / "result.json")}
+    # Unconditional, not just on creation: mkdir(exist_ok=True) leaves an
+    # already-existing directory's mode untouched (e.g. run_task creating it
+    # first), and events.jsonl/stderr.log below inherit the same secrets
+    # concern _open_log documents -- nothing under here should be group- or
+    # world-readable.
+    run_dir.chmod(0o700)
+    env = child_env(cfg, run_dir)
     process = await asyncio.create_subprocess_exec(
         *build_command(cfg, session_id, prompt, resume),
         cwd=cfg.repo,

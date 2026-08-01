@@ -35,6 +35,19 @@ retrofitted to Jira. **S5 follows S3** so its config schema is written once
 against the complete key set; S5 absorbs the cost of folding S1.1's and S3's
 hand-written validation into that schema.
 
+S5 should also offer a curated **proposed plugin set**: the wizard presents
+plugins ClaudeLoop suggests rather than leaving the operator to discover them,
+and each carries optional default instructions on how to use it. Those
+instructions live in their **own file, separate from `instructions.md`**, so
+ClaudeLoop's suggested plugin guidance never gets tangled with the operator's
+own policy — the two have different authors and different lifetimes, and an
+operator editing their instructions should not be editing ours.
+
+That adds a fourth prompt layer to the three S1.1 established (protocol,
+operator, definition of done). It slots below the operator layer and above the
+definition of done: it is ClaudeLoop's advice about its own tooling, so the
+operator must be able to override it.
+
 S5 also carries two constraints settled in advance. It is the first slice to
 **write** anything from the browser, deliberately breaking S2a's global
 read-only rule, and it writes a file containing tokens. And it has a bootstrap
@@ -170,6 +183,23 @@ Git isolation within a task is not ClaudeLoop's concern: Claude Code has a
 native `--worktree` flag and an `EnterWorktree` tool, and the assimo repo
 already drives it with a `PreToolUse` hook. The orchestrator sets `cwd` to the
 repo root and lets the session decide.
+
+**Reversed 2026-08-01.** A live smoke run showed why branching itself can't
+be left entirely to the session: the built-in definition of done tells a
+session to branch from the repository's default branch, but each task is a
+fresh `claude -p` that inherits whatever branch the *previous* task's session
+happened to leave checked out, not the default. Across a smoke repo the git
+log came out linear -- `init → LICENSE → gitignore` -- one task's branch
+built on the last, instead of each task branching independently from the
+same base; over a real twenty-task run that stacks every task's changes onto
+one branch and every pull request onto the last. The orchestrator now runs
+`git checkout <default-branch>` before each task, best-effort: it never
+forces anything (no `-f`, no `reset --hard`, no `clean`), and a dirty tree,
+detached HEAD, or undeterminable default branch just logs a warning and
+leaves the task to run from wherever the repository currently sits. This is
+narrower than reversing the isolation decision above -- ClaudeLoop still
+does not create worktrees or manage branches *within* a task, it only
+resets the starting point *between* tasks.
 
 ### Blocking questions: not in S1
 

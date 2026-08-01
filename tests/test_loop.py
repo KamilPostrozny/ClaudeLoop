@@ -3,10 +3,12 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from claudeloop import loop, status
 from claudeloop.config import Config
@@ -483,6 +485,22 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual(pending, [])
 
 
+class MainConfigErrorTest(unittest.TestCase):
+    """A pre-existing config.toml at the default umask (0644) makes
+    load_config raise ValueError from the permissions guard. Before the fix,
+    main() only caught FileNotFoundError, so every current operator's next
+    start died with a raw traceback instead of the guard's own message."""
+
+    def test_a_value_error_from_load_config_exits_cleanly_with_its_message(self):
+        with mock.patch(
+            "claudeloop.loop.load_config",
+            side_effect=ValueError("config.toml: ... Run: chmod 600 ..."),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                loop.main()
+        self.assertIn("chmod 600", str(caught.exception))
+
+
 class ServeDashboardTest(unittest.TestCase):
     def test_a_bind_failure_does_not_prevent_the_loop_from_running(self):
         # A real bound-and-listening socket, not a mock: SO_REUSEADDR (which
@@ -512,6 +530,246 @@ class ServeDashboardTest(unittest.TestCase):
         status.reset()
         asyncio.run(loop.main_loop(cfg, once=True))
         self.assertEqual(status.current.state, "idle")
+
+
+class PromptSelectionTest(unittest.TestCase):
+    """A nudge (no result, no rate limit) and a quota resume must send
+    different prompts: the old shared "Continue." read as confirmation that
+    nothing was left to do, which is exactly what burned two live
+    smoke-test sessions' resumes on finished, committed work."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] do the thing\n")
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=5,
+        )
+
+    def test_nudge_prompt_names_the_result_file(self):
+        self.assertIn("CLAUDELOOP_RESULT", loop.NUDGE_PROMPT)
+        self.assertNotEqual(loop.NUDGE_PROMPT, loop.CONTINUE_PROMPT)
+
+    def test_first_attempt_gets_the_task_then_a_wait_says_continue_then_a_nudge_names_the_problem(
+        self,
+    ):
+        state = State(self.cfg.home / "state.db")
+        source = FileSource(self.tasks)
+        task = source.pending()[0]
+
+        past = time.time() - 120
+        rate_limited = [
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "rejected", "resetsAt": past},
+            }
+        ]
+        clean_no_result = [{"type": "result", "total_cost_usd": 0.0}]
+        prompts = []
+
+        async def fake_run(cfg, run_dir, session_id, prompt, resume):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return rate_limited  # quota wait: next prompt must be "Continue."
+            if len(prompts) == 2:
+                return clean_no_result  # nudge: next prompt must name the problem
+            (run_dir / "result.json").write_text('{"status": "done", "summary": "ok"}')
+            return [{"type": "result", "total_cost_usd": 0.0}]
+
+        with mock.patch("claudeloop.loop.session.run", side_effect=fake_run):
+            asyncio.run(loop.run_task(self.cfg, state, source, task))
+
+        self.assertEqual(prompts, [task.text, loop.CONTINUE_PROMPT, loop.NUDGE_PROMPT])
+
+
+class ResetToDefaultBranchTest(unittest.TestCase):
+    """Builds a real scratch git repository rather than mocking git, per the
+    S1 fixture convention already used elsewhere in this file."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "test@example.com")
+        self._git("config", "user.name", "Test")
+        # This machine's global config signs commits via an SSH key backed by
+        # 1Password (commit.gpgsign=true); in this headless sandbox that
+        # blocks forever on a hardware-key prompt that never arrives. Scratch
+        # test repos have nothing to sign for, so turn it off locally --
+        # same reasoning as the real repo's own commit signing being
+        # disabled for this session.
+        self._git("config", "commit.gpgsign", "false")
+        (self.repo / "file.txt").write_text("one\n")
+        self._git("add", "file.txt")
+        self._git("commit", "-q", "-m", "init")
+
+    def _git(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+        # stdin=DEVNULL: an inherited stdin can leave a git subprocess
+        # blocked forever if it ever decides to prompt for anything, same
+        # reasoning as loop._git.
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd or self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _current_branch(self) -> str:
+        return self._git("branch", "--show-current").stdout.strip()
+
+    def test_returns_to_default_branch_from_a_task_branch(self):
+        self._git("checkout", "-q", "-b", "task-1")
+        (self.repo / "extra.txt").write_text("two\n")
+        self._git("add", "extra.txt")
+        self._git("commit", "-q", "-m", "task 1 work")
+
+        loop.reset_to_default_branch(self.repo)
+
+        self.assertEqual(self._current_branch(), "main")
+
+    def test_a_second_task_branches_from_default_not_from_the_first_tasks_branch(self):
+        self._git("checkout", "-q", "-b", "task-1")
+        (self.repo / "extra.txt").write_text("two\n")
+        self._git("add", "extra.txt")
+        self._git("commit", "-q", "-m", "task 1 work")
+
+        loop.reset_to_default_branch(self.repo)
+        self._git("checkout", "-q", "-b", "task-2")
+
+        # task-2 must not carry task-1's file: it branched from main, not
+        # from task-1's branch.
+        self.assertFalse((self.repo / "extra.txt").exists())
+
+    def test_a_dirty_conflicting_tree_fails_the_checkout_but_does_not_raise_and_logs_a_warning(
+        self,
+    ):
+        self._git("checkout", "-q", "-b", "task-1")
+        self.repo.joinpath("file.txt").write_text("one\nchanged on task-1\n")
+        self._git("commit", "-a", "-q", "-m", "task 1 changed file.txt")
+        # Uncommitted change to the same file, conflicting with what main
+        # holds -- a plain `git checkout main` refuses rather than overwrite it.
+        self.repo.joinpath("file.txt").write_text("one\nuncommitted local edit\n")
+
+        with self.assertLogs("claudeloop", level="WARNING") as captured:
+            loop.reset_to_default_branch(self.repo)  # must not raise
+
+        self.assertTrue(any("default branch" in message for message in captured.output))
+        self.assertEqual(
+            self._current_branch(), "task-1", "a failed checkout must leave the tree untouched"
+        )
+        self.assertIn("uncommitted local edit", self.repo.joinpath("file.txt").read_text())
+
+    def test_no_default_branch_determinable_is_a_quiet_no_op(self):
+        # A brand new repo with no commits at all: no remote, and neither
+        # "main" nor "master" exists yet as an actual ref to check out.
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self._git("init", "-q", cwd=empty)
+
+        loop.reset_to_default_branch(empty)  # must not raise, and touches nothing
+
+
+class RunTaskResetsBranchBeforeEachTaskTest(unittest.TestCase):
+    """End to end against a real git repo and a fake `claude` that behaves
+    like a real session: creates its own branch off wherever it started and
+    commits to it. Without the reset in run_task, task 2 would branch off
+    task 1's branch instead of main -- this proves each task's branch
+    carries only its own commit."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "Test"],
+            # See ResetToDefaultBranchTest.setUp: this machine's global
+            # config signs commits via 1Password, which hangs headless.
+            ["config", "commit.gpgsign", "false"],
+        ):
+            subprocess.run(
+                ["git", *args],
+                cwd=self.repo,
+                check=True,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+            )
+        (self.repo / "README.md").write_text("hi\n")
+        subprocess.run(
+            ["git", "add", "README.md"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "init"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
+
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n- [ ] second thing\n")
+        self.cfg = Config(
+            repo=self.repo, tasks_file=self.tasks, home=self.tmp / "home", max_resumes=3
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "claude"
+        # branch name comes from the run directory (named after the task
+        # id), so each invocation's branch is stable and unique without
+        # relying on timing.
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            'branch="task-$(basename "$(dirname "$CLAUDELOOP_RESULT")")"\n'
+            'git checkout -q -b "$branch"\n'
+            'echo work > "$branch.txt"\n'
+            'git add "$branch.txt"\n'
+            'git commit -q -m "$branch"\n'
+            'printf \'%s\' \'{"status":"done","summary":"ok"}\' > "$CLAUDELOOP_RESULT"\n'
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.01}'\n"
+        )
+        fake.chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+
+    def test_each_tasks_branch_carries_only_its_own_commit(self):
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        branches = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        ).stdout.split()
+        task_branches = [b for b in branches if b.startswith("task-")]
+        self.assertEqual(len(task_branches), 2)
+        for branch in task_branches:
+            ahead = subprocess.run(
+                ["git", "rev-list", "--count", f"main..{branch}"],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                check=True,
+                stdin=subprocess.DEVNULL,
+            ).stdout.strip()
+            self.assertEqual(ahead, "1", f"{branch} should carry only its own commit")
 
 
 if __name__ == "__main__":
