@@ -745,9 +745,13 @@ class JiraAnswerTest(unittest.TestCase):
         with self.assertLogs("claudeloop", level="WARNING"):
             self.assertIsNone(source.answer(self.task))
 
-    def test_a_comment_list_of_the_wrong_shape_means_no_answer(self):
+    def test_a_comment_list_of_the_wrong_shape_is_warned_about_not_raised(self):
         fake = FakeJira({"GET /issue/OPS-1/comment": (200, {"comments": "nonsense"})})
         self.addCleanup(fake.close)
         source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
 
-        self.assertIsNone(source.answer(self.task))
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            self.assertIsNone(source.answer(self.task))
+
+        self.assertIn("OPS-1", logs.output[0])
+        self.assertIn("str", logs.output[0])

@@ -401,6 +401,10 @@ class JiraSource:
             )
             return None
         if not isinstance(comments, list):
+            log.warning(
+                "Jira returned no comment list for %s (got %s); treating it"
+                " as unanswered", task.source_ref, type(comments).__name__,
+            )
             return None
         bodies = [
             str(comment.get("body") or "")
