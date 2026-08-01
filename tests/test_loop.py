@@ -164,6 +164,14 @@ class ResumePromptTest(unittest.TestCase):
         self.assertIn("use EUR", rendered)
         self.assertIn("from the beginning", rendered)
 
+    def test_the_nudge_keeps_the_qualifier_that_holds_the_bar(self):
+        # Without "genuinely", the nudge reads as an open invitation to ask
+        # -- and it is sent to a session that has already shown it wants to
+        # stop. This is the word doing that work; pin it.
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn("genuinely need a human to decide", NUDGE_PROMPT)
+
 
 class SleepDelayTest(unittest.TestCase):
     def test_normal_wait_is_unclamped(self):

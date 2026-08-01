@@ -49,8 +49,9 @@ NUDGE_PROMPT = (
     "and say so in the summary. If instead you genuinely need a human to "
     "decide something, that is also the result file's job: write status "
     "\"blocked\" with the one thing you need decided in the \"question\" "
-    "field, and a human will answer it. Either way, do not end your turn "
-    "with a question in your last message -- nobody reads it."
+    "field, and a human will answer it when they next look. Either way, do "
+    "not end your turn with a question in your last message -- nobody reads "
+    "it; write the result file instead."
 )
 """Sent after a resume with no result file and no rate limit -- a nudge. Two
 live smoke-test sessions read the old \"Continue.\" prompt as confirmation
@@ -65,11 +66,12 @@ ANSWER_PROMPT = (
     "Their answer: {answer}\n\n"
     "Act on that answer and finish the task. Note that time has passed since "
     "you stopped and other tasks have run in this repository meanwhile, so "
-    "the working tree is probably no longer on the branch you created: check "
-    "out the branch you were working on before you continue -- your commits "
-    "on it are intact. When the work is complete, write the result file at "
-    "the path in the CLAUDELOOP_RESULT environment variable exactly as "
-    "before; that file, not your last message, is what ends the task."
+    "the working tree is probably no longer on the branch you created: if you "
+    "created one, check out the branch you were working on before you "
+    "continue -- your commits on it are intact. When the work is complete, "
+    "write the result file at the path in the CLAUDELOOP_RESULT environment "
+    "variable exactly as before; that file, not your last message, is what "
+    "ends the task."
 )
 """Sent when resuming a parked task whose question has been answered.
 
@@ -84,7 +86,9 @@ FRESH_ANSWER_PROMPT = (
     "{task}\n\n"
     "A human has already answered a question about this task: {answer}\n\n"
     "The session that asked that question is no longer available, so start "
-    "this task from the beginning, using that answer."
+    "this task from the beginning, using that answer. An earlier attempt may "
+    "have left a branch in this repository; look before you redo work that is "
+    "already committed."
 )
 """For the edge case where a parked task has no session to resume -- a
 state.db from before this slice, or a task whose runs were pruned. The work

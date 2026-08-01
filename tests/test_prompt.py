@@ -304,6 +304,14 @@ class BlockedWordingTest(unittest.TestCase):
 
         self.assertIn("an ordinary judgment call is not that", PROTOCOL)
 
+    def test_the_protocol_names_blocked_where_it_sets_the_bar(self):
+        # "Reserve it for the narrow case" left the nearest antecedent as
+        # "your patience". The status has to be named at the point the bar
+        # is set, not four clauses earlier.
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn('Reserve "blocked" for the narrow case', PROTOCOL)
+
 
 if __name__ == "__main__":
     unittest.main()
