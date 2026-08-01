@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -139,6 +140,18 @@ class TerminalIdsTest(unittest.TestCase):
 
     def test_is_empty_on_a_fresh_database(self):
         self.assertEqual(self.state.terminal_ids(), set())
+
+    def test_terminal_ids_works_from_a_different_thread(self):
+        # The loop calls terminal_ids() through asyncio.to_thread, i.e. from
+        # a worker thread other than the one that created this State.
+        # sqlite3 connections opened without check_same_thread=False raise
+        # sqlite3.ProgrammingError when used off their creating thread -- the
+        # live smoke test found this made the re-run backstop silently
+        # inert, because JiraSource.pending() caught the error and carried
+        # on as if state.db were unreadable.
+        self.finished("aaaa", "done")
+        result = asyncio.run(asyncio.to_thread(self.state.terminal_ids))
+        self.assertEqual(result, {"aaaa"})
 
 
 if __name__ == "__main__":

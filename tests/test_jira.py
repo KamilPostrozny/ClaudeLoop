@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import io
 import sqlite3
@@ -11,6 +12,7 @@ from claudeloop.jira import (
     JiraSource, closing_comment, compose_jql, main, task_text,
 )
 from claudeloop.source import Task, task_id
+from claudeloop.state import State
 
 from .jira_fake import FakeJira, fixture
 
@@ -242,6 +244,23 @@ class JiraSourceTest(unittest.TestCase):
         source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
                              state=FakeState({task_id("OPS-1")}))
         self.assertEqual([t.source_ref for t in source.pending()], ["OPS-2"])
+
+    def test_pending_through_to_thread_drops_a_task_terminal_in_a_real_state(self):
+        # The end-to-end shape the live smoke test actually exercised:
+        # main_loop calls source.pending() through asyncio.to_thread, and
+        # a real State opens its sqlite3 connection on whatever thread
+        # constructs it. Without check_same_thread=False on that connection,
+        # terminal_ids() raises sqlite3.ProgrammingError here, pending()
+        # swallows it as a warning, and the backstop never filters anything
+        # -- which is exactly how a finished ticket got served twice.
+        tmp = Path(tempfile.mkdtemp())
+        state = State(tmp / "state.db")
+        state.start_task(task_id("OPS-1"), "jira", "OPS-1", "text")
+        state.finish_task(task_id("OPS-1"), "done", "summary", 0.0)
+        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+                             state=state)
+        tasks = asyncio.run(asyncio.to_thread(source.pending))
+        self.assertEqual([t.source_ref for t in tasks], ["OPS-2"])
 
     def test_pending_returns_empty_on_an_http_error_rather_than_raising(self):
         source = self.source({f"POST {SEARCH_PATH}": (401, {"errorMessages": ["nope"]})})
