@@ -627,16 +627,26 @@ class ReopenTest(unittest.TestCase):
             source.reopen(Task("abc", "OPS-1: thing", "jira", "OPS-1"))
 
     def test_an_issue_key_is_escaped_into_every_client_url(self):
-        # add_label / transitions / transition used to interpolate the key
-        # raw. Only JiraSource passed keys, always straight from Jira's own
-        # search results, so it was safe by accident rather than by design.
-        client = JiraClient("http://example.invalid", "e@x", "t")
-        seen = []
-        client._request = lambda method, path, payload=None: seen.append(path) or {}
+        # add_label / remove_label / transitions / transition used to
+        # interpolate the key raw. Only JiraSource passed keys, always
+        # straight from Jira's own search results, so it was safe by
+        # accident rather than by design. FakeJira never unquotes the path
+        # it matches on, so an unescaped key would 404 here.
+        fake = FakeJira({
+            "PUT /issue/OPS%201%2Fx": (204, {}),
+            "GET /issue/OPS%201%2Fx/transitions": (200, {"transitions": []}),
+            "POST /issue/OPS%201%2Fx/transitions": (204, {}),
+        })
+        self.addCleanup(fake.close)
+        client = JiraClient(fake.url, "e@x", "t")
 
         client.add_label("OPS 1/x", "l")
         client.remove_label("OPS 1/x", "l")
         client.transitions("OPS 1/x")
         client.transition("OPS 1/x", "31")
 
-        self.assertTrue(all("OPS%201%2Fx" in path for path in seen), seen)
+        self.assertEqual(
+            [path for _, path, _ in fake.requests],
+            ["/issue/OPS%201%2Fx"] * 2
+            + ["/issue/OPS%201%2Fx/transitions"] * 2,
+        )
