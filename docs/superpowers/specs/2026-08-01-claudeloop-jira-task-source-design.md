@@ -335,3 +335,35 @@ has to confirm, none of which a fixture can:
 - More than one repository per configuration.
 - The answer channel: S2b builds on the session's ability to comment, and this
   slice deliberately stops at that ability existing.
+
+## Amended during implementation, 2026-08-01
+
+The Task 1 probe ran against a live instance before any code was written.
+Four findings, each changing something above:
+
+1. **`/rest/api/2/search` is gone — it answers 410**, telling callers to migrate
+   to `/search/jql`. `SEARCH_PATH` is `/search/jql`. REST v2 itself is alive:
+   `description` and comment `body` both come back as plain strings, so the ADF
+   fallback stays unneeded.
+2. **Unbounded JQL is refused with a 400** ("Nieograniczone zapytania JQL nie są
+   tutaj dozwolone"). A query must carry a restriction. The composed label guard
+   counts as one on its own, so every query ClaudeLoop sends is acceptable — but
+   an operator's empty `jql` no longer degrades to "everything", it fails.
+3. **The search response carries `issues`, `nextPageToken` and `isLast`** — the
+   new pagination shape, not `startAt`/`total`. Reading one page of `issues`
+   works under either.
+4. **`transitions` is a list of `{id, name, to: {...}}`**, as assumed.
+
+**One design change, from the operator's side rather than the probe.** Writing
+JQL by hand to start is a barrier, and getting it subtly wrong yields a silently
+empty backlog. So `[jira]` accepts `project` and optional `status` as a
+shorthand, and `config.py` composes them into a query:
+
+```
+project = "KAN" AND status = "To Do" ORDER BY created ASC
+```
+
+`jql` stays available and wins outright when both are given — the shorthand
+cannot express `assignee`, a label filter, or a priority ordering. Exactly one
+of `jql` or `project` is required. The composition happens in `config.py`, so
+`JiraSource` still receives one query string and `compose_jql` is unchanged.

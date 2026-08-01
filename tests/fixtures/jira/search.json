@@ -1,0 +1,26 @@
+{
+  "issues": [
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10001",
+      "self": "https://example.atlassian.net/rest/api/2/issue/10001",
+      "key": "OPS-1",
+      "fields": {
+        "summary": "Fix the widget",
+        "description": "The widget is broken.\n\nSteps: open it, watch."
+      }
+    },
+    {
+      "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+      "id": "10002",
+      "self": "https://example.atlassian.net/rest/api/2/issue/10002",
+      "key": "OPS-2",
+      "fields": {
+        "summary": "Rename the gadget",
+        "description": null
+      }
+    }
+  ],
+  "nextPageToken": "CkljcmVhdGVkJmNyZWF0ZWQmT1JERVJfREVTQyNMb25nJk1UYzRNamd6TVRrM01ETTFOQT09JVN0cmluZyZTMEZPJUludCZPUT09EAUYqNCE6_szIiNwcm9qZWN0ID0gS0FOIE9SREVSIEJZIGNyZWF0ZWQgREVTQyoCW10=",
+  "isLast": false
+}

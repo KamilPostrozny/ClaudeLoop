@@ -57,6 +57,17 @@
 
 **This task needs the operator's real credentials.** It is read-only: it issues GETs and one POST to the search endpoint, and writes nothing to Jira. Do not commit credentials; the probe reads them from `~/.claudeloop/config.toml`.
 
+> **DONE — ran 2026-08-01 against a live instance. Findings, which the tasks below already reflect:**
+>
+> 1. **`SEARCH_PATH = "/search/jql"`.** The old `/rest/api/2/search` answers **410 Gone**: "Żądany interfejs API został usunięty." REST v2 is otherwise alive.
+> 2. **`description` and comment `body` are both plain `str`.** No ADF flattener needed.
+> 3. **Unbounded JQL is refused with 400** — a query must carry a restriction. The composed label guard is itself a restriction, so every query ClaudeLoop sends passes; an operator's empty `jql` now fails rather than matching everything.
+> 4. **The search response carries `issues`, `nextPageToken`, `isLast`** — the new pagination shape. Reading one page of `issues` works either way.
+> 5. **`transitions` is a list of `{id, name, to: {...}}`**, as assumed.
+> 6. **A comment had to be written to record its shape** — no issue in the instance had one. Posted to the Atlassian-generated sample project with the operator's agreement, read back, then deleted (204, `total` returned to 0).
+>
+> Fixtures are in `tests/fixtures/jira/`: two issues in `search.json` with the second's `description` `null`, one issue, one comment, six transitions. Structure verbatim, content fake.
+
 - [ ] **Step 1: Write the probe script in the scratchpad**
 
 ```python
@@ -1173,7 +1184,7 @@ git commit -m "feat: TaskSource gains start(task) and mark(..., cost)"
       site: str
       email: str
       token: str
-      jql: str
+      jql: str                    # composed from project/status when not given
       transition_start: str = ""
       transition_done: str = ""
   ```
@@ -1185,6 +1196,8 @@ git commit -m "feat: TaskSource gains start(task) and mark(..., cost)"
 2. **The `tasks_file`-inside-`repo` refusal still applies whenever `tasks_file` is set**, `source` notwithstanding. It exists because a session doing branch hygiene can revert ClaudeLoop's own mark.
 3. **Validate `[jira]` eagerly.** A missing `token` must fail at startup with a sentence a human can act on — not four hours later inside a subprocess, and not as a 401 on every poll.
 4. **`source` must be one of `("file", "jira")`.** A typo silently running the wrong backlog is worse than a startup error.
+5. **`project` and `status` are a shorthand for `jql`, composed here.** Writing JQL by hand to start is a barrier, and getting it subtly wrong yields a silently empty backlog with nothing saying why. Exactly one of `jql` or `project` is required; when both are given, `jql` wins outright, because the shorthand cannot express an assignee, a label filter or a priority ordering. `JiraSource` still receives one query string, and `compose_jql` in `claudeloop/jira.py` is untouched.
+6. **The composed query must carry a restriction.** The live probe found Jira refuses an unbounded JQL with a 400 — `project = "X"` is a restriction, so the shorthand is always safe, but do not be tempted to make `project` optional too.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1259,6 +1272,44 @@ class JiraConfigTest(unittest.TestCase):
             load_config(self.write('source = "jira"\n'), home=self.home)
         self.assertIn("[jira]", str(caught.exception))
 
+    def test_project_composes_a_query_so_nobody_has_to_write_jql(self):
+        cfg = load_config(self.write(
+            'source = "jira"\n[jira]\n'
+            'site = "https://example.atlassian.net"\n'
+            'email = "me@example.com"\n'
+            'token = "secret"\n'
+            'project = "OPS"\n'
+        ), home=self.home)
+        self.assertEqual(cfg.jira.jql, 'project = "OPS" ORDER BY created ASC')
+
+    def test_status_narrows_the_composed_query(self):
+        cfg = load_config(self.write(
+            'source = "jira"\n[jira]\n'
+            'site = "https://example.atlassian.net"\n'
+            'email = "me@example.com"\n'
+            'token = "secret"\n'
+            'project = "OPS"\nstatus = "To Do"\n'
+        ), home=self.home)
+        self.assertEqual(
+            cfg.jira.jql,
+            'project = "OPS" AND status = "To Do" ORDER BY created ASC',
+        )
+
+    def test_an_explicit_jql_wins_over_the_shorthand(self):
+        cfg = load_config(self.write(self.JIRA + 'project = "OTHER"\n'), home=self.home)
+        self.assertEqual(cfg.jira.jql, "project = OPS ORDER BY created")
+
+    def test_neither_jql_nor_project_is_refused_by_name(self):
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write(
+                'source = "jira"\n[jira]\n'
+                'site = "https://example.atlassian.net"\n'
+                'email = "me@example.com"\n'
+                'token = "secret"\n'
+            ), home=self.home)
+        self.assertIn("jql", str(caught.exception))
+        self.assertIn("project", str(caught.exception))
+
     def test_each_missing_jira_key_is_named(self):
         for key in ("site", "email", "token", "jql"):
             with self.subTest(key=key):
@@ -1291,7 +1342,8 @@ In `claudeloop/config.py`, replace `REQUIRED_KEYS` with:
 ```python
 REQUIRED_KEYS = ("repo",)
 SOURCES = ("file", "jira")
-JIRA_KEYS = ("site", "email", "token", "jql")
+JIRA_KEYS = ("site", "email", "token")
+DEFAULT_ORDER = "ORDER BY created ASC"
 ```
 
 Add above `Config`:
@@ -1307,6 +1359,32 @@ class JiraConfig:
     transition_done: str = ""
 
 
+def _jql(table: dict, path: Path) -> str:
+    """The operator's query, or one composed from project and status.
+
+    Writing JQL by hand to start is a barrier, and getting it subtly wrong
+    yields a silently empty backlog with nothing saying why. An explicit jql
+    still wins: the shorthand cannot express an assignee, a label filter or a
+    priority ordering.
+    """
+    jql = str(table.get("jql", "")).strip()
+    if jql:
+        return jql
+    project = str(table.get("project", "")).strip()
+    if not project:
+        raise ValueError(
+            f"{path}: [jira] needs either jql, or project (with an optional"
+            ' status) for ClaudeLoop to compose one, e.g. project = "OPS"'
+        )
+    status = str(table.get("status", "")).strip()
+    where = f'project = "{project}"'
+    if status:
+        where += f' AND status = "{status}"'
+    # Jira refuses an unbounded JQL outright, so `where` always carries a
+    # restriction -- confirmed against a live instance.
+    return f"{where} {DEFAULT_ORDER}"
+
+
 def _jira(data: dict, path: Path) -> JiraConfig:
     """Validated at load, not at first poll: a missing token would otherwise
     surface as a 401 on every 30-second poll forever, with the dashboard
@@ -1315,7 +1393,7 @@ def _jira(data: dict, path: Path) -> JiraConfig:
     if not isinstance(table, dict):
         raise ValueError(
             f'{path}: source = "jira" needs a [jira] table with '
-            f"{', '.join(JIRA_KEYS)}"
+            f"{', '.join(JIRA_KEYS)}, and either jql or project"
         )
     missing = [key for key in JIRA_KEYS if not str(table.get(key, "")).strip()]
     if missing:
@@ -1326,7 +1404,7 @@ def _jira(data: dict, path: Path) -> JiraConfig:
         site=str(table["site"]),
         email=str(table["email"]),
         token=str(table["token"]),
-        jql=str(table["jql"]),
+        jql=_jql(table, path),
         transition_start=str(table.get("transition_start", "")),
         transition_done=str(table.get("transition_done", "")),
     )
@@ -2024,15 +2102,27 @@ project:
 source = "jira"
 
 [jira]
-site  = "https://yourcompany.atlassian.net"
-email = "you@yourcompany.com"
-token = "ATATT..."            # id.atlassian.com -> Security -> API tokens
-jql   = "project = OPS AND status = 'To Do' ORDER BY priority DESC"
+site    = "https://yourcompany.atlassian.net"   # no /jira suffix
+email   = "you@yourcompany.com"
+token   = "ATATT..."          # id.atlassian.com -> Security -> API tokens
+project = "OPS"               # which project to take work from
+status  = "To Do"             # optional; the exact status name on your board
 transition_start = "In Progress"   # optional; skipped if unset or unavailable
 transition_done  = "Done"          # optional; same
 ```
 
 `tasks_file` is not needed under `source = "jira"`.
+
+That composes `project = "OPS" AND status = "To Do" ORDER BY created ASC`. If
+you want something the two keys cannot say — an assignee, a label, a priority
+ordering — give `jql` instead and it wins outright:
+
+```toml
+jql = "project = OPS AND assignee = currentUser() ORDER BY priority DESC"
+```
+
+Note that Jira refuses a query with no restriction in it at all, so `jql` must
+narrow something.
 
 Each matching issue becomes one task, whose text is the issue key, its summary
 and its description. When a task ends, ClaudeLoop labels the issue

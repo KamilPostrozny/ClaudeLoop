@@ -1,0 +1,25 @@
+{
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+  "id": "10001",
+  "self": "https://example.atlassian.net/rest/api/2/issue/10001",
+  "key": "OPS-1",
+  "fields": {
+    "summary": "Fix the widget",
+    "description": "The widget is broken.\n\nSteps: open it, watch.",
+    "status": {
+      "self": "https://example.atlassian.net/rest/api/2/status/10005",
+      "description": "",
+      "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+      "name": "Idea",
+      "id": "10005",
+      "statusCategory": {
+        "self": "https://example.atlassian.net/rest/api/2/statuscategory/2",
+        "id": 2,
+        "key": "new",
+        "colorName": "blue-gray",
+        "name": "Do zrobienia"
+      }
+    },
+    "labels": []
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "expand": "transitions",
+  "transitions": [
+    {
+      "id": "11",
+      "name": "Backlog",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10005",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+        "name": "Backlog",
+        "id": "10005",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/2",
+          "id": 2,
+          "key": "new",
+          "colorName": "blue-gray",
+          "name": "To Do"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    },
+    {
+      "id": "21",
+      "name": "To Do",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10006",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+        "name": "To Do",
+        "id": "10006",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/4",
+          "id": 4,
+          "key": "indeterminate",
+          "colorName": "yellow",
+          "name": "In Progress"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    },
+    {
+      "id": "31",
+      "name": "In Progress",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10007",
+        "description": "To zg\u0142oszenie jest teraz aktywnie rozwi\u0105zywane przez osob\u0119 do niego przepisan\u0105.",
+        "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+        "name": "In Progress",
+        "id": "10007",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/4",
+          "id": 4,
+          "key": "indeterminate",
+          "colorName": "yellow",
+          "name": "In Progress"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    },
+    {
+      "id": "41",
+      "name": "In Review",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10008",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+        "name": "In Review",
+        "id": "10008",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/4",
+          "id": 4,
+          "key": "indeterminate",
+          "colorName": "yellow",
+          "name": "In Progress"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    },
+    {
+      "id": "51",
+      "name": "Done",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10009",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/images/icons/statuses/generic.png",
+        "name": "Done",
+        "id": "10009",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/3",
+          "id": 3,
+          "key": "done",
+          "colorName": "green",
+          "name": "Done"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    },
+    {
+      "id": "52",
+      "name": "Trash",
+      "to": {
+        "self": "https://example.atlassian.net/rest/api/2/status/10042",
+        "description": "",
+        "iconUrl": "https://example.atlassian.net/",
+        "name": "Trash",
+        "id": "10042",
+        "statusCategory": {
+          "self": "https://example.atlassian.net/rest/api/2/statuscategory/3",
+          "id": 3,
+          "key": "done",
+          "colorName": "green",
+          "name": "Done"
+        }
+      },
+      "hasScreen": false,
+      "isGlobal": true,
+      "isInitial": false,
+      "isAvailable": true,
+      "isConditional": false,
+      "isLooped": false
+    }
+  ]
+}

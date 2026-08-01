@@ -1,0 +1,45 @@
+{
+  "startAt": 0,
+  "maxResults": 100,
+  "total": 1,
+  "comments": [
+    {
+      "self": "https://example.atlassian.net/rest/api/2/issue/10001/comment/10042",
+      "id": "10042",
+      "author": {
+        "self": "https://example.atlassian.net/rest/api/2/user?accountId=000000000000000000000000",
+        "accountId": "000000000000000000000000",
+        "emailAddress": "alice@example.com",
+        "avatarUrls": {
+          "48x48": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/48",
+          "24x24": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/24",
+          "16x16": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/16",
+          "32x32": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/32"
+        },
+        "displayName": "Alice Example",
+        "active": true,
+        "timeZone": "Europe/Warsaw",
+        "accountType": "atlassian"
+      },
+      "body": "Had a look; the lockfile was stale.",
+      "updateAuthor": {
+        "self": "https://example.atlassian.net/rest/api/2/user?accountId=000000000000000000000000",
+        "accountId": "000000000000000000000000",
+        "emailAddress": "alice@example.com",
+        "avatarUrls": {
+          "48x48": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/48",
+          "24x24": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/24",
+          "16x16": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/16",
+          "32x32": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/000000000000000000000000/692e2e45-362e-4351-8890-803b298e558a/32"
+        },
+        "displayName": "Alice Example",
+        "active": true,
+        "timeZone": "Europe/Warsaw",
+        "accountType": "atlassian"
+      },
+      "created": "2026-08-01T14:53:52.258+0200",
+      "updated": "2026-08-01T14:53:52.258+0200",
+      "jsdPublic": true
+    }
+  ]
+}
