@@ -132,8 +132,8 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Four slices have run one. Three of them surfaced defects the passing suite could
-not have caught — seven between them:
+Five slices have run one. Four of them surfaced defects the passing suite could
+not have caught — eight between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
   parking the loop until the window reset. The fixtures had only ever shown
@@ -154,6 +154,13 @@ not have caught — seven between them:
   `claudeloop-done` still matched the query 0.8 seconds later, so the label
   alone cannot prevent a re-run — with the backstop dead, the loop ran a
   finished ticket a second time and paid for it twice.
+- S2b's design said a resumed task must skip `reset_to_default_branch`,
+  reasoning that a resume is the same task continuing. Wrong, on both task
+  sources: a session usually parks *before* its first commit, so it has no
+  branch to preserve, and skipping the reset meant it inherited whatever
+  branch the **next** task had left checked out and committed onto it. Eleven
+  scoped reviews and 421 passing tests had gone by without noticing, because
+  nothing but a real session picks its own branch names.
 
 The third — S1's — found nothing wrong, and was still worth running: it is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that
