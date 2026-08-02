@@ -78,9 +78,11 @@ slice with real numbers behind it.
 
 ### One code path: no fallback to the repository itself
 
-At startup, `probe(repo)` runs `git worktree prune`, then `git worktree list`,
-then resolves the default branch. Any of those failing exits the loop with that
-message. A box whose git cannot do worktrees, or a repository with no
+At startup, `probe(repo)` runs `git worktree prune`, then resolves the default
+branch. Either failing exits the loop with that message. A successful prune
+already proves both that `repo` is a git repository and that this git has the
+`worktree` subcommand, so it doubles as the capability check; it also clears
+registrations left behind by a home directory wiped while worktrees existed. A box whose git cannot do worktrees, or a repository with no
 resolvable default branch, is a configuration error, and an unattended loop
 should say so before it starts rather than on each task in turn.
 
@@ -162,7 +164,7 @@ rather than being copied — this is a move plus three functions, not a new laye
 |---|---|
 | `probe(repo) -> str \| None` | Startup check: prune, list, resolve default branch. An error string, or `None` when the box can do this |
 | `ensure(repo, root, task_id) -> Path` | The task's worktree, created or reused. Raises on failure |
-| `release(path) -> None` | `git worktree remove`, never forced. Logs and returns when git refuses |
+| `release(repo, path) -> None` | `git worktree remove`, never forced. Logs and returns when git refuses. Run from the repository, never from the tree being removed |
 
 `run_task` calls `ensure` where `reset_to_default_branch` is called today, and
 `release` after a terminal result. `main()` calls `probe` before the polling
