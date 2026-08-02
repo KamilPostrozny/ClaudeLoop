@@ -16,6 +16,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S2a** | Read-only web dashboard | merged |
 | **S3** | Jira task source | merged |
 | **S2b** | Question and answer channel | merged |
+| **S6** | A git worktree per task | in progress |
 | **S5** | Setup wizard and config schema | not started |
 | **S4** | Home Assistant OS addon | not started |
 
@@ -102,8 +103,7 @@ its source, recorded, and stepped over, so a question asked at 2am does not
 waste the night. A human answers on the dashboard or with a `claudeloop:`
 comment on the Jira ticket, and the loop picks that task up ahead of new work,
 resuming the *same session* by `--resume` — which still holds the repository
-context and the name of the branch it created, neither of which ClaudeLoop
-ever learns.
+context nothing else can reconstruct.
 
 The `TaskSource` protocol grew two verbs, not the one the design predicted:
 `reopen(task)` undoes the blocked mark, and `answer(task)` is the source's own
@@ -131,7 +131,8 @@ smoke test proved that wrong** and it was removed before merge: a session
 usually parks *early*, before its first commit, so there is no branch of its
 own to preserve — and skipping the reset meant the resumed session inherited
 whatever branch the previous task left checked out, then committed onto it.
-Seen on both task sources.
+Seen on both task sources. That finding is what S6 was written from, and
+`reset_to_default_branch` no longer exists.
 
 Three prompt strings changed, because two of them had become lies: `PROTOCOL`
 opened "Nobody is watching", and `NUDGE_PROMPT` said "Nobody is available to
@@ -149,40 +150,54 @@ working note below on why `do_POST` closes its connection.
 
 Spec: `docs/superpowers/specs/2026-08-01-claudeloop-question-answer-channel-design.md`
 
+### S6 — A git worktree per task
+
+Every task runs in `~/.claudeloop/worktrees/<task-id>`, on a branch
+ClaudeLoop cuts itself: `git worktree add -b claudeloop/<task-id> <path>
+<default-branch>`. There is no shared working tree left, so there is nothing
+to inherit and nothing to reset — `reset_to_default_branch` is deleted, and
+`session.run` and `prompt.compose` take the worktree path where they used to
+take `cfg.repo`, which is now only the repository to branch *from*.
+
+Creating the branch is the point. The built-in definition of done had told
+sessions to branch before their first commit since S1, at about 50%
+compliance; a session cannot fail to comply with an instruction it is not
+given. Three prompt strings changed with it: the definition of done now
+states the session is already on its branch, may rename it, and must never
+check out the default branch and commit there; `ANSWER_PROMPT`'s
+branch-checkout clause is gone, replaced with the opposite assurance; and
+`FRESH_ANSWER_PROMPT` stops claiming commits that a pre-S6 parked task never
+put on that branch.
+
+`ensure(repo, root, task_id)` returns the same path every time for a task,
+and reuses the tree if it is already registered — that reuse is what makes a
+parked task survive intact, branch, commits and uncommitted changes, until
+its answer arrives. If the tree is gone but `claudeloop/<task-id>` still
+exists, `add` is retried against the branch so an answered task lands back on
+its own work. `release(repo, path)` runs after any non-`blocked` result and
+is never forced: git refuses to remove a dirty tree, and that refusal is the
+feature. `probe(repo)` runs `git worktree prune` and resolves the default
+branch at startup; `main()` exits with its message rather than failing every
+task in turn, one paid session at a time.
+
+Two things changed under implementation. A worktree that cannot be created is
+an **environment fault, not a verdict**: it propagates out of `run_task`, and
+`main_loop`'s crash handler records `error` with no `source.mark`. The design
+first said `failed` and marked — but `failed` is terminal, and a held
+`index.lock` or a full disk stops every task equally, so that would have
+burned the whole list to `- [!]` in seconds. And `FRESH_ANSWER_PROMPT` lost
+the clause asserting an earlier attempt's commits are on the branch: true for
+a task pruned since S6, false for one parked before it.
+
+**The live smoke test has not been run yet.** Nothing here is merged until it
+has: this slice changes three prompt strings and the branch a real session
+commits on, which is exactly the surface a fixture suite cannot see.
+
+Spec: `docs/superpowers/specs/2026-08-02-claudeloop-worktree-per-task-design.md`
+
 ---
 
 ## Next
-
-### Proposed — a git worktree per task
-
-`reset_to_default_branch` exists only because sessions comply with "branch
-before your first commit" about half the time, and it compensates by
-*mutating shared state* between tasks — one working tree, checked out and
-re-checked-out around each one. S2b's live smoke test showed the cost: a
-task that parked before creating a branch resumed onto the **next** task's
-branch, on both task sources.
-
-Giving each task its own `git worktree` removes the shared state instead of
-patching it. Nothing to inherit, nothing to reset. It would retire
-`reset_to_default_branch` and its `DEFAULT_BRANCH_CANDIDATES` guessing
-outright, delete `ANSWER_PROMPT`'s branch-checkout clause, and turn "a parked
-task's uncommitted work is lost when the next task runs" from a known
-limitation into a non-issue — a parked task's tree simply sits there until
-its answer arrives.
-
-**Open questions for its spec:**
-
-- `session.py` passes `cwd=cfg.repo`. That becomes the worktree path, and
-  `cfg.repo` becomes only the repository to branch *from*.
-- Lifecycle. A terminal task's worktree can be removed; a `blocked` task's
-  must persist, which is the whole point. Over a multi-day run that is
-  unbounded disk, so it needs pruning with the same care `events.jsonl` needs.
-- **It collides with a stated hard constraint.** `CLAUDE.md` says no trace of
-  ClaudeLoop lives in a repository it works in. `git worktree add` writes
-  metadata into the target repo's `.git/worktrees/`. That is not a file a
-  session could commit, but it is state inside the repo, and the constraint
-  was written absolutely. This needs a deliberate decision recorded in the
-  spec, not a silent exception.
 
 ### S5 — Setup wizard and config schema
 
@@ -271,21 +286,10 @@ Real, deliberately deferred, tracked here so they are not lost.
   rather than re-read on the web thread, so it reflects the backlog as of the
   current task's start rather than live — under the file source, that's a
   step back from re-reading the tasks file on every request.
-- **Parking widens the window in which the default branch can be
-  contaminated before a resumed task branches off it.** Observed in S2b's live
-  smoke test: task 1 parked on a question, task 2 then committed *directly to
-  the default branch* rather than to a branch of its own — the same ~50%
-  compliance with "branch before your first commit" S1 already measured — and
-  when task 1 was answered and resumed, it cut its branch from that polluted
-  default and carried task 2's unrelated commit along. The root cause is
-  pre-existing and belongs to the definition of done, not to S2b, but parking
-  makes it likelier by leaving more time between a task starting and finishing.
-- A parked task holds a branch in the target repository while other tasks run.
-  The branch and its commits survive — `reset_to_default_branch` never forces
-  anything — but the next task moves the working tree off it, so
-  `ANSWER_PROMPT` has to tell the resumed session to check its own branch back
-  out. If the parked session left uncommitted changes in the way, that
-  checkout fails and the *next* task runs on the parked task's branch.
+- Worktrees accumulate: a parked task's tree persists by design, and a failed
+  task's tree persists when it is dirty, since `git worktree remove` is never
+  forced. No age or count policy. Bounded in practice by how many questions go
+  unanswered, unbounded in principle.
 - The answered path does not publish `set_status(pending=...)`, so the
   dashboard's backlog list can be stale while a resumed task runs. Deliberate:
   publishing it would cost a `source.pending()` network round trip on every

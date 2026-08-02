@@ -34,6 +34,7 @@ temptation to add workflow logic here.
 |---|---|
 | `loop.py` | The decision state machine (`decide`), per-task orchestration, the polling loop, `main()` |
 | `session.py` | Spawns one `claude -p` invocation, streams and tees its output |
+| `worktree.py` | One git worktree per task: create, reuse, release, and the startup probe |
 | `prompt.py` | Composes the session's system prompt from three layers. Pure |
 | `source.py` | `Task`, the `TaskSource` protocol, `FileSource` over a markdown checklist |
 | `state.py` | SQLite record of what happened. Not the source of truth for what is pending |
@@ -85,11 +86,16 @@ deliberate decision recorded in a spec.
 - **`CLAUDELOOP_RESULT` is merged last** into the session's environment. The
   loop decides a task is finished by that file appearing; a `session_env` entry
   must never be able to redirect it.
-- **No trace of ClaudeLoop lives in a repository it works in.** The result
-  file, event log and database all live under `~/.claudeloop/`, and
+- **Nothing ClaudeLoop writes into a repository may be committable.** The
+  result file, event log and database all live under `~/.claudeloop/`, and
   `load_config` refuses a `tasks_file` that resolves inside `repo`. A session
-  doing ordinary branch hygiene would otherwise revert ClaudeLoop's own mark and
-  make finished work look pending.
+  doing ordinary branch hygiene — `git add -A`, `git checkout -- .`, `git
+  stash` — would otherwise revert ClaudeLoop's own mark and make finished work
+  look pending. S6 makes one deliberate, narrow exception: `git worktree add`
+  writes `.git/worktrees/<task-id>/` into the target repository, and a `.git`
+  file into the worktree. Neither is reachable from any working tree's staging
+  area, and `worktree.probe` prunes stale entries at startup. Any further
+  exception needs the same justification, recorded in a spec.
 - **Every stdout line is written to `events.jsonl` verbatim before it is
   parsed.** A parser bug must never lose the record.
 - **Strictly serial.** One task at a time, one session at a time.
@@ -181,7 +187,7 @@ come back differently broken.
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -t .        # whole suite, ~30s
+python -m unittest discover -s tests -t .        # whole suite, ~75s
 python -m unittest tests.test_loop -v            # one module
 ```
 
