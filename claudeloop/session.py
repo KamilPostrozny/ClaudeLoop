@@ -14,9 +14,10 @@ from .prompt import compose
 PACKAGE_PARENT = str(Path(__file__).resolve().parent.parent)
 """The directory holding the claudeloop package.
 
-The session runs with cwd=repo, where `python -m claudeloop.jira` is an
-ImportError -- and running jira.py by absolute path breaks its relative
-imports. This is what makes the session's Jira CLI reachable.
+The session runs with its cwd inside the target repository -- its own
+worktree -- where `python -m claudeloop.jira` is an ImportError, and running
+jira.py by absolute path breaks its relative imports. Put on PYTHONPATH, this
+is what makes the session's Jira CLI reachable from wherever it is run.
 """
 
 MAX_LINE = 16 * 1024 * 1024

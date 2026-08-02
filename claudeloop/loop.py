@@ -329,21 +329,19 @@ async def run_task(
     # Offloaded to a thread for the same reason the reset was: it shells out
     # to git synchronously, and this coroutine must not block the event loop
     # the heartbeat and the dashboard share.
-    try:
-        tree = await asyncio.to_thread(
-            worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
-        )
-    except Exception as error:
-        # A verdict on the task, not a crash: the loop must be able to move
-        # on and mark this one, the same as any other failure.
-        log.warning("task %s: no worktree (%s)", task.id, error)
-        result = {
-            "status": "failed",
-            "summary": f"ClaudeLoop could not create a worktree: {error}",
-        }
-        state.finish_task(task.id, result["status"], result["summary"], 0.0)
-        await asyncio.to_thread(source.mark, task, result["status"], result["summary"], 0.0)
-        return result
+    #
+    # Deliberately not caught: a worktree that cannot be created is an
+    # environment fault, not a verdict on the task, and main_loop's crash
+    # handler is where this file already says what to do about those. Whatever
+    # stops `git worktree add` -- an index.lock a stray process is holding, a
+    # full disk -- stops it for every task equally, so failing this one here
+    # would mark the whole list `- [!]` in seconds, and 'failed' is terminal:
+    # State.terminal_ids() would then keep a task source from ever offering
+    # any of them again. Recorded as 'error' by the handler instead, with no
+    # source.mark, so the work survives the box being fixed.
+    tree = await asyncio.to_thread(
+        worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
+    )
     if resume_with is None:
         # source.start would re-fire transition_start against an issue
         # already in that status; reopen() covers the source-side state

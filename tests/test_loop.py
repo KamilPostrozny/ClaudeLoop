@@ -48,9 +48,12 @@ def git_only_path(tmp: Path) -> str:
     those tests are about. A symlink rather than git's own directory: that
     directory may hold a real `claude`, and these tests must not run it.
     """
+    git = shutil.which("git")
+    if git is None:  # the make_repo fixtures would have died long before this
+        raise unittest.SkipTest("git is not on PATH")
     only = tmp / "git-only-bin"
-    only.mkdir(exist_ok=True)
-    (only / "git").symlink_to(shutil.which("git"))
+    only.mkdir()
+    (only / "git").symlink_to(git)
     return str(only)
 
 
@@ -922,7 +925,8 @@ class ResumeWithAnswerTest(unittest.TestCase):
         calls = []
         with mock.patch.object(loop.worktree, "ensure",
                                side_effect=lambda repo, root, task_id: (
-                                   calls.append((repo, root, task_id)) or tree)):
+                                   calls.append((repo, root, task_id)) or tree)), \
+             mock.patch.object(loop.worktree, "release"):
             asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
                                       resume_with="use EUR"))
 
@@ -947,17 +951,31 @@ class ResumeWithAnswerTest(unittest.TestCase):
 
         self.assertEqual(released, [], "a parked task must keep its tree")
 
-    def test_a_task_whose_worktree_cannot_be_created_fails(self):
+    def test_a_task_whose_worktree_cannot_be_created_is_an_environment_fault(self):
+        # Not a verdict on the task. Whatever stops `git worktree add` -- an
+        # index.lock a stray process holds, a full disk -- stops it for every
+        # task, so failing this one would burn the whole list `- [!]` in
+        # seconds and 'failed' is terminal, which would keep a source from
+        # ever offering any of them again. run_task lets it out, and
+        # main_loop's crash handler records 'error' without marking.
         with mock.patch.object(loop.worktree, "ensure",
                                side_effect=RuntimeError("no disk")):
-            result = asyncio.run(
-                loop.run_task(self.cfg, self.state, self.source, self.task))
+            with self.assertRaises(RuntimeError):
+                asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
 
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("no disk", result["summary"])
-        row = self.state.db.execute("SELECT * FROM tasks WHERE id=?",
-                                    (self.task.id,)).fetchone()
-        self.assertEqual(row["status"], "failed")
+            with self.assertLogs("claudeloop", level="ERROR"):
+                asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        row = State(self.cfg.home / "state.db").db.execute(
+            "SELECT * FROM tasks WHERE id=?", (self.task.id,)).fetchone()
+        self.assertEqual(row["status"], "error")
+        self.assertNotIn(self.task.id, State(self.cfg.home / "state.db").terminal_ids())
+        self.assertEqual(self.tasks.read_text(), "- [ ] first thing\n",
+                         "an environment fault must not mark the task in its source")
+        # The dashboard has to see it too: the failure path this replaced
+        # returned before run_task published any status at all.
+        self.assertEqual(status.current.state, "error")
+        self.assertIn("no disk", status.current.last_error or "")
 
     def test_a_resume_does_not_re_fire_the_source_start_hook(self):
         started = []
