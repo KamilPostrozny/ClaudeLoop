@@ -120,9 +120,18 @@ never calls `set_status` at all — the hazard is dodged, not solved, and the
 docstring now says so.
 
 `run_task` gained `resume_with`, which reuses the recorded `session_id` and
-skips both `reset_to_default_branch` and `source.start`. There is a real
-fallback for a task with no session left to resume — a pre-S2b database, or
-pruned runs — which starts the task over with the answer in the prompt.
+skips `source.start` — re-firing `transition_start` against an issue already
+in that status is only noise. There is a real fallback for a task with no
+session left to resume — a pre-S2b database, or pruned runs — which starts the
+task over with the answer in the prompt.
+
+The design also had a resume skip `reset_to_default_branch`, on the reasoning
+that a resume is the same task continuing rather than a new one. **The live
+smoke test proved that wrong** and it was removed before merge: a session
+usually parks *early*, before its first commit, so there is no branch of its
+own to preserve — and skipping the reset meant the resumed session inherited
+whatever branch the previous task left checked out, then committed onto it.
+Seen on both task sources.
 
 Three prompt strings changed, because two of them had become lies: `PROTOCOL`
 opened "Nobody is watching", and `NUDGE_PROMPT` said "Nobody is available to
@@ -143,6 +152,37 @@ Spec: `docs/superpowers/specs/2026-08-01-claudeloop-question-answer-channel-desi
 ---
 
 ## Next
+
+### Proposed — a git worktree per task
+
+`reset_to_default_branch` exists only because sessions comply with "branch
+before your first commit" about half the time, and it compensates by
+*mutating shared state* between tasks — one working tree, checked out and
+re-checked-out around each one. S2b's live smoke test showed the cost: a
+task that parked before creating a branch resumed onto the **next** task's
+branch, on both task sources.
+
+Giving each task its own `git worktree` removes the shared state instead of
+patching it. Nothing to inherit, nothing to reset. It would retire
+`reset_to_default_branch` and its `DEFAULT_BRANCH_CANDIDATES` guessing
+outright, delete `ANSWER_PROMPT`'s branch-checkout clause, and turn "a parked
+task's uncommitted work is lost when the next task runs" from a known
+limitation into a non-issue — a parked task's tree simply sits there until
+its answer arrives.
+
+**Open questions for its spec:**
+
+- `session.py` passes `cwd=cfg.repo`. That becomes the worktree path, and
+  `cfg.repo` becomes only the repository to branch *from*.
+- Lifecycle. A terminal task's worktree can be removed; a `blocked` task's
+  must persist, which is the whole point. Over a multi-day run that is
+  unbounded disk, so it needs pruning with the same care `events.jsonl` needs.
+- **It collides with a stated hard constraint.** `CLAUDE.md` says no trace of
+  ClaudeLoop lives in a repository it works in. `git worktree add` writes
+  metadata into the target repo's `.git/worktrees/`. That is not a file a
+  session could commit, but it is state inside the repo, and the constraint
+  was written absolutely. This needs a deliberate decision recorded in the
+  spec, not a silent exception.
 
 ### S5 — Setup wizard and config schema
 

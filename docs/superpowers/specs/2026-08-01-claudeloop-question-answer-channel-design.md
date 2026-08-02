@@ -45,6 +45,16 @@ fresh session would rediscover all of it and pay for the privilege. This is
 also what the recovery path already does after a quota wait; the mechanism is
 proven, only the prompt differs.
 
+> **Reversed by the live smoke test.** The rule below — that a resume skips
+> `reset_to_default_branch` — was wrong, and was removed before this slice
+> merged. It holds only when the parked session already has a branch of its
+> own. Sessions usually park *early*, before their first commit, because the
+> thing they cannot decide blocks them at the start; skipping the reset then
+> means the resumed session inherits whatever branch the previous task left
+> checked out. Observed on both task sources: a resumed task committed its
+> work onto the *next* task's branch. The reset now runs on a resume too.
+> Skipping `source.start` was correct and still stands.
+
 Two things must **not** happen on a resume:
 
 - `reset_to_default_branch` must be skipped. It exists to stop task N inheriting
