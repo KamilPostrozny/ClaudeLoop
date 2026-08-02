@@ -286,10 +286,14 @@ Real, deliberately deferred, tracked here so they are not lost.
   rather than re-read on the web thread, so it reflects the backlog as of the
   current task's start rather than live — under the file source, that's a
   step back from re-reading the tasks file on every request.
-- Worktrees accumulate: a parked task's tree persists by design, and a failed
-  task's tree persists when it is dirty, since `git worktree remove` is never
-  forced. No age or count policy. Bounded in practice by how many questions go
-  unanswered, unbounded in principle.
+- Nothing prunes what a task leaves behind, and there are two kinds of it.
+  **Worktree directories** accumulate conditionally: a parked task's persists
+  by design, and a failed task's persists when it is dirty, since `git
+  worktree remove` is never forced — bounded in practice by how many questions
+  go unanswered. **Branches** accumulate unconditionally: nothing deletes
+  `claudeloop/<task-id>`, on any outcome, so a long run leaves one branch per
+  task ever run, done ones included. No age or count policy for either, and
+  the branches are the unbounded half.
 - The answered path does not publish `set_status(pending=...)`, so the
   dashboard's backlog list can be stale while a resumed task runs. Deliberate:
   publishing it would cost a `source.pending()` network round trip on every

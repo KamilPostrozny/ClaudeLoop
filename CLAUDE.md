@@ -91,11 +91,19 @@ deliberate decision recorded in a spec.
   `load_config` refuses a `tasks_file` that resolves inside `repo`. A session
   doing ordinary branch hygiene — `git add -A`, `git checkout -- .`, `git
   stash` — would otherwise revert ClaudeLoop's own mark and make finished work
-  look pending. S6 makes one deliberate, narrow exception: `git worktree add`
-  writes `.git/worktrees/<task-id>/` into the target repository, and a `.git`
-  file into the worktree. Neither is reachable from any working tree's staging
-  area, and `worktree.probe` prunes stale entries at startup. Any further
-  exception needs the same justification, recorded in a spec.
+  look pending. S6's deliberate exception is what `git worktree add` leaves in
+  the target repository: `.git/worktrees/<task-id>/`, a `.git` file in the
+  worktree, and the `claudeloop/<task-id>` branch ref. None of the three is
+  reachable from any working tree's staging area, so none can revert the mark
+  — that is the whole test. Only the first is ever cleaned, by the
+  `git worktree prune` in `worktree.probe`. **The branch is permanent.**
+  Nothing in `worktree.py` or `loop.py` deletes it, on any outcome, so a task
+  that finishes cleanly leaves one behind exactly as a parked one does.
+  Branches in the target repository are not new — a pre-S6 session that
+  complied with "branch before your first commit" left its own, and nothing
+  deleted that either — but S6 makes it every task, under a name ClaudeLoop
+  chose. Any further exception needs the same justification, recorded in a
+  spec.
 - **Every stdout line is written to `events.jsonl` verbatim before it is
   parsed.** A parser bug must never lose the record.
 - **Strictly serial.** One task at a time, one session at a time.

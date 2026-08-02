@@ -186,10 +186,22 @@ A task's worktree is removed when the task finishes. It is kept when the task
 parks on a question, which is what its resumed session comes back to, and
 kept when removal would destroy work: `git worktree remove` is never forced,
 so a tree with uncommitted changes in it simply stays on disk and is logged.
-Nothing prunes those by age or count, so a long unattended run with several
-unanswered questions leaves several directories behind; `git worktree list`
-in `repo` shows them, and `git worktree remove` clears one once you're done
-with it.
+
+The branch is never removed — not when the task finishes, not when it fails.
+That is deliberate, since the branch is where the work is, but it means every
+task ClaudeLoop has ever run leaves a `claudeloop/<task-id>` branch in `repo`,
+and nothing cleans them up by age or count. Tidying is yours to do:
+
+```bash
+git worktree list                    # directories still registered
+git worktree remove <path>           # clear one you're done with
+git branch --list 'claudeloop/*'     # every task branch ClaudeLoop has made
+git branch -d claudeloop/<task-id>   # delete one -- refuses if unmerged
+```
+
+Prefer `git branch -d` over `-D`: it refuses to delete a branch whose commits
+aren't merged anywhere, which is what stops a finished task's work going
+quietly when you sweep up.
 
 Because of this, ClaudeLoop refuses to start if `repo` isn't a git repository,
 if its git is too old for `git worktree`, or if it has no default branch it
