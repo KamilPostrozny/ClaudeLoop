@@ -231,6 +231,15 @@ Real, deliberately deferred, tracked here so they are not lost.
   rather than re-read on the web thread, so it reflects the backlog as of the
   current task's start rather than live — under the file source, that's a
   step back from re-reading the tasks file on every request.
+- **Parking widens the window in which the default branch can be
+  contaminated before a resumed task branches off it.** Observed in S2b's live
+  smoke test: task 1 parked on a question, task 2 then committed *directly to
+  the default branch* rather than to a branch of its own — the same ~50%
+  compliance with "branch before your first commit" S1 already measured — and
+  when task 1 was answered and resumed, it cut its branch from that polluted
+  default and carried task 2's unrelated commit along. The root cause is
+  pre-existing and belongs to the definition of done, not to S2b, but parking
+  makes it likelier by leaving more time between a task starting and finishing.
 - A parked task holds a branch in the target repository while other tasks run.
   The branch and its commits survive — `reset_to_default_branch` never forces
   anything — but the next task moves the working tree off it, so
