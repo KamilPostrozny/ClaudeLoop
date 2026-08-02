@@ -790,15 +790,24 @@ function answerBox(task) {
   const input = el("textarea");
   input.rows = 3;
   input.placeholder = "Answer this, and the task picks up where it stopped…";
+  // A placeholder is not an accessible name, and it vanishes on the first
+  // keystroke. Same reason the theme button carries one.
+  input.setAttribute("aria-label", "Your answer to this task's question");
   const button = el("button", null, "Send answer");
   button.type = "submit";
   const note = el("p", "note");
+  // role="status" carries an implicit aria-live="polite", so the outcome is
+  // announced rather than only shown.
+  note.setAttribute("role", "status");
   form.append(input, button, note);
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const answer = input.value.trim();
-    if (!answer) return;
+    if (!answer) {
+      note.textContent = "Type an answer first.";
+      return;
+    }
     button.disabled = true;
     note.textContent = "Sending…";
     try {
@@ -811,7 +820,19 @@ function answerBox(task) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ answer }),
         });
-      if (!response.ok) throw new Error("HTTP " + response.status);
+      if (!response.ok) {
+        // The route explains itself -- "the answer must be 1..8192 bytes",
+        // "that task is not waiting for an answer". A bare status code
+        // leaves the reader with nothing to act on.
+        let detail = "HTTP " + response.status;
+        try {
+          const body = await response.json();
+          if (body && body.error) detail = body.error;
+        } catch (parseError) {
+          // Not JSON, or an empty body: the status is all there is.
+        }
+        throw new Error(detail);
+      }
       note.textContent = "Answer recorded. The task resumes when the loop is free.";
       input.disabled = true;
     } catch (e) {
