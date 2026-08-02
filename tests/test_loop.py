@@ -597,6 +597,19 @@ class MainConfigErrorTest(unittest.TestCase):
                 loop.main()
         self.assertIn("chmod 600", str(caught.exception))
 
+    def test_a_repo_that_cannot_do_worktrees_exits_with_the_probe_message(self):
+        cfg = Config(repo=Path("/nope"), tasks_file=Path("/tmp/tasks.md"),
+                     home=Path("/tmp/home"))
+        with mock.patch.object(loop, "load_config", return_value=cfg), \
+             mock.patch.object(loop.worktree, "probe",
+                               return_value="cannot use git worktrees in /nope"), \
+             mock.patch.object(loop, "_serve_dashboard") as serve:
+            with self.assertRaises(SystemExit) as raised:
+                loop.main()
+
+        self.assertIn("cannot use git worktrees", str(raised.exception))
+        serve.assert_not_called()
+
 
 class ServeDashboardTest(unittest.TestCase):
     def test_a_bind_failure_does_not_prevent_the_loop_from_running(self):

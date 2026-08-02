@@ -631,6 +631,12 @@ def main() -> None:
         # config.toml at the default umask (0644) is the common case here --
         # every such install must get that message, not a raw traceback.
         raise SystemExit(str(error))
+    # Before anything starts listening or runs: a box whose git cannot make
+    # worktrees would otherwise fail every task in turn, one paid session at
+    # a time, instead of saying so once.
+    problem = worktree.probe(cfg.repo)
+    if problem:
+        raise SystemExit(problem)
     # After the config validates, so a non-loopback bind with no token fails
     # before anything is listening.
     _serve_dashboard(cfg)
