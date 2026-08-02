@@ -176,7 +176,7 @@ class ResumePromptTest(unittest.TestCase):
 
     def test_the_fresh_answer_prompt_says_the_earlier_attempts_commits_are_here(self):
         text = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
-        self.assertIn("on the branch that attempt used", text)
+        self.assertIn("any commits an earlier attempt made", text)
         self.assertNotIn("may have left a branch", text)
 
     def test_the_answer_prompt_still_demands_the_result_file(self):

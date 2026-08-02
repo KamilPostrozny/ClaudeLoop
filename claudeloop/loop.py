@@ -82,14 +82,18 @@ FRESH_ANSWER_PROMPT = (
     "{task}\n\n"
     "A human has already answered a question about this task: {answer}\n\n"
     "The session that asked that question is no longer available, so start "
-    "this task from the beginning, using that answer. You are on the branch "
-    "that attempt used and its commits are here; look before you redo work "
-    "that is already done."
+    "this task from the beginning, using that answer. You are on this task's "
+    "branch, and any commits an earlier attempt made are on it; look before "
+    "you redo work that is already done."
 )
 """For the edge case where a parked task has no session to resume -- a
-state.db from before this slice, or a task whose runs were pruned. The
-worktree, and any commits an earlier attempt made in it, are still here; only
-the session's own memory of what it did is gone."""
+state.db from before this slice, or a task whose runs were pruned. `ensure`
+reuses `claudeloop/<task.id>` when it already exists, so a pruned task from
+this slice lands back on its own commits. A pre-slice task never had that
+branch -- its session named its own -- so `ensure` cuts a fresh one from the
+default instead, and there is nothing of the earlier attempt on it. The
+wording promises only the branch, not what is on it, so it stays true either
+way."""
 
 
 @dataclass(frozen=True)
@@ -294,8 +298,7 @@ async def run_task(
 
     `resume_with` is a human's answer to a question this task parked on. It
     continues the session that asked -- which still holds the repository
-    context and the name of the branch it created -- rather than starting the
-    task over.
+    context -- rather than starting the task over.
     """
     run_dir = cfg.home / "runs" / task.id
     result_path = run_dir / "result.json"
