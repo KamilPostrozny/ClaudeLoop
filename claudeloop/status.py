@@ -9,11 +9,17 @@ That covers readers. Writing is safe today for a narrower reason: exactly one
 thread -- the loop -- ever calls set_status(). set_status() is a
 read-modify-write (read `current`, dataclasses.replace() it, write the
 result back), and a read-modify-write is atomic only under a single writer.
-The moment a second writer exists (a human answering a `blocked` task's
-question from the web thread, say), two concurrent calls can each read the
+The moment a second writer exists, two concurrent calls can each read the
 same `current`, compute their own replace(), and the second write silently
 clobbers the first's changes. That needs an actual lock; nothing here
 provides one.
+
+S2b -- a human answering a `blocked` task's question from the web thread --
+was the exact case this warning was written for, and it did not become that
+second writer. The answer route writes a file the loop picks up on its next
+poll instead of calling set_status(). So the hazard is **dodged, not
+solved**: it is still live for the next route that wants to write from the
+web thread, and that route has to add the lock.
 
 One more thing this buys readers, and doesn't: `api_state()` binds one
 reference to `current` and reads every field off that single snapshot, so

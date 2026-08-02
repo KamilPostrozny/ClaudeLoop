@@ -15,16 +15,18 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S1.1** | Session environment | merged |
 | **S2a** | Read-only web dashboard | merged |
 | **S3** | Jira task source | merged |
-| **S2b** | Question and answer channel | not started |
+| **S2b** | Question and answer channel | merged |
 | **S5** | Setup wizard and config schema | not started |
 | **S4** | Home Assistant OS addon | not started |
 
-Two orderings are deliberate. **S3 precedes S2b** so the answer channel is
+Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
-retrofitted to Jira. **S5 follows S3** so its config schema is written once
-against the final key set, absorbing the cost of folding S1.1's and S3's
-hand-written validation into it. **S4 is free-floating** — nothing blocks it,
-and it is the slice that stops a laptop being the thing that dies mid-task.
+retrofitted to Jira — and it paid: the Jira channel shaped the protocol's
+third and fourth verbs, not the web one. **S5 follows S3** so its config
+schema is written once against the final key set, absorbing the cost of
+folding S1.1's and S3's hand-written validation into it. **S4 is
+free-floating** — nothing blocks it, and it is the slice that stops a laptop
+being the thing that dies mid-task.
 
 ---
 
@@ -92,39 +94,55 @@ failing tasks.
 
 Spec: `docs/superpowers/specs/2026-08-01-claudeloop-jira-task-source-design.md`
 
+### S2b — Question and answer channel
+
+A session that hits something only a human can decide writes `blocked` with a
+question. The task **parks** rather than stalling the loop: it is marked in
+its source, recorded, and stepped over, so a question asked at 2am does not
+waste the night. A human answers on the dashboard or with a `claudeloop:`
+comment on the Jira ticket, and the loop picks that task up ahead of new work,
+resuming the *same session* by `--resume` — which still holds the repository
+context and the name of the branch it created, neither of which ClaudeLoop
+ever learns.
+
+The `TaskSource` protocol grew two verbs, not the one the design predicted:
+`reopen(task)` undoes the blocked mark, and `answer(task)` is the source's own
+reply channel — `None` for a checklist, a comment scan for Jira. The Jira scan
+is ordered against ClaudeLoop's own newest question comment rather than
+against stored state, so a task that blocks twice reads the second answer
+across restarts with nothing persisted.
+
+The answer crosses the loop/web boundary as a **file**, `runs/<id>/answer.json`,
+consumed as it is read. That was chosen precisely to dodge the hazard
+`status.py` documents: a human answering from the web thread would have been
+the second writer to a read-modify-write. Writing a file means the web thread
+never calls `set_status` at all — the hazard is dodged, not solved, and the
+docstring now says so.
+
+`run_task` gained `resume_with`, which reuses the recorded `session_id` and
+skips both `reset_to_default_branch` and `source.start`. There is a real
+fallback for a task with no session left to resume — a pre-S2b database, or
+pruned runs — which starts the task over with the answer in the prompt.
+
+Three prompt strings changed, because two of them had become lies: `PROTOCOL`
+opened "Nobody is watching", and `NUDGE_PROMPT` said "Nobody is available to
+answer a question". The rewrite keeps the bar for asking high while telling
+the truth, and a first draft of it asserted that other tasks queue behind a
+blocked one — the opposite of what this slice built, and caught in review
+before it shipped.
+
+The dashboard gained the project's **first write route**, deliberately
+breaking S2a's read-only rule ahead of S5. Its guards are load-bearing: at the
+loopback default `web_token` is empty, so the `Host` check and the
+`Content-Type: application/json` requirement are what stand between an
+arbitrary web page and an agent running with bypassed permissions. See the
+working note below on why `do_POST` closes its connection.
+
+Spec: `docs/superpowers/specs/2026-08-01-claudeloop-question-answer-channel-design.md`
+
 ---
 
 ## Next
-
-### S2b — Question and answer channel
-
-The one part of the original UI wish-list that is not built. Needs the session
-protocol to permit asking, the loop to pause on a `blocked` result, and a
-resume carrying the human's answer.
-
-**Already in place for it:** the `blocked` status and the `question` field
-exist in the result schema, and `tasks.question` exists as a column,
-specifically so S2b needs no schema change.
-
-**Known hazard:** `status.py`'s lock-free design holds only because exactly one
-thread — the loop — calls `set_status`. A human answering from the web thread
-is a second writer, and `set_status` is a read-modify-write. Its docstring says
-so; S2b has to solve it rather than rediscover it.
-
-**What S3 leaves it, and the trap in it.** The session can already talk on a
-ticket — `python -m claudeloop.jira comment KEY -` — so a Jira question has an
-obvious home, and a human's reply has an obvious place to live. But a `blocked`
-task today gets the `claudeloop-blocked` label, and `pending()` excludes that
-label permanently. Answering a blocked question therefore has to *remove* the
-label, or the answered task can never be picked up again — and under the file
-source the equivalent is rewriting `- [!]` back to `- [ ]`. Neither source
-does that today. Whatever S2b builds, resuming an answered task is a
-task-source operation, not just a loop one, so the `TaskSource` protocol
-probably grows a third verb.
-
-**Also worth knowing:** the protocol gained `start(task)` and `mark(..., cost)`
-in S3, and `JiraSource` shows the shape a non-file source takes — including
-that everything it does must be safe to call from `asyncio.to_thread`.
 
 ### S5 — Setup wizard and config schema
 
@@ -213,10 +231,23 @@ Real, deliberately deferred, tracked here so they are not lost.
   rather than re-read on the web thread, so it reflects the backlog as of the
   current task's start rather than live — under the file source, that's a
   step back from re-reading the tasks file on every request.
-- `JiraClient.add_label`, `transitions` and `transition` still interpolate the
-  issue key into the URL unescaped — safe today only because `JiraSource` is
-  their only caller and always passes keys straight from Jira's own search
-  results.
+- A parked task holds a branch in the target repository while other tasks run.
+  The branch and its commits survive — `reset_to_default_branch` never forces
+  anything — but the next task moves the working tree off it, so
+  `ANSWER_PROMPT` has to tell the resumed session to check its own branch back
+  out. If the parked session left uncommitted changes in the way, that
+  checkout fails and the *next* task runs on the parked task's branch.
+- The answered path does not publish `set_status(pending=...)`, so the
+  dashboard's backlog list can be stale while a resumed task runs. Deliberate:
+  publishing it would cost a `source.pending()` network round trip on every
+  resume.
+- `JiraSource.answer` reads the full comment list on every poll for every
+  parked task, unpaginated — the same limitation `pending()` already carries.
+- The dashboard's answer box has no draft persistence. A closed tab loses
+  typed text.
+- The test suite emits roughly 46 `ResourceWarning`s about unclosed SQLite
+  connections. Pre-existing on `main` and unrelated to any slice so far, so
+  not yet triaged.
 - A `claude -p` session survives its parent being killed abruptly: it runs
   with `start_new_session=True`, and the loop's kill path only runs on its
   own orderly exit. An operator who kills the orchestrator with SIGKILL must
@@ -232,3 +263,17 @@ Real, deliberately deferred, tracked here so they are not lost.
   inside scratch repositories created by tests — test fixtures disable signing
   locally for that reason.
 - **Nothing has ever been pushed.** `origin` exists but has no `main`.
+- **Any route on the web server that returns early must close its
+  connection.** `do_POST` sets `self.close_connection = True` as its first
+  statement, and that line is a security fix rather than tidiness. Every
+  rejection path in the answer route answers *without* draining the request
+  body, and `protocol_version` is `HTTP/1.1` — so on a keep-alive connection
+  those unread, attacker-controlled bytes were parsed as the next request. A
+  cross-origin page could send one CORS-safelisted `text/plain` POST (no
+  preflight) whose body was a well-formed `application/json` POST: the first
+  got its 415, the smuggled second cleared every guard and wrote the answer
+  file, which the loop then splices into a prompt for a session running with
+  bypassed permissions. It bypassed the `Host` check too, since the smuggled
+  request carries its own. Found in review, reproduced live against a running
+  server, and covered by a same-socket regression test. Any future route that
+  returns before reading the body has the same exposure.
