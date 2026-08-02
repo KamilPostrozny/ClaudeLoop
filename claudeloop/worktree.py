@@ -7,9 +7,12 @@ to inherit from the task before it, and a task parked on a question keeps its
 tree -- branch, commits and uncommitted changes -- until its answer arrives.
 
 `git worktree add` writes `.git/worktrees/<task-id>/` into the target
-repository. That is the one deliberate exception to the constraint that no
-trace of ClaudeLoop lives in a repository it works in: it sits outside every
-working tree, no `git add` can stage it, and `git worktree prune` removes it.
+repository, and leaves the branch behind it. That is the deliberate exception
+to the constraint that nothing ClaudeLoop writes into a repository may be
+committable: none of it sits inside a working tree, so no `git add` can stage
+it. `release` takes the administrative entry and the tree back together on
+every non-blocked outcome; the `git worktree prune` in `probe` is only the
+backstop for entries orphaned from outside git. The branch stays.
 """
 
 from __future__ import annotations

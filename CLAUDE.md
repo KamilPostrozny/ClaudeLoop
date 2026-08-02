@@ -95,8 +95,13 @@ deliberate decision recorded in a spec.
   the target repository: `.git/worktrees/<task-id>/`, a `.git` file in the
   worktree, and the `claudeloop/<task-id>` branch ref. None of the three is
   reachable from any working tree's staging area, so none can revert the mark
-  — that is the whole test. Only the first is ever cleaned, by the
-  `git worktree prune` in `worktree.probe`. **The branch is permanent.**
+  — that is the whole test. The first two are transient: `worktree.release`
+  runs `git worktree remove` on every non-`blocked` outcome, which takes the
+  administrative entry and the tree holding that `.git` file in one go, and
+  declines only when the tree is dirty, since it is never forced. The
+  `git worktree prune` in `worktree.probe` is a startup backstop for entries
+  orphaned from outside git — a wiped `~/.claudeloop` — not the routine
+  cleanup. **The branch alone is permanent.**
   Nothing in `worktree.py` or `loop.py` deletes it, on any outcome, so a task
   that finishes cleanly leaves one behind exactly as a parked one does.
   Branches in the target repository are not new — a pre-S6 session that
