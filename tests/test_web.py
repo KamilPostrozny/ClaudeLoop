@@ -153,6 +153,24 @@ class StateRouteTest(WebTestBase):
     def test_a_missing_database_is_not_an_error(self):
         self.assertEqual(self.get_json("/api/state")["completed"], [])
 
+    def test_a_blocked_task_never_ages_out_of_the_completed_list(self):
+        # state.blocked() keeps a parked task forever and the loop will
+        # still resume it, but api_state only returns the most recent
+        # RECENT_TASKS rows -- so a task parked before RECENT_TASKS newer
+        # ones finished used to fall off the dashboard and become
+        # unanswerable under the file source, whose only channel is the
+        # answer box in this same list.
+        state = State(self.cfg.home / "state.db")
+        state.start_task("old-blocked", "file", "- [ ] old", "old")
+        state.finish_task("old-blocked", "blocked", "waiting", 0.1, question="ok?")
+        for i in range(web.RECENT_TASKS):
+            tid = f"newer-{i}"
+            state.start_task(tid, "file", f"- [ ] {i}", str(i))
+            state.finish_task(tid, "done", "fine", 0.1)
+        completed = self.get_json("/api/state")["completed"]
+        self.assertEqual(len(completed), web.RECENT_TASKS)
+        self.assertIn("old-blocked", [t["id"] for t in completed])
+
 
 class JiraSourceStateTest(unittest.TestCase):
     """Regression: under source = "jira", cfg.tasks_file is None. api_state

@@ -2,7 +2,8 @@
 
 It reads state.db through its own read-only connection and tails event logs
 off disk. It never touches the loop's objects, so nothing here can corrupt
-loop state, and S2a never writes anything.
+loop state. The layer is otherwise read-only: the sole exception is the
+answer route, which writes one file for the loop to consume.
 """
 
 from __future__ import annotations
@@ -144,7 +145,7 @@ def api_state(cfg: Config) -> dict:
                 for row in db.execute(
                     "SELECT id, text, status, summary, question, cost_usd,"
                     " started_at, finished_at FROM tasks WHERE status != 'running'"
-                    " ORDER BY COALESCE(finished_at, started_at) DESC LIMIT ?",
+                    " ORDER BY (status='blocked') DESC, COALESCE(finished_at, started_at) DESC LIMIT ?",
                     (RECENT_TASKS,),
                 )
             ]

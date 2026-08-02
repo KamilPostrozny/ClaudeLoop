@@ -64,11 +64,11 @@ answer one, and a session with a real question now has somewhere to put it."""
 ANSWER_PROMPT = (
     "A human has answered the question you were blocked on.\n\n"
     "Their answer: {answer}\n\n"
-    "Act on that answer and finish the task. Note that time has passed since "
-    "you stopped and other tasks have run in this repository meanwhile, so "
-    "the working tree is probably no longer on the branch you created: if you "
-    "created one, check out the branch you were working on before you "
-    "continue -- your commits on it are intact. When the work is complete, "
+    "Act on that answer and finish the task. The working tree has been reset "
+    "to this repository's default branch since you stopped, so it is no "
+    "longer on the branch you created: if you created one, check out the "
+    "branch you were working on before you continue -- your commits on it "
+    "are intact. When the work is complete, "
     "write the result file at the path in the CLAUDELOOP_RESULT environment "
     "variable exactly as before; that file, not your last message, is what "
     "ends the task."
@@ -417,6 +417,11 @@ async def run_task(
     # For an answered task that previous verdict is the `blocked` result the
     # session wrote before it parked, so this matters more, not less.
     result_path.unlink(missing_ok=True)
+    # Same reasoning as the result file above: an answer written into the
+    # window between find_answered consuming the previous one and this row
+    # going back to 'running' would otherwise survive, and be read as the
+    # answer to a different question the next time this task parks.
+    (run_dir / "answer.json").unlink(missing_ok=True)
 
     # None when there is no session to resume: a state.db from before S2b, or
     # a task whose runs were pruned. The answer still gets through, only the

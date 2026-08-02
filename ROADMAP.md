@@ -291,9 +291,13 @@ Real, deliberately deferred, tracked here so they are not lost.
   publishing it would cost a `source.pending()` network round trip on every
   resume.
 - `JiraSource.answer` reads the full comment list on every poll for every
-  parked task, unpaginated — the same limitation `pending()` already carries.
-- The dashboard's answer box has no draft persistence. A closed tab loses
-  typed text.
+  parked task — one `GET /comment` every `POLL_S` (30s), indefinitely, since
+  a parked task never expires: roughly 2,900 Jira requests per parked ticket
+  per day, forever. Also unpaginated, the same limitation `pending()` already
+  carries.
+- The dashboard's answer box has no draft persistence. `renderCompleted` keys
+  on `id:status` across every task, so any unrelated task changing status
+  mid-typing rebuilds the list and wipes the draft — not only a closed tab.
 - The test suite emits roughly 46 `ResourceWarning`s about unclosed SQLite
   connections. Pre-existing on `main` and unrelated to any slice so far, so
   not yet triaged.

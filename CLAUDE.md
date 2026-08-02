@@ -72,12 +72,16 @@ deliberate decision recorded in a spec.
   picks up rather than calling `set_status` — so the hazard is dodged, not
   solved. A future route that needs to write from the web thread must add a
   lock first.
-- **Any route that returns early must close its connection.** `do_POST` sets
-  `self.close_connection = True` before anything else. Its rejection paths
-  answer without draining the request body, and on an HTTP/1.1 keep-alive
-  connection those attacker-controlled bytes are otherwise parsed as the next
-  request — which made the answer route's content-type guard, the CSRF defence
-  at the loopback default, bypassable by request smuggling.
+- **Any route that returns early without draining the request body must
+  close its connection.** `do_POST` sets `self.close_connection = True`
+  before anything else. Its rejection paths answer without draining the
+  request body, and on an HTTP/1.1 keep-alive connection those
+  attacker-controlled bytes are otherwise parsed as the next request — which
+  made the answer route's content-type guard, the CSRF defence at the
+  loopback default, bypassable by request smuggling. `do_GET` returns early
+  on its 403 and 404 paths without closing, and genuinely does not need the
+  fix: smuggling requires an unread request body, and no browser-issuable GET
+  carries one.
 - **`CLAUDELOOP_RESULT` is merged last** into the session's environment. The
   loop decides a task is finished by that file appearing; a `session_env` entry
   must never be able to redirect it.

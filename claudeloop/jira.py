@@ -134,7 +134,7 @@ def question_comment(summary: str, cost: float) -> str:
     """
     return (
         f"{QUESTION_HEADING}\n\n{summary}\n\n"
-        f"Reply with a comment starting with `{QUESTION_MARKER}` and ClaudeLoop "
+        f"Reply with a comment starting with {{{{{QUESTION_MARKER}}}}} and ClaudeLoop "
         f"will pick this task back up with your answer.\n\n"
         f"(cost so far ${cost:.4f})"
     )

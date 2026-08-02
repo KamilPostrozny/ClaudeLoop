@@ -567,6 +567,12 @@ class QuestionCommentTest(unittest.TestCase):
         self.assertIn("Question: which currency?", body)
         self.assertIn(QUESTION_MARKER, body)
         self.assertIn("0.2500", body)
+        # Jira wiki markup (REST v2) renders backticks literally rather than
+        # as monospace, so a human copying the marker would carry a leading
+        # backtick into their reply and never match. {{...}} is Jira's own
+        # monospace syntax.
+        self.assertIn("{{" + QUESTION_MARKER + "}}", body)
+        self.assertNotIn("`" + QUESTION_MARKER + "`", body)
 
     def test_a_blocked_task_gets_the_question_comment_not_the_closing_one(self):
         fake = FakeJira({
