@@ -248,7 +248,18 @@ class Handler(BaseHTTPRequestHandler):
         It writes a file under the run directory -- never status.py, never
         the loop's database -- so the web thread does not become the second
         writer to set_status() that status.py's docstring warns about.
+
+        Every POST closes its connection. This is not politeness: the
+        rejection paths below answer without reading the request body, and
+        on an HTTP/1.1 keep-alive connection those unread bytes are parsed
+        as the next request. Since the body is attacker-controlled, a
+        cross-origin page could send one CORS-safelisted text/plain POST
+        whose body is itself a well-formed application/json POST, and the
+        content-type guard -- the only thing standing between an arbitrary
+        website and this route at the loopback default, where web_token is
+        empty by design -- would be bypassed entirely.
         """
+        self.close_connection = True
         if not self._host_allowed():
             self._json(403, {"error": "bad host"})
             return
@@ -286,10 +297,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(413, {"error": f"the answer must be 1..{ANSWER_MAX_BYTES} bytes"})
             return
         try:
-            answer = str(json.loads(self.rfile.read(length))["answer"]).strip()
+            answer = json.loads(self.rfile.read(length))["answer"]
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
             self._json(400, {"error": 'expected a JSON object with an "answer"'})
             return
+        if not isinstance(answer, str):
+            self._json(400, {"error": 'the "answer" must be a string'})
+            return
+        answer = answer.strip()
         if not answer:
             self._json(400, {"error": "the answer is empty"})
             return

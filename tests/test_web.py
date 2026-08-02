@@ -1,5 +1,6 @@
 import http.client
 import json
+import socket
 import sqlite3
 import tempfile
 import time
@@ -533,6 +534,11 @@ class AnswerRouteTest(WebTestBase):
     def answer_file(self) -> Path:
         return self.cfg.home / "runs" / self.task_id / "answer.json"
 
+    def answer_path(self) -> str:
+        """The route, carrying the token when the subclass sets one."""
+        path = f"/api/tasks/{self.task_id}/answer"
+        return path + (f"?token={urllib.parse.quote(self.token)}" if self.token else "")
+
     def test_an_answer_is_written_where_the_loop_looks_for_it(self):
         code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": "use EUR"})
 
@@ -593,10 +599,58 @@ class AnswerRouteTest(WebTestBase):
         self.assertEqual(code, 413)
         self.assertFalse(self.answer_file().exists())
 
+    def test_an_answer_that_is_not_a_string_is_refused(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": None})
+
+        self.assertEqual(code, 400)
+        self.assertFalse(self.answer_file().exists())
+
     def test_an_unknown_post_route_is_a_404(self):
         code, _ = self.post("/api/nonsense", {"answer": "x"})
 
         self.assertEqual(code, 404)
+
+    def test_a_rejected_post_cannot_smuggle_a_second_request(self):
+        # A rejection that does not consume the request body leaves those
+        # bytes to be parsed as the next request on the same keep-alive
+        # connection -- and the body is attacker-controlled. One
+        # CORS-safelisted text/plain POST carrying a well-formed JSON POST
+        # in its body would otherwise clear every guard on the second pass.
+        smuggled_body = json.dumps({"answer": "SMUGGLED PAST"})
+        smuggled = (
+            f"POST {self.answer_path()} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(smuggled_body)}\r\n"
+            "\r\n"
+            f"{smuggled_body}"
+        )
+        outer = (
+            f"POST {self.answer_path()} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(smuggled)}\r\n"
+            "\r\n"
+            f"{smuggled}"
+        )
+
+        sock = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(outer.encode())
+        sock.settimeout(2)
+        received = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+        except (TimeoutError, OSError):
+            pass
+
+        self.assertNotIn(b"200 OK", received, received)
+        self.assertFalse(self.answer_file().exists(), "the smuggled POST was served")
 
 
 class AnswerRouteTokenTest(AnswerRouteTest):
