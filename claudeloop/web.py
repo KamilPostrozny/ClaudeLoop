@@ -29,6 +29,11 @@ TASK_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 """task_id is interpolated into a filesystem path, so it is validated before
 it reaches the disk. This is a traversal guard, not tidiness."""
 
+ANSWER_MAX_BYTES = 8 * 1024
+"""Cap on a human's answer. It becomes part of an argv element on the resume,
+and Linux caps a single argument at 128 KiB -- the composed system prompt is
+already in there."""
+
 STALE_AFTER_S = 90
 """A dedicated asyncio task inside main_loop refreshes status.heartbeat every
 ~10s (see loop.HEARTBEAT_S), independent of any task state transition -- so
@@ -236,6 +241,85 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, payload)
         else:
             self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        """The one route in this project that writes anything.
+
+        It writes a file under the run directory -- never status.py, never
+        the loop's database -- so the web thread does not become the second
+        writer to set_status() that status.py's docstring warns about.
+        """
+        if not self._host_allowed():
+            self._json(403, {"error": "bad host"})
+            return
+        parsed = urlparse(self.path)
+        if not self._authorized(parsed.query):
+            self._json(403, {"error": "bad or missing token"})
+            return
+        route = parsed.path
+        if route.startswith("/api/tasks/") and route.endswith("/answer"):
+            self._answer(route[len("/api/tasks/") : -len("/answer")])
+        else:
+            self._json(404, {"error": "not found"})
+
+    def _answer(self, task_id: str) -> None:
+        if self.headers.get_content_type() != "application/json":
+            # A cross-origin fetch with this content type triggers a CORS
+            # preflight this server never answers, so the browser does not
+            # send the POST at all; an HTML form cannot set it either. With
+            # the Host check above, that is what stops a drive-by submission
+            # from another page at the loopback default, where web_token is
+            # empty by design.
+            self._json(415, {"error": "expected application/json"})
+            return
+        if not TASK_ID_RE.match(task_id):
+            # Interpolated into a filesystem path below: the same traversal
+            # guard api_task already applies.
+            self._json(404, {"error": "no such task"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json(400, {"error": "bad content length"})
+            return
+        if length <= 0 or length > ANSWER_MAX_BYTES:
+            self._json(413, {"error": f"the answer must be 1..{ANSWER_MAX_BYTES} bytes"})
+            return
+        try:
+            answer = str(json.loads(self.rfile.read(length))["answer"]).strip()
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
+            self._json(400, {"error": 'expected a JSON object with an "answer"'})
+            return
+        if not answer:
+            self._json(400, {"error": "the answer is empty"})
+            return
+        if not self._is_blocked(task_id):
+            self._json(409, {"error": "that task is not waiting for an answer"})
+            return
+        run_dir = self.server.cfg.home / "runs" / task_id
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            # Written then renamed: the loop reads this file on its own
+            # thread and must never see half of one.
+            tmp = run_dir / "answer.json.tmp"
+            tmp.write_text(json.dumps({"answer": answer, "at": time.time()}))
+            tmp.replace(run_dir / "answer.json")
+        except OSError as error:
+            self._json(500, {"error": f"could not record the answer: {error}"})
+            return
+        self._json(200, {"ok": True})
+
+    def _is_blocked(self, task_id: str) -> bool:
+        """Whether that task is actually parked on a question. Keeps stray
+        files out of arbitrary run directories."""
+        db = _connect(self.server.cfg)
+        if db is None:
+            return False
+        try:
+            row = db.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        finally:
+            db.close()
+        return row is not None and row["status"] == "blocked"
 
     def _host_allowed(self) -> bool:
         """Reject a Host header that does not name this server.
