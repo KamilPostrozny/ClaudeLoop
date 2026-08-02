@@ -178,6 +178,7 @@ class ResumePromptTest(unittest.TestCase):
         text = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
         self.assertIn("any commits an earlier attempt made", text)
         self.assertNotIn("may have left a branch", text)
+        self.assertNotIn("on the branch that attempt used", text)
 
     def test_the_answer_prompt_still_demands_the_result_file(self):
         rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
