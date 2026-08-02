@@ -33,16 +33,340 @@ def _secrets_file_guard(path: Path) -> None:
         )
 
 
-def _session_env(data: dict, path: Path) -> dict[str, str]:
+from collections.abc import Callable
+
+Condition = Callable[[dict], bool]
+Validator = Callable[[object, dict], "str | None"]
+
+
+@dataclass(frozen=True)
+class Field:
+    """One config.toml key: how to read it, and how to explain it.
+
+    This table is the only description of the configuration there is.
+    load_config walks it, and the setup wizard renders a form from the same
+    records -- which is the whole point: a key added here reaches both, and
+    cannot be validated in one place and forgotten in the other.
+    """
+
+    name: str
+    type: str = "str"  # str | int | float | bool | path | choice
+    default: object = None
+    section: str = ""  # "" for a top-level key, "jira" for [jira]
+    step: str = "advanced"  # which wizard screen this key appears on
+    label: str = ""
+    help: str = ""
+    secret: bool = False
+    choices: tuple[str, ...] = ()
+    required: bool = False
+    required_if: Condition | None = None
+    required_error: str = ""
+    check: Validator | None = None
+
+    @property
+    def key(self) -> str:
+        return f"{self.section}.{self.name}" if self.section else self.name
+
+
+def _coerce(field: Field, value: object) -> object:
+    """Raises ValueError with a message written for a human."""
+    if field.type == "bool":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("true", "1", "yes", "on")
+    if field.type == "path":
+        return Path(str(value)).expanduser()
+    if field.type == "int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field.key} must be a whole number, not {value!r}")
+    if field.type == "float":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field.key} must be a number, not {value!r}")
+    return str(value)
+
+
+def _raw(data: dict, field: Field) -> object | None:
+    """The submitted value, or None when the key is absent.
+
+    A blank string counts as absent. The wizard posts every field it renders,
+    so an untouched optional key arrives as "" and must fall back to its
+    default rather than becoming an empty path or an empty model name.
+    """
+    table = data.get(field.section) if field.section else data
+    if not isinstance(table, dict):
+        return None
+    value = table.get(field.name)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return value.strip() if isinstance(value, str) else value
+
+
+# --- the checks and conditions the table refers to ------------------------
+
+def _is_git_repo(value, values) -> str | None:
+    if not (Path(value) / ".git").exists():
+        return f"repo {value} is not a git repository"
+    return None
+
+
+def _outside_repo(value, values) -> str | None:
+    """No trace of ClaudeLoop belongs in a repository it works in: a session
+    doing ordinary branch hygiene (`git add -A`, `git checkout -- .`, `git
+    stash`) would otherwise revert ClaudeLoop's own `- [x]` mark, and the loop
+    would re-run work it had already finished, unattended and unbounded.
+
+    Resolved so `..` segments and symlinks cannot sneak a path past this,
+    while the unresolved path is what gets stored, matching repo itself.
+    """
+    repo = values.get("repo")
+    if repo is None:
+        return None  # repo already has its own error; do not pile a second on
+    if Path(value).resolve().is_relative_to(Path(repo).resolve()):
+        return (
+            f"tasks_file {value} is inside repo {repo}. ClaudeLoop's task list"
+            " must live outside the repository it works in."
+        )
+    return None
+
+
+def _ascii_token(value, values) -> str | None:
+    if not str(value).isascii():
+        return (
+            "web_token must be ASCII -- secrets.compare_digest, used to check"
+            " it on every request, raises TypeError on anything else."
+        )
+    return None
+
+
+def _https_site(value, values) -> str | None:
+    if not str(value).startswith("https://"):
+        return (
+            f"[jira] site {str(value)!r} must start with https:// -- urllib"
+            " forwards the Authorization header across a redirect, so an"
+            " http:// site puts the Basic-auth API token on the wire in"
+            " cleartext the first time Jira redirects it."
+        )
+    return None
+
+
+def _must_exist(label: str) -> Validator:
+    """Checked at load, not at first use: unchecked, a typo'd path makes
+    `claude` exit immediately on every task, and main_loop deliberately does
+    not source.mark on that kind of crash -- so the loop would retry every
+    30s forever with the dashboard stuck in 'error'."""
+
+    def check(value, values) -> str | None:
+        return None if Path(value).exists() else f"{label} {value} does not exist"
+
+    return check
+
+
+def _strict_mcp_needs_config(value, values) -> str | None:
+    if value and not values.get("mcp_config"):
+        return (
+            "strict_mcp is set but mcp_config is not. On its own,"
+            " --strict-mcp-config tells the CLI to use only the servers from"
+            " --mcp-config — of which there would be none — silently disabling"
+            " every MCP server this machine has configured."
+        )
+    return None
+
+
+def _file_source(values) -> bool:
+    return values.get("source") == "file"
+
+
+def _jira_source(values) -> bool:
+    return values.get("source") == "jira"
+
+
+def _jira_without_jql(values) -> bool:
+    return _jira_source(values) and not values.get("jira.jql")
+
+
+def _exposed(values) -> bool:
+    return values.get("web_host") not in LOOPBACK_HOSTS
+
+
+SCHEMA: tuple[Field, ...] = (
+    Field("repo", "path", step="repository", required=True,
+          check=_is_git_repo, label="Repository",
+          help="The git repository ClaudeLoop works in. Each task gets its own"
+               " worktree cut from this repository's default branch; your own"
+               " checkout is never moved."),
+    Field("model", step="repository", default="opus",
+          label="Model",
+          help="Which Claude model each session runs on, e.g. opus, sonnet,"
+               " haiku."),
+    Field("source", "choice", step="source", default="file",
+          choices=SOURCES, label="Task source",
+          help="Where the backlog comes from: a markdown checklist (file) or a"
+               " Jira Cloud project (jira)."),
+    Field("tasks_file", "path", step="source", required_if=_file_source,
+          required_error='source = "file" requires tasks_file',
+          check=_outside_repo, label="Tasks file",
+          help="A markdown checklist, one task per `- [ ]` line. It must live"
+               " outside the repository, or a session's branch hygiene can"
+               " revert ClaudeLoop's own completion marks."),
+    Field("site", step="source", section="jira", required_if=_jira_source,
+          required_error='[jira] is missing required key: site',
+          check=_https_site, label="Jira site",
+          help="Your Jira Cloud URL, e.g. https://yourcompany.atlassian.net —"
+               " no /jira suffix."),
+    Field("email", step="source", section="jira", required_if=_jira_source,
+          required_error="[jira] is missing required key: email",
+          label="Jira account email",
+          help="The account the API token belongs to."),
+    Field("token", step="source", section="jira", secret=True,
+          required_if=_jira_source,
+          required_error="[jira] is missing required key: token",
+          label="Jira API token",
+          help="id.atlassian.com → Security → API tokens."),
+    Field("jql", step="source", section="jira", label="JQL (advanced)",
+          help="A query of your own, which wins over project and status. Use"
+               " it for anything the two cannot express — an assignee, a label"
+               " filter, a priority ordering."),
+    Field("project", step="source", section="jira",
+          required_if=_jira_without_jql,
+          required_error='[jira] needs either jql, or project (with an optional'
+                         ' status) for ClaudeLoop to compose one, e.g.'
+                         ' project = "OPS"',
+          label="Project key",
+          help="Which project to take work from, e.g. OPS."),
+    Field("status", step="source", section="jira", label="Status",
+          help="Optional. The exact status name on your board, e.g. To Do."),
+    Field("transition_start", step="source", section="jira",
+          label="Transition on start",
+          help="Optional. Moved here when a task starts, if the workflow offers"
+               " that transition from where the issue sits."),
+    Field("transition_done", step="source", section="jira",
+          label="Transition on finish",
+          help="Optional. Moved here when a task ends, the same way."),
+    Field("web_host", step="dashboard", default="127.0.0.1",
+          label="Dashboard host",
+          help="127.0.0.1 keeps the dashboard on this machine. Anything else"
+               " exposes an agent holding real credentials, and requires a"
+               " token."),
+    Field("web_port", "int", step="dashboard", default=8765,
+          label="Dashboard port", help="Default 8765."),
+    Field("web_token", step="dashboard", secret=True, default="",
+          required_if=_exposed, check=_ascii_token,
+          required_error="web_host is not loopback, so web_token must be set to"
+                         " a non-empty value. The dashboard watches an agent"
+                         " holding real credentials; exposing it beyond this"
+                         " machine has to be a deliberate act.",
+          label="Dashboard token",
+          help="Required unless the dashboard is on loopback. Every request"
+               " must then carry ?token=…"),
+    Field("instructions_file", "path", step="instructions",
+          label="Operator instructions",
+          help="Your own instructions, added to every session's prompt above"
+               " the definition of done. Defaults to"
+               " ~/.claudeloop/instructions.md; absent when the file is."),
+    Field("definition_of_done_file", "path", step="instructions",
+          label="Definition of done",
+          help="Overrides the built-in definition of done. The target"
+               " repository's own CLAUDE.md still wins over both. Defaults to"
+               " ~/.claudeloop/definition-of-done.md."),
+    Field("max_resumes", "int", default=20, label="Max resumes",
+          help="How many plain nudges one task may take before it is given"
+               " up on."),
+    Field("max_waits", "int", default=200, label="Max quota waits",
+          help="How many rate-limit sleeps one task may take. Counted"
+               " separately from resumes, because a quota wait is not the"
+               " session's fault."),
+    Field("session_timeout_s", "float", default=4 * 3600,
+          label="Session timeout (seconds)",
+          help="Kills a wedged session. Default 14400, four hours."),
+    Field("settings_file", "path", check=_must_exist("settings_file"),
+          label="Settings file", help="Passed to the CLI as --settings."),
+    Field("mcp_config", "path", check=_must_exist("mcp_config"),
+          label="MCP config", help="Passed to the CLI as --mcp-config."),
+    Field("strict_mcp", "bool", default=False, check=_strict_mcp_needs_config,
+          label="Strict MCP",
+          help="Adds --strict-mcp-config, so only the servers in the MCP config"
+               " are used. Requires an MCP config."),
+)
+"""Order is load-bearing: a field's required_if and check see only the values
+of fields declared before it. tasks_file's check reads repo, web_token's
+condition reads web_host, jira.project's reads jira.jql, strict_mcp's check
+reads mcp_config."""
+
+
+def validate(data: dict) -> tuple[dict, list[tuple[str, str]]]:
+    """Walk SCHEMA over `data`. Coerced values, and every error found.
+
+    Every error, not the first: the wizard marks up a whole form in one
+    round trip. load_config raises on errors[0] and so behaves as it always
+    did from the command line.
+    """
+    values: dict = {}
+    errors: list[tuple[str, str]] = []
+    for field in SCHEMA:
+        raw = _raw(data, field)
+        if raw is None:
+            if field.required or (field.required_if and field.required_if(values)):
+                errors.append(
+                    (field.key, field.required_error or f"{field.key} is required")
+                )
+            values[field.key] = field.default
+            continue
+        try:
+            value = _coerce(field, raw)
+        except ValueError as error:
+            errors.append((field.key, str(error)))
+            values[field.key] = field.default
+            continue
+        if field.choices and value not in field.choices:
+            errors.append((
+                field.key,
+                f"{field.key} {value!r} is not one of {', '.join(field.choices)}",
+            ))
+            values[field.key] = field.default
+            continue
+        values[field.key] = value
+        if field.check:
+            message = field.check(value, values)
+            if message:
+                errors.append((field.key, message))
+    try:
+        values["session_env"] = _session_env(data)
+    except ValueError as error:
+        errors.append(("session_env", str(error)))
+        values["session_env"] = {}
+    return values, errors
+
+
+def _compose_jql(project: str, status: str) -> str:
+    """The query composed from the project/status shorthand.
+
+    Writing JQL by hand to start is a barrier, and getting it subtly wrong
+    yields a silently empty backlog with nothing saying why. An explicit jql
+    still wins: the shorthand cannot express an assignee, a label filter or a
+    priority ordering.
+    """
+    where = f'project = "{project}"'
+    if status:
+        where += f' AND status = "{status}"'
+    # Jira refuses an unbounded JQL outright, so `where` always carries a
+    # restriction -- confirmed against a live instance.
+    return f"{where} {DEFAULT_ORDER}"
+
+
+def _session_env(data: dict) -> dict[str, str]:
     table = data.get("session_env", {})
     if not isinstance(table, dict):
-        raise ValueError(f"{path}: session_env must be a table of name = \"value\"")
+        raise ValueError("session_env must be a table of name = \"value\"")
     result = {}
     for name, value in table.items():
         if isinstance(value, (dict, list)):
             raise ValueError(
-                f"{path}: session_env.{name} must be a single value, not a"
-                " table or array — environment variables are strings"
+                f"session_env.{name} must be a single value, not a table or"
+                " array — environment variables are strings"
             )
         result[str(name)] = str(value)
     return result
@@ -246,7 +570,7 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         settings_file=settings_file,
         mcp_config=mcp_config,
         strict_mcp=strict_mcp,
-        session_env=_session_env(data, path),
+        session_env=_session_env(data),
         home=home,
         source=source,
         jira=jira,

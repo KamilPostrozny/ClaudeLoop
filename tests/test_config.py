@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claudeloop.config import Config, load_config
+from claudeloop.config import SCHEMA, Config, Field, JiraConfig, load_config, validate
 
 
 class ConfigTest(unittest.TestCase):
@@ -411,6 +411,124 @@ class JiraConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_config(self.write(f'tasks_file = "{inside}"\n' + self.JIRA),
                         home=self.home)
+
+
+class SchemaTest(unittest.TestCase):
+    """The table is the single source of truth for both load_config and the
+    setup wizard. These pin the walk itself; the ConfigTest cases above pin
+    what load_config does with it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def minimal(self, **extra) -> dict:
+        return {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md", **extra}
+
+    def test_a_valid_config_produces_no_errors_and_coerced_values(self):
+        values, errors = validate(self.minimal(max_resumes="7", strict_mcp=False))
+        self.assertEqual(errors, [])
+        self.assertEqual(values["repo"], self.repo)
+        self.assertIsInstance(values["repo"], Path)
+        self.assertEqual(values["max_resumes"], 7)
+        self.assertEqual(values["model"], "opus")  # the default landed
+
+    def test_every_error_is_collected_not_just_the_first(self):
+        # The wizard marks up a whole form at once; raising on the first
+        # would make it a one-error-per-round-trip guessing game.
+        values, errors = validate({
+            "repo": str(self.tmp / "nope"),
+            "source": "jira",
+            "web_host": "0.0.0.0",
+        })
+        keys = [key for key, _ in errors]
+        self.assertIn("repo", keys)
+        self.assertIn("web_token", keys)
+        self.assertIn("jira.site", keys)
+        self.assertGreaterEqual(len(errors), 3)
+
+    def test_errors_are_keyed_by_field_key(self):
+        _, errors = validate(self.minimal(source="jira"))
+        keys = dict(errors)
+        self.assertIn("jira.site", keys)
+        self.assertIn("[jira]", keys["jira.site"])
+
+    def test_a_non_numeric_number_is_an_error_not_a_crash(self):
+        _, errors = validate(self.minimal(max_waits="soon"))
+        self.assertEqual([key for key, _ in errors], ["max_waits"])
+
+    def test_a_bad_choice_names_the_alternatives(self):
+        _, errors = validate(self.minimal(source="carrier pigeon"))
+        key, message = errors[0]
+        self.assertEqual(key, "source")
+        self.assertIn("file", message)
+        self.assertIn("jira", message)
+
+    def test_an_empty_string_counts_as_absent(self):
+        # The wizard submits "" for every field the operator left alone.
+        values, errors = validate(self.minimal(model="", settings_file=""))
+        self.assertEqual(errors, [])
+        self.assertEqual(values["model"], "opus")
+        self.assertIsNone(values["settings_file"])
+
+    def test_a_false_boolean_is_not_absent(self):
+        values, errors = validate(self.minimal(strict_mcp=False))
+        self.assertEqual(errors, [])
+        self.assertIs(values["strict_mcp"], False)
+
+    def test_jira_needs_project_or_jql_and_says_so(self):
+        _, errors = validate({"repo": str(self.repo), "source": "jira",
+                              "jira": {"site": "https://x.atlassian.net",
+                                       "email": "a@b.c", "token": "t"}})
+        message = dict(errors)["jira.project"]
+        self.assertIn("jql", message)
+        self.assertIn("project", message)
+
+    def test_an_explicit_jql_removes_the_project_requirement(self):
+        _, errors = validate({"repo": str(self.repo), "source": "jira",
+                              "jira": {"site": "https://x.atlassian.net",
+                                       "email": "a@b.c", "token": "t",
+                                       "jql": "project = OPS"}})
+        self.assertEqual(errors, [])
+
+    def test_a_condition_only_sees_fields_declared_before_it(self):
+        # SCHEMA order is load-bearing: web_token's required_if reads
+        # web_host, tasks_file's check reads repo, strict_mcp's check reads
+        # mcp_config. Anything that reorders the table must fail here.
+        order = [field.key for field in SCHEMA]
+        for earlier, later in (("repo", "tasks_file"), ("source", "tasks_file"),
+                               ("web_host", "web_token"), ("jira.jql", "jira.project"),
+                               ("mcp_config", "strict_mcp")):
+            self.assertLess(order.index(earlier), order.index(later),
+                            f"{earlier} must be declared before {later}")
+
+    def test_every_field_carries_help_text_for_the_wizard(self):
+        for field in SCHEMA:
+            self.assertTrue(field.help.strip(), f"{field.key} has no help text")
+            self.assertTrue(field.label.strip(), f"{field.key} has no label")
+
+    def test_the_table_and_the_Config_dataclass_agree(self):
+        # Not a bijection, and the exceptions are named rather than left to
+        # be rediscovered: jira.project and jira.status are composed away
+        # into jira.jql by _compose_jql and never reach Config, and `home`
+        # is a load_config parameter that is never a config key.
+        composed_away = {"jira.project", "jira.status"}
+        not_a_config_key = {"home", "jira"}
+        top_level = {f.name for f in SCHEMA if not f.section}
+        jira_keys = {f.name for f in SCHEMA if f.section == "jira"}
+        self.assertEqual(
+            top_level | {"session_env"},
+            set(Config.__dataclass_fields__) - not_a_config_key,
+        )
+        self.assertEqual(
+            {f"jira.{name}" for name in jira_keys} - composed_away,
+            {f"jira.{name}" for name in JiraConfig.__dataclass_fields__},
+        )
+
+    def test_secret_fields_are_marked(self):
+        secret = {field.key for field in SCHEMA if field.secret}
+        self.assertEqual(secret, {"web_token", "jira.token"})
 
 
 if __name__ == "__main__":
