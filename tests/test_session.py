@@ -126,6 +126,17 @@ class RunTest(unittest.TestCase):
         self.run_once()
         self.assertEqual(self.run_dir.stat().st_mode & 0o777, 0o700)
 
+    def test_the_session_runs_in_the_tree_it_is_given(self):
+        # The worktree, not cfg.repo: cfg.repo is only the repository the
+        # task's branch was cut from.
+        tree = self.tmp / "worktrees" / "abc123"
+        tree.mkdir(parents=True)
+
+        asyncio.run(session.run(self.cfg, self.run_dir, "uuid-1", "do it",
+                                resume=False, cwd=tree))
+
+        self.assertEqual((self.run_dir / "cwd.txt").read_text().strip(), str(tree))
+
     def test_survives_a_non_zero_exit(self):
         flag = self.tmp / "limit.flag"
         flag.write_text("")

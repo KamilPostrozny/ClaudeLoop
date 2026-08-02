@@ -135,7 +135,11 @@ def precedence(has_operator: bool) -> str:
     return " ".join(parts)
 
 
-def compose(cfg: Config) -> str:
+def compose(cfg: Config, tree: Path | None = None) -> str:
+    """`tree` is the working directory the session will run in -- its own
+    worktree. It differs from cfg.repo, which is only the repository that
+    tree was cut from, and it is the copy of CLAUDE.md the session can
+    actually edit."""
     operator = _read(cfg.instructions_file)
     parts = [PROTOCOL, precedence(has_operator=bool(operator))]
 
@@ -146,7 +150,7 @@ def compose(cfg: Config) -> str:
     if operator:
         parts.append(f"## Operator instructions\n\n{operator}")
 
-    claude_md = repo_claude_md(cfg.repo)
+    claude_md = repo_claude_md(tree or cfg.repo)
     if claude_md is not None:
         # The repository documents itself; point at it rather than imposing
         # a definition of done over the top of one it already has. Most

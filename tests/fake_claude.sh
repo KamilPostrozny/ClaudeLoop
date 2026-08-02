@@ -7,6 +7,7 @@
 # how the end-to-end test exercises the recover-and-resume path.
 # FAKE_ARGS_OUT: if set, the invocation's arguments are appended to that file.
 set -u
+pwd > "$(dirname "$CLAUDELOOP_RESULT")/cwd.txt"
 
 if [ -n "${FAKE_ARGS_OUT:-}" ]; then
   printf '%s\n' "$*" >> "$FAKE_ARGS_OUT"

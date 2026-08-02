@@ -220,6 +220,20 @@ class PromptTest(unittest.TestCase):
         self.assertNotIn("repository's own documentation", precedence(has_operator=True))
         self.assertNotIn("repository's own documentation", precedence(has_operator=False))
 
+    def test_the_definition_of_done_names_the_tree_the_session_works_in(self):
+        # Under worktrees the session's cwd is not cfg.repo, and pointing a
+        # literal-minded agent at a CLAUDE.md outside its own working
+        # directory invites it to edit the wrong copy.
+        (self.repo / "CLAUDE.md").write_text("repo rules\n")
+        tree = self.tmp / "worktrees" / "abc123"
+        tree.mkdir(parents=True)
+        (tree / "CLAUDE.md").write_text("repo rules\n")
+
+        text = compose(self.cfg(), tree)
+
+        self.assertIn(str(tree / "CLAUDE.md"), text)
+        self.assertNotIn(str(self.repo / "CLAUDE.md"), text)
+
 
 class TaskSourceSectionTest(unittest.TestCase):
     def setUp(self):
