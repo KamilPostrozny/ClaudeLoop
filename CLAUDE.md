@@ -95,10 +95,12 @@ deliberate decision recorded in a spec.
   the target repository: `.git/worktrees/<task-id>/`, a `.git` file in the
   worktree, and the `claudeloop/<task-id>` branch ref. None of the three is
   reachable from any working tree's staging area, so none can revert the mark
-  — that is the whole test. The first two are transient: `worktree.release`
-  runs `git worktree remove` on every non-`blocked` outcome, which takes the
-  administrative entry and the tree holding that `.git` file in one go, and
-  declines only when the tree is dirty, since it is never forced. The
+  — that is the whole test. The first two are usually transient:
+  `worktree.release` runs `git worktree remove` on every non-`blocked` result
+  `run_task` returns, which takes the administrative entry and the tree
+  holding that `.git` file in one go, and declines only when the tree is
+  dirty, since it is never forced. A crash out of `run_task` never reaches
+  that call at all, so an `error` outcome leaves both behind. The
   `git worktree prune` in `worktree.probe` is a startup backstop for entries
   orphaned from outside git — a wiped `~/.claudeloop` — not the routine
   cleanup. **The branch alone is permanent.**

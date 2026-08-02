@@ -333,13 +333,24 @@ async def run_task(
     #
     # Deliberately not caught: a worktree that cannot be created is an
     # environment fault, not a verdict on the task, and main_loop's crash
-    # handler is where this file already says what to do about those. Whatever
-    # stops `git worktree add` -- an index.lock a stray process is holding, a
-    # full disk -- stops it for every task equally, so failing this one here
-    # would mark the whole list `- [!]` in seconds, and 'failed' is terminal:
+    # handler is where this file already says what to do about those. The
+    # causes worth designing for are box-wide -- an index.lock a stray process
+    # is holding, a full disk -- and failing the task here would mark the
+    # whole list `- [!]` in seconds, since 'failed' is terminal and
     # State.terminal_ids() would then keep a task source from ever offering
     # any of them again. Recorded as 'error' by the handler instead, with no
     # source.mark, so the work survives the box being fixed.
+    #
+    # The price is head-of-line blocking when the cause is task-local and
+    # permanent instead. A non-empty leftover directory at
+    # worktrees/<task.id> with no `.git` in it -- ClaudeLoop killed mid-`add`,
+    # a reboot, an operator deleting `.git` while tidying -- falls past
+    # `ensure`'s reuse check into `add`, which fails with "already exists",
+    # and the branch retry fails identically. 'error' is non-terminal by
+    # design, so source.pending() keeps offering this task, the loop keeps
+    # re-picking it every POLL_S, and no later task ever runs. Left as an
+    # environment fault an operator clears (delete the directory); recorded
+    # in ROADMAP.md's open issues so it is not a surprise.
     tree = await asyncio.to_thread(
         worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
     )

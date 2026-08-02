@@ -58,6 +58,11 @@ task. If that path is already a registered worktree it is reused as-is: this is
 the resume path, and reusing it is what makes a parked session's tree — branch,
 commits, and uncommitted changes — survive intact until its answer arrives.
 
+*Corrected as built:* the implementation reuses the path when `.git` exists
+inside it, which is a proxy for registration and not registration itself. A
+directory left there with no `.git` in it is neither reused nor cleared —
+`add` then fails with "already exists" — see ROADMAP.md's open issues.
+
 If the path is absent but the branch `claudeloop/<task-id>` already exists (the
 worktree was removed, or the home directory was wiped), `add` is retried
 without `-b` against that branch, so an answered task lands back on its own

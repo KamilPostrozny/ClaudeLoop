@@ -170,9 +170,10 @@ branch-checkout clause is gone, replaced with the opposite assurance; and
 put on that branch.
 
 `ensure(repo, root, task_id)` returns the same path every time for a task,
-and reuses the tree if it is already registered — that reuse is what makes a
-parked task survive intact, branch, commits and uncommitted changes, until
-its answer arrives. If the tree is gone but `claudeloop/<task-id>` still
+and reuses the tree when one is already there — the test is `.git` existing
+inside it, a proxy for registration rather than registration itself. That
+reuse is what makes a parked task survive intact, branch, commits and
+uncommitted changes, until its answer arrives. If the tree is gone but `claudeloop/<task-id>` still
 exists, `add` is retried against the branch so an answered task lands back on
 its own work. `release(repo, path)` runs after any non-`blocked` result and
 is never forced: git refuses to remove a dirty tree, and that refusal is the
@@ -286,14 +287,45 @@ Real, deliberately deferred, tracked here so they are not lost.
   rather than re-read on the web thread, so it reflects the backlog as of the
   current task's start rather than live — under the file source, that's a
   step back from re-reading the tasks file on every request.
-- Nothing prunes what a task leaves behind, and there are two kinds of it.
+- Nothing prunes what a task leaves behind, and there are three kinds of it.
   **Worktree directories** accumulate conditionally: a parked task's persists
-  by design, and a failed task's persists when it is dirty, since `git
-  worktree remove` is never forced — bounded in practice by how many questions
-  go unanswered. **Branches** accumulate unconditionally: nothing deletes
-  `claudeloop/<task-id>`, on any outcome, so a long run leaves one branch per
-  task ever run, done ones included. No age or count policy for either, and
-  the branches are the unbounded half.
+  by design, a failed task's persists when it is dirty, since `git worktree
+  remove` is never forced, and an `error` task's persists always, because a
+  crash out of `run_task` never reaches `release` — bounded in practice by how
+  many questions go unanswered. **Branches** accumulate unconditionally:
+  nothing deletes `claudeloop/<task-id>`, on any outcome, so a long run leaves
+  one branch per task ever run, done ones included. **Claude Code's own
+  transcripts** now do too: it keys stored sessions on the slugified working
+  directory, so `~/.claude/projects/` gains one directory per task id holding
+  that session's full transcript, where before S6 every task shared one
+  directory because they all ran in `cfg.repo`. `release` takes the worktree;
+  the transcript directory outlives it, and it lives outside `~/.claudeloop`
+  where nothing ClaudeLoop documents will look. No age or count policy for any
+  of the three; the branches and the transcripts are the unbounded halves.
+- **A task parked across the S6 upgrade cannot be resumed.** Same cause:
+  Claude Code keys its stored sessions on the working directory, every pre-S6
+  session ran with `cwd=cfg.repo`, and every S6 session runs in a worktree, so
+  `--resume` cannot find the session that asked the question. The failure is
+  silent — no result file and no rate limit, so the loop nudges, burns every
+  resume against an unresolvable session id, and marks the task `- [!]`. It is
+  a one-time cost affecting only tasks parked at the moment of the upgrade;
+  the remedy is to answer parked tasks before upgrading.
+- **A per-task-permanent worktree fault blocks the head of the queue
+  indefinitely.** `ensure` reuses `worktrees/<task-id>` only when `.git`
+  exists inside it, so a non-empty directory left there without one —
+  ClaudeLoop killed mid-`add`, a reboot, an operator deleting `.git` while
+  tidying — makes `git worktree add` fail with "already exists" every time.
+  That is an environment fault by design, recorded as `error`, which is
+  deliberately non-terminal, so the task keeps being offered and re-picked
+  every `POLL_S` forever and no later task runs. Not new in kind — any
+  per-task-permanent crash in `run_task` did this before S6 — but S6 adds a
+  way to reach it. Clearing the directory unblocks it.
+- `ANSWER_PROMPT` tells a resumed session its uncommitted changes are still
+  there, unconditionally. False only if an operator wipes
+  `~/.claudeloop/worktrees` while a task is parked, in which case `ensure`
+  recreates the tree from the task's branch and the session is told about work
+  that is gone. Left as written: qualifying it would cost every honest resume
+  clarity to cover an operator action.
 - The answered path does not publish `set_status(pending=...)`, so the
   dashboard's backlog list can be stale while a resumed task runs. Deliberate:
   publishing it would cost a `source.pending()` network round trip on every

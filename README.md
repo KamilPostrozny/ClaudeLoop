@@ -12,8 +12,10 @@ whatever it says — and ClaudeLoop's per-task instruction just points at it.
 ## Requirements
 
 Python 3.11 or newer, the Claude Code CLI on `PATH`, already authenticated
-(`claude setup-token` for an unattended host), and a `git` with `git worktree
-remove` — 2.17, from 2018. No Python packages to install.
+(`claude setup-token` for an unattended host), and a `git` with `git worktree`
+— 2.5, from 2015, which is what ClaudeLoop checks for at startup, though
+cleanup uses `git worktree remove` from 2.17 and anything older just leaves
+finished worktrees on disk. No Python packages to install.
 
 ## Configure
 
