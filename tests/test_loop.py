@@ -775,9 +775,10 @@ class WorktreePerTaskTest(unittest.TestCase):
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
         trees = self.cfg.home / "worktrees"
-        self.assertEqual(
-            [p for p in trees.iterdir() if p.is_dir()] if trees.exists() else [], []
-        )
+        # Both halves matter: an empty check that tolerates a missing
+        # directory passes against code that never made a worktree at all.
+        self.assertTrue(trees.exists(), "the run must have created worktrees here")
+        self.assertEqual([p for p in trees.iterdir() if p.is_dir()], [])
 
 
 class BuildSourceTest(unittest.TestCase):
@@ -971,6 +972,33 @@ class ResumeWithAnswerTest(unittest.TestCase):
             asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
 
         self.assertEqual(released, [], "a parked task must keep its tree")
+
+    def test_a_parked_tasks_tree_really_survives(self):
+        """The same claim as the test above, with no mocks in the way.
+
+        The mocked version asserts that `release` was not *called*, which is
+        a statement about run_task's control flow, not about the disk. Real
+        `ensure` and real `release` run here against the fixture's real
+        repository, so this fails if the tree is gone however it went --
+        including for reasons a recorded call list cannot see. S2b's
+        equivalent defect survived eleven scoped reviews and 421 passing
+        tests precisely because nothing looked at what was actually left
+        behind.
+        """
+        self.fake_blocked()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        tree = self.cfg.home / "worktrees" / self.task.id
+        # A worktree's .git is a file pointing back at the repository; its
+        # presence is what makes this a live checkout rather than a leftover
+        # directory.
+        self.assertTrue((tree / ".git").exists(), "a parked task must keep its tree")
+        registered = subprocess.run(
+            ["git", "worktree", "list"], cwd=self.cfg.repo,
+            capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL,
+        ).stdout
+        self.assertIn(f"claudeloop/{self.task.id}", registered)
 
     def test_a_task_whose_worktree_cannot_be_created_is_an_environment_fault(self):
         # Not a verdict on the task. Whatever stops `git worktree add` -- an
