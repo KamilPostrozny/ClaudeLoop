@@ -999,7 +999,11 @@ class ResumeWithAnswerTest(unittest.TestCase):
         self.assertIn("use EUR", self.args())
         self.assertIn("check out the branch you were working on", self.args())
 
-    def test_a_resume_does_not_reset_the_working_tree(self):
+    def test_a_resume_still_resets_the_working_tree(self):
+        # Flipped by the S2b live smoke test: skipping the reset on a resume
+        # let a parked task -- which usually parks before its first commit --
+        # inherit whatever branch an intervening task left checked out, and
+        # commit its work there instead of on its own branch.
         called = []
         with mock.patch.object(loop, "reset_to_default_branch",
                                side_effect=lambda repo: called.append(repo)):
@@ -1007,7 +1011,8 @@ class ResumeWithAnswerTest(unittest.TestCase):
             asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
                                       resume_with="use EUR"))
 
-        self.assertEqual(called, [], "a resume must not check out the default branch")
+        self.assertEqual(called, [self.cfg.repo],
+                          "a resume must reset to the default branch, same as a fresh task")
 
     def test_a_resume_does_not_re_fire_the_source_start_hook(self):
         started = []
@@ -1251,6 +1256,87 @@ class AnsweredMainLoopTest(unittest.TestCase):
                 asyncio.run(loop.main_loop(self.cfg, once=True))
 
         self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
+
+    def test_a_resumed_task_returns_to_the_default_branch_not_the_intervening_tasks(self):
+        # Regression for the S2b live smoke test: a task parked before its
+        # first commit (the usual case -- the question that blocks it blocks
+        # it early). The next task then ran and left its own branch checked
+        # out. When the parked task was answered and resumed, it skipped
+        # reset_to_default_branch and committed onto that leftover branch
+        # instead of its own -- observed for real as "File committed to
+        # add-gitignore branch". This must fail against the pre-fix code and
+        # pass against the fix.
+        #
+        # setUp already made self.cfg.repo a directory with an empty .git
+        # inside it; `git init` on top of that turns it into a real repo, per
+        # ResetToDefaultBranchTest's convention elsewhere in this file.
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "Test"],
+            # 1Password signs commits globally on this machine, which hangs
+            # headless -- see ResetToDefaultBranchTest.setUp for the same fix.
+            ["config", "commit.gpgsign", "false"],
+        ):
+            subprocess.run(["git", *args], cwd=self.cfg.repo, check=True,
+                           capture_output=True, stdin=subprocess.DEVNULL)
+        (self.cfg.repo / "README.md").write_text("hi\n")
+        subprocess.run(["git", "add", "README.md"], cwd=self.cfg.repo, check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=self.cfg.repo,
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+        # A fake CLI that blocks on its first invocation (task 1, parking
+        # before it ever branches) and finishes cleanly on every invocation
+        # after (task 2). It never touches git itself -- the branch task 2
+        # "leaves behind" is driven directly below, per the task instructions,
+        # since the fake CLI can't be trusted to make real commits.
+        count_file = self.tmp / "invocations"
+        self.fake.write_text(
+            "#!/usr/bin/env bash\n"
+            f'n=$(( $(cat "{count_file}" 2>/dev/null || echo 0) + 1 ))\n'
+            f'echo "$n" > "{count_file}"\n'
+            'if [ "$n" -eq 1 ]; then\n'
+            '  printf \'%s\' \'{"status":"blocked","summary":"stuck",'
+            '"question":"which currency?"}\' > "$CLAUDELOOP_RESULT"\n'
+            "else\n"
+            '  printf \'%s\' \'{"status":"done","summary":"ok"}\' > "$CLAUDELOOP_RESULT"\n'
+            "fi\n"
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
+        )
+        self.fake.chmod(0o755)
+        self.tasks.write_text("- [ ] ambiguous thing\n- [ ] second thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(),
+                         "- [!] ambiguous thing\n- [x] second thing\n")
+
+        # Stand in for what task 2's session left behind: its own branch,
+        # checked out, exactly like the live run's "add-gitignore".
+        subprocess.run(["git", "checkout", "-q", "-b", "add-gitignore"],
+                       cwd=self.cfg.repo, check=True, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+
+        # A human answers the parked task.
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        run_dir = self.cfg.home / "runs" / parked["id"]
+        (run_dir / "answer.json").write_text(json.dumps({"answer": "use EUR"}))
+
+        # Back to a CLI that finishes and does not touch git.
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.cfg.repo,
+            check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        ).stdout.strip()
+        self.assertEqual(branch, "main",
+                         "the resumed task must start from the default branch, "
+                         "not the branch the intervening task left checked out")
 
 
 if __name__ == "__main__":

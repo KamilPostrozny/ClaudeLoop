@@ -424,17 +424,30 @@ async def run_task(
     resumed = state.last_session(task.id) if resume_with is not None else None
     session_id = resumed or str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
+    # Also run on a resume: the live smoke test proved skipping it here was
+    # wrong. A task usually parks *before* its first commit, since the
+    # question that blocks it blocks it early -- so between the park and the
+    # answer, other tasks run and leave their own branches checked out. A
+    # resume that skipped the reset picked up whatever branch the last of
+    # those left behind and committed there instead of its own. This is safe
+    # in the direction that matters: a session that did create a branch is
+    # told by ANSWER_PROMPT to check it back out, and its commits are intact
+    # because the reset never forces anything; a session that did not create
+    # one now starts from the default branch, same as a fresh task would.
+    # Uncommitted work in a parked tree was already lost the moment the next
+    # task ran, so resetting here costs nothing that parking had not already
+    # cost. Do not skip this again.
+    #
+    # Offloaded to a thread: it shells out to git synchronously, and this
+    # coroutine must not block the event loop the heartbeat task and the
+    # dashboard share.
+    await asyncio.to_thread(reset_to_default_branch, cfg.repo)
     if resume_with is None:
-        # Skipped on a resume. reset_to_default_branch exists to stop task N
-        # inheriting task N-1's branch, and a resume is not a new task -- it
-        # is the same one, continuing. source.start would likewise re-fire
-        # transition_start against an issue already in that status; reopen()
-        # covers the source-side state instead.
+        # source.start would re-fire transition_start against an issue
+        # already in that status; reopen() covers the source-side state
+        # instead, so this stays conditional even though the reset above
+        # no longer is.
         #
-        # Offloaded to a thread: it shells out to git synchronously, and this
-        # coroutine must not block the event loop the heartbeat task and the
-        # dashboard share.
-        await asyncio.to_thread(reset_to_default_branch, cfg.repo)
         # Offloaded for the same reason: under the Jira source this is a
         # blocking HTTP round trip.
         await asyncio.to_thread(source.start, task)
