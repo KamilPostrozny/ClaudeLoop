@@ -16,7 +16,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S2a** | Read-only web dashboard | merged |
 | **S3** | Jira task source | merged |
 | **S2b** | Question and answer channel | merged |
-| **S6** | A git worktree per task | in progress |
+| **S6** | A git worktree per task | merged |
 | **S5** | Setup wizard and config schema | not started |
 | **S4** | Home Assistant OS addon | not started |
 
