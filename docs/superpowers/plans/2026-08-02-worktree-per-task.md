@@ -509,7 +509,7 @@ git commit -m "feat: a session can be pointed at a working tree other than the r
 
 **Interfaces:**
 - Consumes: `worktree.ensure(repo, root, task_id) -> Path`, `worktree.release(repo, path) -> None` (Task 1); `session.run(..., cwd=...)` (Task 2).
-- Produces: `run_task` unchanged in signature; a task whose worktree cannot be created returns `{"status": "failed", "summary": ...}` and is marked in its source like any other failure.
+- Produces: `run_task` unchanged in signature; a task whose worktree cannot be created lets the failure propagate, so `main_loop`'s existing crash handler records it as `error` and does **not** mark it in its source. (Corrected in review: the first draft of this task made it a terminal `failed` + `source.mark`, which would burn the whole backlog on a transient git fault — see the ledger's Task 3 ruling.)
 
 - [ ] **Step 1: Write the failing tests**
 

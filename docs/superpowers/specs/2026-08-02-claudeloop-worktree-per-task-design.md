@@ -86,8 +86,13 @@ registrations left behind by a home directory wiped while worktrees existed. A b
 resolvable default branch, is a configuration error, and an unattended loop
 should say so before it starts rather than on each task in turn.
 
-A per-task `git worktree add` failure marks that task `failed` with git's
-stderr in the summary.
+A per-task `git worktree add` failure is an **environment fault, not a
+verdict**: it propagates out of `run_task` and `main_loop`'s existing crash
+handler records it as `error` without marking the task in its source.
+(Corrected during implementation — the design first said `failed` and marked.
+`failed` is terminal, so a transient fault such as a held `index.lock` or a
+full disk would have failed and permanently marked every remaining task in
+seconds, which is the exact reasoning the crash handler already carries.)
 
 Falling back to running in `cfg.repo` was rejected. It would keep
 `reset_to_default_branch`, the default-branch guessing, and the branch
