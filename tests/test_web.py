@@ -76,6 +76,7 @@ class RoutesTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/nope")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
     def test_the_logo_is_cached_long_lived(self):
         # It's 1.66MB served to a phone on every page load; worth paying for
@@ -207,12 +208,14 @@ class TaskRouteTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/tasks/ffffffffffffffff")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
     def test_a_task_id_that_is_not_a_hash_is_refused(self):
         for bad in ("..", "../../etc/passwd", "abc", "0123456789ABCDEF"):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.get(f"/api/tasks/{bad}")
             self.assertEqual(caught.exception.code, 404)
+            caught.exception.close()
 
 
 class TokenTest(WebTestBase):
@@ -225,11 +228,13 @@ class TokenTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
     def test_a_wrong_token_is_refused(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state", token="wrong")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
     def test_a_non_ascii_token_is_refused_not_raised(self):
         # secrets.compare_digest requires ASCII-only str; parse_qs happily
@@ -238,6 +243,7 @@ class TokenTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state", token="é")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
 
 class HostHeaderTest(WebTestBase):
