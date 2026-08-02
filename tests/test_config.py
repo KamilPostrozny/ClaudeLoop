@@ -97,6 +97,32 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(Exception):
             Config(repo=Path("/a"), tasks_file=Path("/b")).model = "x"
 
+    def test_load_config_reports_the_first_error_with_the_file_path(self):
+        # Every message a human sees names the file it came from -- the
+        # common install failure is a config.toml at the default umask, and
+        # that operator must get the message, not a traceback.
+        path = self.write(
+            f'repo = "{self.tmp}/nope"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn(str(path), str(caught.exception))
+
+    def test_the_jira_shorthand_still_composes_a_query(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            'source = "jira"\n'
+            "[jira]\n"
+            'site = "https://x.atlassian.net"\n'
+            'email = "a@b.c"\n'
+            'token = "t"\n'
+            'project = "OPS"\n'
+            'status = "To Do"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.jira.jql, 'project = "OPS" AND status = "To Do" ORDER BY created ASC')
+
 
 class WebConfigTest(unittest.TestCase):
     def setUp(self):
