@@ -40,10 +40,12 @@ PROTOCOL = (
 
 BUILTIN_DEFINITION_OF_DONE = (
     "Done means: the change is implemented; the repository's own tests and "
-    "checks, if it has any, pass; the work is committed on a new branch "
-    "created from the repository's default branch; and a pull request is "
-    "open. Create that branch before your first commit -- never commit to "
-    "the default branch itself. If the repository has no remote configured, "
+    "checks, if it has any, pass; the work is committed; and a pull request "
+    "is open. You are already on a branch made for this task and cut from "
+    "the repository's default branch, so commit there -- you do not need to "
+    "create one, and you may rename it to something descriptive with `git "
+    "branch -m` if you like. Never check out the default branch and commit "
+    "onto it. If the repository has no remote configured, "
     "or a remote is configured but push credentials or a forge CLI (gh, "
     "glab, or similar) to open a pull request with are not available, that "
     "is not blocked: supplying a remote or push credentials is not a "
@@ -60,6 +62,14 @@ BUILTIN_DEFINITION_OF_DONE = (
     "already-finished work look pending again. Prefer staging files by name "
     "over `git add -A`."
 )
+"""Before S6 this told the session to create its own branch off the default
+one -- S1's live smoke test measured only ~50% compliance, and S2b's found
+the failure mode: a task that skipped it committed straight to the default
+branch, and a task parked meanwhile inherited the contamination once it
+resumed. ClaudeLoop now cuts the branch itself before the session ever runs,
+so the instruction is gone rather than reworded, and the definition of done
+only has to forbid checking out the default branch instead of prescribing
+how to avoid it."""
 
 CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 

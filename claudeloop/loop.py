@@ -63,35 +63,33 @@ answer one, and a session with a real question now has somewhere to put it."""
 ANSWER_PROMPT = (
     "A human has answered the question you were blocked on.\n\n"
     "Their answer: {answer}\n\n"
-    "Act on that answer and finish the task. The working tree has been reset "
-    "to this repository's default branch since you stopped, so it is no "
-    "longer on the branch you created: if you created one, check out the "
-    "branch you were working on before you continue -- your commits on it "
-    "are intact. When the work is complete, "
+    "Act on that answer and finish the task. Your working tree is exactly as "
+    "you left it -- still on your branch, with any uncommitted changes still "
+    "there -- so carry on from where you stopped. When the work is complete, "
     "write the result file at the path in the CLAUDELOOP_RESULT environment "
     "variable exactly as before; that file, not your last message, is what "
     "ends the task."
 )
 """Sent when resuming a parked task whose question has been answered.
 
-The branch sentence is load-bearing and cannot be replaced by anything the
-orchestrator does itself: every task that ran while this one was parked
-called reset_to_default_branch on the way in, so the tree has moved, and
-ClaudeLoop never learns what the session named its branch. The session does
--- which is the main reason an answered task resumes its original session
-rather than starting fresh."""
+Before S6 this had to talk the session back onto its own branch: every task
+that ran while this one was parked reset the single shared working tree. Each
+task now has its own worktree, which nothing else touches while it is parked
+-- so the honest thing to say is the opposite, and saying it stops a resumed
+session guessing at a branch name it may have renamed."""
 
 FRESH_ANSWER_PROMPT = (
     "{task}\n\n"
     "A human has already answered a question about this task: {answer}\n\n"
     "The session that asked that question is no longer available, so start "
-    "this task from the beginning, using that answer. An earlier attempt may "
-    "have left a branch in this repository; look before you redo work that is "
-    "already committed."
+    "this task from the beginning, using that answer. You are on the branch "
+    "that attempt used and its commits are here; look before you redo work "
+    "that is already done."
 )
 """For the edge case where a parked task has no session to resume -- a
-state.db from before this slice, or a task whose runs were pruned. The work
-is not lost, only the context."""
+state.db from before this slice, or a task whose runs were pruned. The
+worktree, and any commits an earlier attempt made in it, are still here; only
+the session's own memory of what it did is gone."""
 
 
 @dataclass(frozen=True)

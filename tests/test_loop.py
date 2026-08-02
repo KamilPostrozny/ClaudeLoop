@@ -163,14 +163,21 @@ class ResumePromptTest(unittest.TestCase):
 
         self.assertIn("use EUR", rendered)
 
-    def test_the_answer_prompt_warns_that_the_branch_may_not_be_checked_out(self):
-        # The sharpest consequence of parking: other tasks run meanwhile and
-        # each checks out the default branch, so the tree has moved. The
-        # orchestrator cannot fix this -- it never learns the branch name.
-        rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
+    def test_the_answer_prompt_says_the_tree_is_as_it_was_left(self):
+        # Under one worktree per task the tree does not move while a task is
+        # parked, so the old "check out the branch you were working on"
+        # instruction became false -- and telling a session to check out a
+        # branch it is already on invites it to guess at a name it may have
+        # renamed.
+        text = loop.ANSWER_PROMPT.format(answer="use EUR")
+        self.assertIn("exactly as you left it", text)
+        self.assertIn("still on your branch", text)
+        self.assertNotIn("check out the branch you were working on", text)
 
-        self.assertIn("check out the branch you were working on", rendered)
-        self.assertIn("commits on it are intact", rendered)
+    def test_the_fresh_answer_prompt_says_the_earlier_attempts_commits_are_here(self):
+        text = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
+        self.assertIn("on the branch that attempt used", text)
+        self.assertNotIn("may have left a branch", text)
 
     def test_the_answer_prompt_still_demands_the_result_file(self):
         rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
@@ -926,7 +933,7 @@ class ResumeWithAnswerTest(unittest.TestCase):
                                   resume_with="use EUR"))
 
         self.assertIn("use EUR", self.args())
-        self.assertIn("check out the branch you were working on", self.args())
+        self.assertIn("exactly as you left it", self.args())
 
     def test_a_resume_returns_to_the_same_worktree(self):
         # The point of the slice: the parked session finds its own tree,
