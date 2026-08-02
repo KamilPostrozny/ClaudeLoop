@@ -108,10 +108,12 @@ class PromptTest(unittest.TestCase):
         # as a question. The old text said "stop after committing" and never
         # named a status, so both readings were defensible. This pins the
         # fix: the status to write is spelled out, and "blocked" is
-        # explicitly ruled out with the reason (nobody is present mid-run to
-        # answer).
+        # explicitly ruled out with the reason (supplying a remote or
+        # credentials is not a decision anyone can hand you mid-run).
         self.assertIn("that is not blocked", BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("no human is present mid-run", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn(
+            "is not a decision anyone can hand you mid-run", BUILTIN_DEFINITION_OF_DONE
+        )
         self.assertIn(
             'write status "done" (not "blocked")', BUILTIN_DEFINITION_OF_DONE
         )
@@ -276,6 +278,41 @@ class TaskSourceSectionTest(unittest.TestCase):
         text = compose(self.jira_cfg())
         self.assertLess(text.index("unattended under ClaudeLoop"),
                         text.index("## Task source"))
+
+
+class BlockedWordingTest(unittest.TestCase):
+    """These pin specific sentences on purpose. Every live failure this
+    project has had traced back to prompt text that could be read two ways,
+    so a reworded claim must break a test and get looked at."""
+
+    def test_the_protocol_no_longer_claims_nobody_can_answer(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertNotIn("Nobody is watching, so", PROTOCOL)
+
+    def test_the_protocol_says_blocking_parks_the_task_and_costs_time(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("parks this task until a human", PROTOCOL)
+        self.assertIn("may be hours", PROTOCOL)
+
+    def test_the_protocol_says_the_answer_comes_back_to_this_session(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("this same session is resumed with their answer", PROTOCOL)
+
+    def test_the_protocol_still_reserves_blocked_for_a_human_decision(self):
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn("an ordinary judgment call is not that", PROTOCOL)
+
+    def test_the_protocol_names_blocked_where_it_sets_the_bar(self):
+        # "Reserve it for the narrow case" left the nearest antecedent as
+        # "your patience". The status has to be named at the point the bar
+        # is set, not four clauses earlier.
+        from claudeloop.prompt import PROTOCOL
+
+        self.assertIn('Reserve "blocked" for the narrow case', PROTOCOL)
 
 
 if __name__ == "__main__":

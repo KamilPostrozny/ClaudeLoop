@@ -555,3 +555,209 @@ class CliTest(unittest.TestCase):
         code, _ = self.run_cli(["--config", str(config), "show", ""])
         self.assertNotEqual(code, 0)
         self.assertEqual(self.fake.requests, [])
+
+
+class QuestionCommentTest(unittest.TestCase):
+    def test_it_carries_the_summary_and_teaches_the_reply_syntax(self):
+        from claudeloop.jira import QUESTION_HEADING, QUESTION_MARKER, question_comment
+
+        body = question_comment("I stopped.\n\nQuestion: which currency?", 0.25)
+
+        self.assertTrue(body.startswith(QUESTION_HEADING))
+        self.assertIn("Question: which currency?", body)
+        self.assertIn(QUESTION_MARKER, body)
+        self.assertIn("0.2500", body)
+        # Jira wiki markup (REST v2) renders backticks literally rather than
+        # as monospace, so a human copying the marker would carry a leading
+        # backtick into their reply and never match. {{...}} is Jira's own
+        # monospace syntax.
+        self.assertIn("{{" + QUESTION_MARKER + "}}", body)
+        self.assertNotIn("`" + QUESTION_MARKER + "`", body)
+
+    def test_a_blocked_task_gets_the_question_comment_not_the_closing_one(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(
+            Task("abc", "OPS-1: thing", "jira", "OPS-1"),
+            "blocked",
+            "I stopped.\n\nQuestion: which currency?",
+            0.25,
+        )
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertEqual(len(comments), 1)
+        from claudeloop.jira import QUESTION_HEADING
+        self.assertTrue(comments[0]["body"].startswith(QUESTION_HEADING))
+        self.assertNotIn("finished this task", comments[0]["body"])
+
+    def test_a_done_task_still_gets_the_closing_comment(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(Task("abc", "OPS-1: thing", "jira", "OPS-1"), "done", "did it", 0.5)
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertIn("finished this task", comments[0]["body"])
+
+    def test_a_failed_task_gets_the_closing_comment(self):
+        fake = FakeJira({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+        })
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.mark(Task("abc", "OPS-1: thing", "jira", "OPS-1"), "failed", "gave up", 0.5)
+
+        comments = [payload for method, path, payload in fake.requests
+                    if path == "/issue/OPS-1/comment"]
+        self.assertIn("finished this task", comments[0]["body"])
+        self.assertIn("*failed*", comments[0]["body"])
+
+
+class ReopenTest(unittest.TestCase):
+    def test_reopen_removes_only_the_blocked_label(self):
+        from claudeloop.jira import BLOCKED_LABEL
+
+        fake = FakeJira({"PUT /issue/OPS-1": (204, {})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        source.reopen(Task("abc", "OPS-1: thing", "jira", "OPS-1"))
+
+        puts = [payload for method, path, payload in fake.requests if method == "PUT"]
+        self.assertEqual(puts, [{"update": {"labels": [{"remove": BLOCKED_LABEL}]}}])
+
+    def test_reopen_survives_a_jira_that_refuses(self):
+        fake = FakeJira({"PUT /issue/OPS-1": (403, {"errorMessages": ["nope"]})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            source.reopen(Task("abc", "OPS-1: thing", "jira", "OPS-1"))
+
+    def test_an_issue_key_is_escaped_into_every_client_url(self):
+        # add_label / remove_label / transitions / transition used to
+        # interpolate the key raw. Only JiraSource passed keys, always
+        # straight from Jira's own search results, so it was safe by
+        # accident rather than by design. FakeJira never unquotes the path
+        # it matches on, so an unescaped key would 404 here.
+        fake = FakeJira({
+            "PUT /issue/OPS%201%2Fx": (204, {}),
+            "GET /issue/OPS%201%2Fx/transitions": (200, {"transitions": []}),
+            "POST /issue/OPS%201%2Fx/transitions": (204, {}),
+        })
+        self.addCleanup(fake.close)
+        client = JiraClient(fake.url, "e@x", "t")
+
+        client.add_label("OPS 1/x", "l")
+        client.remove_label("OPS 1/x", "l")
+        client.transitions("OPS 1/x")
+        client.transition("OPS 1/x", "31")
+
+        self.assertEqual(
+            [path for _, path, _ in fake.requests],
+            ["/issue/OPS%201%2Fx"] * 2
+            + ["/issue/OPS%201%2Fx/transitions"] * 2,
+        )
+
+
+class JiraAnswerTest(unittest.TestCase):
+    task = Task("abc", "OPS-1: thing", "jira", "OPS-1")
+
+    def source_for(self, *bodies: str) -> JiraSource:
+        fake = FakeJira({
+            "GET /issue/OPS-1/comment": (200, {
+                "comments": [{"body": body} for body in bodies]
+            }),
+        })
+        self.addCleanup(fake.close)
+        return JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+    def test_a_marked_comment_after_the_question_is_the_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            "some earlier chatter",
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop: use EUR",
+        )
+
+        self.assertEqual(source.answer(self.task), "use EUR")
+
+    def test_an_unmarked_comment_is_not_an_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "nice catch, I'll look into it",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_a_marked_comment_before_the_question_is_ignored(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            "claudeloop: this answers an older question",
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_a_task_that_blocked_twice_reads_the_second_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop: use EUR",
+            f"{QUESTION_HEADING}\n\nQuestion: which rounding?",
+            "claudeloop: round half up",
+        )
+
+        self.assertEqual(source.answer(self.task), "round half up")
+
+    def test_no_question_comment_means_no_answer(self):
+        source = self.source_for("claudeloop: an answer to nothing")
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_the_marker_alone_is_not_an_answer(self):
+        from claudeloop.jira import QUESTION_HEADING
+
+        source = self.source_for(
+            f"{QUESTION_HEADING}\n\nQuestion: which currency?",
+            "claudeloop:   ",
+        )
+
+        self.assertIsNone(source.answer(self.task))
+
+    def test_an_unreachable_jira_means_no_answer_yet_not_a_raise(self):
+        fake = FakeJira({"GET /issue/OPS-1/comment": (500, {"errorMessages": ["boom"]})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t", retries=1), "project = OPS")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertIsNone(source.answer(self.task))
+
+    def test_a_comment_list_of_the_wrong_shape_is_warned_about_not_raised(self):
+        fake = FakeJira({"GET /issue/OPS-1/comment": (200, {"comments": "nonsense"})})
+        self.addCleanup(fake.close)
+        source = JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            self.assertIsNone(source.answer(self.task))
+
+        self.assertIn("OPS-1", logs.output[0])
+        self.assertIn("str", logs.output[0])

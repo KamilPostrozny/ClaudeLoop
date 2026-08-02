@@ -110,6 +110,36 @@ def closing_comment(status: str, summary: str, cost: float) -> str:
     )
 
 
+QUESTION_MARKER = "claudeloop:"
+"""A comment counts as an answer only if it starts with this. The question
+comment says so outright, so the human learns the syntax from the message
+they are replying to. Without it, a colleague writing "nice catch" would
+resume a session and spend real money acting on it -- and identifying our
+own account would become necessary, which this avoids entirely: ClaudeLoop's
+own comments never carry the prefix."""
+
+QUESTION_HEADING = "ClaudeLoop is blocked on this task and needs an answer."
+"""Also the boundary marker for JiraSource.answer: a task can block twice,
+and the first answer must not be read again as the answer to the second
+question. Locating the newest comment starting with this heading is what
+keeps the two rounds straight, with nothing persisted anywhere."""
+
+
+def question_comment(summary: str, cost: float) -> str:
+    """Posted instead of closing_comment when a task parks.
+
+    `summary` already carries the question -- loop.read_result appends it --
+    so this adds the heading and the reply instruction rather than repeating
+    it.
+    """
+    return (
+        f"{QUESTION_HEADING}\n\n{summary}\n\n"
+        f"Reply with a comment starting with {{{{{QUESTION_MARKER}}}}} and ClaudeLoop "
+        f"will pick this task back up with your answer.\n\n"
+        f"(cost so far ${cost:.4f})"
+    )
+
+
 class JiraError(Exception):
     def __init__(self, status: int, body: str):
         super().__init__(f"Jira returned {status}: {body[:400]}")
@@ -194,14 +224,23 @@ class JiraClient:
     def add_label(self, key: str, label: str) -> dict:
         # `update` adds one label atomically. Writing fields.labels instead
         # replaces the whole list, deleting the operator's own labels.
+        key = urllib.parse.quote(key, safe="")
         return self._request("PUT", f"/issue/{key}", {
             "update": {"labels": [{"add": label}]}
         })
 
+    def remove_label(self, key: str, label: str) -> dict:
+        key = urllib.parse.quote(key, safe="")
+        return self._request("PUT", f"/issue/{key}", {
+            "update": {"labels": [{"remove": label}]}
+        })
+
     def transitions(self, key: str) -> list[dict]:
+        key = urllib.parse.quote(key, safe="")
         return self._request("GET", f"/issue/{key}/transitions").get("transitions", [])
 
     def transition(self, key: str, transition_id: str) -> dict:
+        key = urllib.parse.quote(key, safe="")
         return self._request("POST", f"/issue/{key}/transitions", {
             "transition": {"id": transition_id}
         })
@@ -318,11 +357,73 @@ class JiraSource:
                 " Jira; state.db is what stops it re-running", key, label, error,
             )
         try:
-            self.client.add_comment(key, closing_comment(status, summary, cost))
+            self.client.add_comment(key, (
+                question_comment(summary, cost) if status == "blocked"
+                else closing_comment(status, summary, cost)
+            ))
         except JiraError as error:
             log.warning("could not comment on %s (%s)", key, error)
         if self.transition_done:
             self._transition(key, self.transition_done)
+
+    def reopen(self, task: Task) -> None:
+        """Drop the blocked label so an answered task is offered again.
+
+        A failure here is a warning, never a raise: state.db is what actually
+        drives the resume, and the label is for humans.
+        """
+        try:
+            self.client.remove_label(task.source_ref, BLOCKED_LABEL)
+        except JiraError as error:
+            log.warning(
+                "could not remove the %s label from %s (%s) -- the ticket will"
+                " look blocked in Jira; the task resumes anyway",
+                BLOCKED_LABEL, task.source_ref, error,
+            )
+
+    def answer(self, task: Task) -> str | None:
+        """The human's reply to this task's question, if one has been posted.
+
+        The boundary is found in the comment list itself rather than stored:
+        ClaudeLoop's newest question comment, then the first comment after it
+        carrying QUESTION_MARKER. A task that blocked twice therefore reads
+        the second answer, not the first, across restarts and with nothing
+        persisted.
+        """
+        try:
+            comments = self.client.comments(task.source_ref).get("comments")
+        except JiraError as error:
+            # Indistinguishable from "no answer yet", exactly as pending()
+            # treats an unreachable Jira as an empty backlog.
+            log.warning(
+                "could not read comments on %s (%s); trying again later",
+                task.source_ref, error,
+            )
+            return None
+        if not isinstance(comments, list):
+            log.warning(
+                "Jira returned no comment list for %s (got %s); treating it"
+                " as unanswered", task.source_ref, type(comments).__name__,
+            )
+            return None
+        bodies = [
+            str(comment.get("body") or "")
+            for comment in comments
+            if isinstance(comment, dict)
+        ]
+        asked = -1
+        for index, body in enumerate(bodies):
+            if body.lstrip().startswith(QUESTION_HEADING):
+                asked = index
+        if asked == -1:
+            return None
+        for body in bodies[asked + 1:]:
+            stripped = body.strip()
+            if stripped.casefold().startswith(QUESTION_MARKER):
+                answer = stripped[len(QUESTION_MARKER):].strip()
+                if answer:
+                    return answer
+        return None
 
     def _transition(self, key: str, name: str) -> None:
         """Move an issue by transition name, if Jira offers that name for this

@@ -1,5 +1,6 @@
 import http.client
 import json
+import socket
 import sqlite3
 import tempfile
 import time
@@ -76,6 +77,7 @@ class RoutesTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/nope")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
     def test_the_logo_is_cached_long_lived(self):
         # It's 1.66MB served to a phone on every page load; worth paying for
@@ -151,6 +153,24 @@ class StateRouteTest(WebTestBase):
     def test_a_missing_database_is_not_an_error(self):
         self.assertEqual(self.get_json("/api/state")["completed"], [])
 
+    def test_a_blocked_task_never_ages_out_of_the_completed_list(self):
+        # state.blocked() keeps a parked task forever and the loop will
+        # still resume it, but api_state only returns the most recent
+        # RECENT_TASKS rows -- so a task parked before RECENT_TASKS newer
+        # ones finished used to fall off the dashboard and become
+        # unanswerable under the file source, whose only channel is the
+        # answer box in this same list.
+        state = State(self.cfg.home / "state.db")
+        state.start_task("old-blocked", "file", "- [ ] old", "old")
+        state.finish_task("old-blocked", "blocked", "waiting", 0.1, question="ok?")
+        for i in range(web.RECENT_TASKS):
+            tid = f"newer-{i}"
+            state.start_task(tid, "file", f"- [ ] {i}", str(i))
+            state.finish_task(tid, "done", "fine", 0.1)
+        completed = self.get_json("/api/state")["completed"]
+        self.assertEqual(len(completed), web.RECENT_TASKS)
+        self.assertIn("old-blocked", [t["id"] for t in completed])
+
 
 class JiraSourceStateTest(unittest.TestCase):
     """Regression: under source = "jira", cfg.tasks_file is None. api_state
@@ -207,12 +227,14 @@ class TaskRouteTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/tasks/ffffffffffffffff")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
     def test_a_task_id_that_is_not_a_hash_is_refused(self):
         for bad in ("..", "../../etc/passwd", "abc", "0123456789ABCDEF"):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.get(f"/api/tasks/{bad}")
             self.assertEqual(caught.exception.code, 404)
+            caught.exception.close()
 
 
 class TokenTest(WebTestBase):
@@ -225,11 +247,13 @@ class TokenTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
     def test_a_wrong_token_is_refused(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state", token="wrong")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
     def test_a_non_ascii_token_is_refused_not_raised(self):
         # secrets.compare_digest requires ASCII-only str; parse_qs happily
@@ -238,6 +262,7 @@ class TokenTest(WebTestBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/api/state", token="é")
         self.assertEqual(caught.exception.code, 403)
+        caught.exception.close()
 
 
 class HostHeaderTest(WebTestBase):
@@ -499,6 +524,171 @@ class SseTest(WebTestBase):
             self.assertEqual(entry.get("text"), "final", f"the closing line was dropped: {entry}")
             return
         self.fail("the closing line never arrived")
+
+
+class AnswerRouteTest(WebTestBase):
+    def setUp(self):
+        super().setUp()
+        self.state = State(self.cfg.home / "state.db")
+        self.task_id = task_id("ambiguous thing")
+        self.state.start_task(self.task_id, "file", "- [ ] ambiguous thing",
+                              "ambiguous thing")
+        self.state.finish_task(self.task_id, "blocked", "stuck", 0.1, "which currency?")
+
+    def post(self, path: str, body, content_type="application/json", token=None):
+        """Returns (status, decoded body). http.client, not urllib: urllib
+        raises on a 4xx and the status code is the thing under test."""
+        url = path + (("?token=" + urllib.parse.quote(token)) if token else "")
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            raw = body if isinstance(body, (bytes, str)) else json.dumps(body)
+            headers = {"Content-Type": content_type} if content_type else {}
+            conn.request("POST", url, raw, headers)
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
+
+    def answer_file(self) -> Path:
+        return self.cfg.home / "runs" / self.task_id / "answer.json"
+
+    def answer_path(self) -> str:
+        """The route, carrying the token when the subclass sets one."""
+        path = f"/api/tasks/{self.task_id}/answer"
+        return path + (f"?token={urllib.parse.quote(self.token)}" if self.token else "")
+
+    def test_an_answer_is_written_where_the_loop_looks_for_it(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": "use EUR"})
+
+        self.assertEqual(code, 200)
+        payload = json.loads(self.answer_file().read_text())
+        self.assertEqual(payload["answer"], "use EUR")
+        self.assertIsInstance(payload["at"], float)
+
+    def test_the_answer_is_stripped(self):
+        self.post(f"/api/tasks/{self.task_id}/answer", {"answer": "  use EUR \n"})
+
+        self.assertEqual(json.loads(self.answer_file().read_text())["answer"], "use EUR")
+
+    def test_a_task_that_is_not_blocked_is_refused(self):
+        self.state.finish_task(self.task_id, "done", "did it", 0.1)
+
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": "use EUR"})
+
+        self.assertEqual(code, 409)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_an_unknown_task_is_refused(self):
+        code, _ = self.post("/api/tasks/" + ("0" * 16) + "/answer", {"answer": "x"})
+
+        self.assertEqual(code, 409)
+
+    def test_a_bad_task_id_never_reaches_the_filesystem(self):
+        code, _ = self.post("/api/tasks/..%2f..%2fetc/answer", {"answer": "x"})
+
+        self.assertEqual(code, 404)
+
+    def test_a_form_content_type_is_refused(self):
+        # A cross-origin fetch sending application/json triggers a CORS
+        # preflight this server never answers, and an HTML form cannot set
+        # that content type. This is what stops a drive-by submission.
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer",
+                            "answer=use+EUR",
+                            content_type="application/x-www-form-urlencoded")
+
+        self.assertEqual(code, 415)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_an_empty_answer_is_refused(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": "   "})
+
+        self.assertEqual(code, 400)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_a_body_that_is_not_an_answer_object_is_refused(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"nope": "x"})
+
+        self.assertEqual(code, 400)
+
+    def test_an_oversized_answer_is_refused(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer",
+                            {"answer": "x" * (web.ANSWER_MAX_BYTES + 1)})
+
+        self.assertEqual(code, 413)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_an_answer_that_is_not_a_string_is_refused(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer", {"answer": None})
+
+        self.assertEqual(code, 400)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_an_unknown_post_route_is_a_404(self):
+        code, _ = self.post("/api/nonsense", {"answer": "x"})
+
+        self.assertEqual(code, 404)
+
+    def test_a_rejected_post_cannot_smuggle_a_second_request(self):
+        # A rejection that does not consume the request body leaves those
+        # bytes to be parsed as the next request on the same keep-alive
+        # connection -- and the body is attacker-controlled. One
+        # CORS-safelisted text/plain POST carrying a well-formed JSON POST
+        # in its body would otherwise clear every guard on the second pass.
+        smuggled_body = json.dumps({"answer": "SMUGGLED PAST"})
+        smuggled = (
+            f"POST {self.answer_path()} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(smuggled_body)}\r\n"
+            "\r\n"
+            f"{smuggled_body}"
+        )
+        outer = (
+            f"POST {self.answer_path()} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(smuggled)}\r\n"
+            "\r\n"
+            f"{smuggled}"
+        )
+
+        sock = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(outer.encode())
+        sock.settimeout(2)
+        received = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+        except (TimeoutError, OSError):
+            pass
+
+        self.assertNotIn(b"200 OK", received, received)
+        self.assertFalse(self.answer_file().exists(), "the smuggled POST was served")
+
+
+class AnswerRouteTokenTest(AnswerRouteTest):
+    token = "s3cret"
+
+    def post(self, path, body, content_type="application/json", token="s3cret"):
+        return super().post(path, body, content_type, token)
+
+    def test_the_answer_route_needs_the_token(self):
+        code, _ = super().post(f"/api/tasks/{self.task_id}/answer",
+                               {"answer": "use EUR"}, token=None)
+
+        self.assertEqual(code, 403)
+        self.assertFalse(self.answer_file().exists())
+
+    def test_the_right_token_is_accepted_on_the_answer_route(self):
+        code, _ = self.post(f"/api/tasks/{self.task_id}/answer",
+                            {"answer": "use EUR"}, token="s3cret")
+
+        self.assertEqual(code, 200)
 
 
 if __name__ == "__main__":

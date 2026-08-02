@@ -189,7 +189,35 @@ through it, so exposing it beyond this machine has to be a deliberate act
 with a token guarding it, not a default.
 
 The dashboard cannot start or stop tasks, edit files, or otherwise change
-anything the loop is doing — every route is a read.
+anything the loop is doing. Exactly one route writes anything: answering a
+blocked task's question, below. It writes a single file that the loop reads
+and consumes, and nothing else on the page can change what the loop does.
+
+### Answering a blocked task
+
+A session that hits something only you can decide writes a `blocked` result
+with a question instead of guessing. The task **parks** — it does not stop
+the loop, which carries on with the rest of the backlog — and appears in
+**Completed** marked `?`, with its question and a box to answer it.
+
+Answer it there, or, when the task came from Jira, reply on the ticket with a
+comment starting with `claudeloop:`:
+
+```
+claudeloop: use the staging-eu database, not staging-us
+```
+
+Either way the loop picks that task back up before it starts anything new,
+resuming the **same session** — so it still knows what it had already done
+and which branch it was working on. There is no deadline: a parked task waits
+indefinitely, and nothing is lost if nobody answers today.
+
+One thing worth knowing: while a task is parked, other tasks run, and each
+checks out the repository's default branch on the way in. The parked
+session's branch and commits survive, but the working tree will have moved
+off it — the resumed session is told to check its own branch back out. If it
+left uncommitted changes behind, that checkout can fail and the next task
+runs on the parked task's branch instead.
 
 ## Tasks
 

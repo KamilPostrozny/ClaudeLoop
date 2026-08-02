@@ -97,5 +97,109 @@ class FileSourceProtocolTest(unittest.TestCase):
         self.assertEqual(self.path.read_text(), "- [x] first thing\n")
 
 
+class ReopenTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "tasks.md"
+
+    def source_for(self, body: str) -> FileSource:
+        self.path.write_text(body)
+        return FileSource(self.path)
+
+    def test_reopen_restores_an_attention_line_to_pending(self):
+        source = self.source_for("- [ ] alpha\n- [ ] beta\n")
+        task = source.pending()[0]
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(self.path.read_text(), "- [!] alpha\n- [ ] beta\n")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "- [ ] alpha\n- [ ] beta\n")
+
+    def test_reopen_keeps_indentation(self):
+        source = self.source_for("    - [ ] alpha\n")
+        task = source.pending()[0]
+        source.mark(task, "blocked", "stuck")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "    - [ ] alpha\n")
+
+    def test_reopen_keeps_a_missing_trailing_newline(self):
+        # The last line of a file that does not end in one. mark() and
+        # reopen() share _rewrite, so this pins the eol handling for both.
+        source = self.source_for("- [ ] alpha")
+        task = source.pending()[0]
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(self.path.read_text(), "- [!] alpha")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "- [ ] alpha")
+
+    def test_reopen_leaves_a_line_that_has_since_vanished_alone(self):
+        source = self.source_for("- [ ] alpha\n")
+        task = source.pending()[0]
+        self.path.write_text("- [ ] something else entirely\n")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "- [ ] something else entirely\n")
+
+    def test_reopen_does_not_touch_a_done_line(self):
+        source = self.source_for("- [ ] alpha\n")
+        task = source.pending()[0]
+        source.mark(task, "done", "finished")
+
+        source.reopen(task)
+
+        self.assertEqual(self.path.read_text(), "- [x] alpha\n")
+
+    def test_a_reopened_task_is_pending_again(self):
+        source = self.source_for("- [ ] alpha\n")
+        task = source.pending()[0]
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(source.pending(), [])
+
+        source.reopen(task)
+
+        self.assertEqual([t.id for t in source.pending()], [task.id])
+
+    def test_a_checklist_has_no_answer_channel(self):
+        source = self.source_for("- [ ] alpha\n")
+
+        self.assertIsNone(source.answer(source.pending()[0]))
+
+    def test_mark_survives_a_task_file_that_has_been_deleted(self):
+        source = self.source_for("- [ ] alpha\n")
+        task = source.pending()[0]
+        self.path.unlink()
+
+        source.mark(task, "done", "finished")  # must not raise
+        source.reopen(task)
+
+    def test_a_crlf_checklist_keeps_its_line_endings(self):
+        # Marking one task must not silently rewrite every line ending in
+        # the file. read_text()/write_text() would: they translate CRLF to
+        # "\n" on the way in and never put it back.
+        self.path.write_bytes(b"- [ ] alpha\r\n- [ ] beta\r\n")
+        source = FileSource(self.path)
+        task = source.pending()[0]
+
+        source.mark(task, "blocked", "stuck")
+        self.assertEqual(self.path.read_bytes(), b"- [!] alpha\r\n- [ ] beta\r\n")
+
+        source.reopen(task)
+        self.assertEqual(self.path.read_bytes(), b"- [ ] alpha\r\n- [ ] beta\r\n")
+
+    def test_mixed_line_endings_are_each_left_as_they_were(self):
+        self.path.write_bytes(b"- [ ] alpha\r\n- [ ] beta\n")
+        source = FileSource(self.path)
+
+        source.mark(source.pending()[1], "done", "did it")
+
+        self.assertEqual(self.path.read_bytes(), b"- [ ] alpha\r\n- [x] beta\n")
+
+
 if __name__ == "__main__":
     unittest.main()

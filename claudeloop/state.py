@@ -114,3 +114,28 @@ class State:
             "SELECT id FROM tasks WHERE status IN ('done', 'failed', 'blocked')"
         )
         return {row["id"] for row in rows}
+
+    def blocked(self) -> list[sqlite3.Row]:
+        """Tasks parked waiting for a human, oldest first.
+
+        Returns enough to rebuild the Task the loop handed to the source, so
+        a task parked before this process started can still be resumed.
+        """
+        return self.db.execute(
+            "SELECT id, source, source_ref, text, question FROM tasks"
+            " WHERE status='blocked' ORDER BY finished_at"
+        ).fetchall()
+
+    def last_session(self, task_id: str) -> str | None:
+        """The session id of this task's most recent run.
+
+        An answered task resumes in the session that asked the question: it
+        still holds the repository context and the name of the branch it
+        created. None means there is no session to resume -- a database from
+        before this slice, or a task whose runs were pruned.
+        """
+        row = self.db.execute(
+            "SELECT session_id FROM runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return row["session_id"] if row is not None else None

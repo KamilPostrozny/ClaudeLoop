@@ -118,6 +118,61 @@ class BlockingResetTest(unittest.TestCase):
         self.assertEqual(blocking_reset(events), 1785600000.0)
 
 
+class ResumePromptTest(unittest.TestCase):
+    def test_the_nudge_no_longer_claims_nobody_can_answer(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertNotIn("Nobody is available to answer", NUDGE_PROMPT)
+
+    def test_the_nudge_points_a_stuck_session_at_the_blocked_status(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn('status "blocked"', NUDGE_PROMPT)
+        self.assertIn('"question"', NUDGE_PROMPT)
+
+    def test_the_nudge_still_refuses_a_question_in_the_last_message(self):
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn("do not end your turn", NUDGE_PROMPT)
+
+    def test_the_answer_prompt_carries_the_answer(self):
+        from claudeloop.loop import ANSWER_PROMPT
+
+        rendered = ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("use EUR", rendered)
+
+    def test_the_answer_prompt_warns_that_the_branch_may_not_be_checked_out(self):
+        # The sharpest consequence of parking: other tasks run meanwhile and
+        # each checks out the default branch, so the tree has moved. The
+        # orchestrator cannot fix this -- it never learns the branch name.
+        rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("check out the branch you were working on", rendered)
+        self.assertIn("commits on it are intact", rendered)
+
+    def test_the_answer_prompt_still_demands_the_result_file(self):
+        rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
+
+        self.assertIn("CLAUDELOOP_RESULT", rendered)
+        self.assertIn("not your last message", rendered)
+
+    def test_the_fresh_answer_prompt_carries_the_task_and_the_answer(self):
+        rendered = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
+
+        self.assertIn("do a thing", rendered)
+        self.assertIn("use EUR", rendered)
+        self.assertIn("from the beginning", rendered)
+
+    def test_the_nudge_keeps_the_qualifier_that_holds_the_bar(self):
+        # Without "genuinely", the nudge reads as an open invitation to ask
+        # -- and it is sent to a session that has already shown it wants to
+        # stop. This is the word doing that work; pin it.
+        from claudeloop.loop import NUDGE_PROMPT
+
+        self.assertIn("genuinely need a human to decide", NUDGE_PROMPT)
+
+
 class SleepDelayTest(unittest.TestCase):
     def test_normal_wait_is_unclamped(self):
         self.assertAlmostEqual(sleep_delay(time.time() + 100), 100, delta=1)
@@ -878,6 +933,410 @@ class SourceLifecycleTest(unittest.TestCase):
         self.assertEqual(source.calls[0], ("start", task.id))
         self.assertEqual(source.calls[-1][:2], ("mark", "done"))
         self.assertAlmostEqual(source.calls[-1][2], 0.5)
+
+
+class ResumeWithAnswerTest(unittest.TestCase):
+    """Same fake-CLI fixture as MainLoopTest, deliberately duplicated rather
+    than inherited: subclassing a TestCase re-runs every parent test."""
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        repo = self.tmp / "repo"
+        (repo / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n")
+        self.cfg = Config(
+            repo=repo,
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+        self.args_out = self.tmp / "args.txt"
+        os.environ["FAKE_ARGS_OUT"] = str(self.args_out)
+        self.state = State(self.cfg.home / "state.db")
+        self.source = FileSource(self.tasks)
+        self.task = self.source.pending()[0]
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_ARGS_OUT", None)
+
+    def park(self) -> str:
+        """Leave the task parked with a known session, as a blocked run does."""
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.start_run(self.task.id, "session-that-asked", 0)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+        return "session-that-asked"
+
+    def args(self) -> str:
+        return self.args_out.read_text()
+
+    def test_a_resume_reuses_the_session_that_asked(self):
+        session = self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertIn(f"--resume {session}", self.args())
+        runs = self.state.db.execute(
+            "SELECT session_id FROM runs ORDER BY id").fetchall()
+        self.assertEqual([row["session_id"] for row in runs], [session, session])
+
+    def test_a_resume_sends_the_answer_prompt(self):
+        self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertIn("use EUR", self.args())
+        self.assertIn("check out the branch you were working on", self.args())
+
+    def test_a_resume_still_resets_the_working_tree(self):
+        # Flipped by the S2b live smoke test: skipping the reset on a resume
+        # let a parked task -- which usually parks before its first commit --
+        # inherit whatever branch an intervening task left checked out, and
+        # commit its work there instead of on its own branch.
+        called = []
+        with mock.patch.object(loop, "reset_to_default_branch",
+                               side_effect=lambda repo: called.append(repo)):
+            self.park()
+            asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                      resume_with="use EUR"))
+
+        self.assertEqual(called, [self.cfg.repo],
+                          "a resume must reset to the default branch, same as a fresh task")
+
+    def test_a_resume_does_not_re_fire_the_source_start_hook(self):
+        started = []
+        self.source.start = lambda task: started.append(task)
+        self.park()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertEqual(started, [])
+
+    def test_a_normal_task_still_resets_the_tree_and_fires_start(self):
+        started = []
+        self.source.start = lambda task: started.append(task)
+        called = []
+        with mock.patch.object(loop, "reset_to_default_branch",
+                               side_effect=lambda repo: called.append(repo)):
+            asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertEqual(called, [self.cfg.repo])
+        self.assertEqual(started, [self.task])
+        self.assertNotIn("--resume", self.args())
+
+    def test_a_parked_task_with_no_session_starts_over_carrying_the_answer(self):
+        # A state.db from before this slice, or a task whose runs were pruned.
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertNotIn("--resume", self.args())
+        self.assertIn("use EUR", self.args())
+        self.assertIn("first thing", self.args())
+
+    def test_a_resumed_task_reaches_a_verdict_like_any_other(self):
+        self.park()
+
+        result = asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                           resume_with="use EUR"))
+
+        self.assertEqual(result["status"], "done")
+        row = self.state.db.execute("SELECT * FROM tasks WHERE id=?",
+                                    (self.task.id,)).fetchone()
+        self.assertEqual(row["status"], "done")
+
+
+class AnsweredScanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.run_dir = self.tmp / "runs" / "abcd"
+        self.run_dir.mkdir(parents=True)
+
+    def write(self, payload: str) -> Path:
+        path = self.run_dir / "answer.json"
+        path.write_text(payload)
+        return path
+
+    def test_an_answer_file_is_read(self):
+        self.write(json.dumps({"answer": "use EUR", "at": 1.0}))
+
+        self.assertEqual(loop.read_answer(self.run_dir), "use EUR")
+
+    def test_an_answer_file_is_consumed_so_it_cannot_fire_twice(self):
+        path = self.write(json.dumps({"answer": "use EUR"}))
+
+        loop.read_answer(self.run_dir)
+
+        self.assertFalse(path.exists())
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+    def test_no_answer_file_is_not_an_answer(self):
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+    def test_an_unreadable_answer_file_is_dropped_with_a_warning(self):
+        # Left in place it would re-warn on every poll forever.
+        path = self.write("{not json")
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertIsNone(loop.read_answer(self.run_dir))
+
+        self.assertFalse(path.exists())
+
+    def test_an_empty_answer_is_not_an_answer(self):
+        self.write(json.dumps({"answer": "   "}))
+
+        self.assertIsNone(loop.read_answer(self.run_dir))
+
+
+class FindAnsweredTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tmp / "tasks.md",
+            home=self.tmp / "home",
+        )
+        self.cfg.tasks_file.write_text("- [ ] alpha\n")
+        (self.cfg.repo / ".git").mkdir(parents=True)
+        self.state = State(self.cfg.home / "state.db")
+        self.source = FileSource(self.cfg.tasks_file)
+        self.task = self.source.pending()[0]
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.finish_task(self.task.id, "blocked", "stuck", 0.1, "which currency?")
+
+    def answer_file(self, text: str) -> None:
+        run_dir = self.cfg.home / "runs" / self.task.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "answer.json").write_text(json.dumps({"answer": text}))
+
+    def test_no_answer_anywhere_finds_nothing(self):
+        self.assertIsNone(loop.find_answered(self.cfg, self.state, self.source))
+
+    def test_the_answer_file_wins(self):
+        self.answer_file("use EUR")
+
+        found = loop.find_answered(self.cfg, self.state, self.source)
+
+        self.assertIsNotNone(found)
+        task, answer = found
+        self.assertEqual(task.id, self.task.id)
+        self.assertEqual(task.source_ref, self.task.source_ref)
+        self.assertEqual(answer, "use EUR")
+
+    def test_the_source_channel_is_asked_when_there_is_no_answer_file(self):
+        self.source.answer = lambda task: "from the ticket"
+
+        found = loop.find_answered(self.cfg, self.state, self.source)
+
+        self.assertEqual(found[1], "from the ticket")
+
+    def test_a_task_that_is_not_blocked_is_not_scanned(self):
+        self.state.finish_task(self.task.id, "done", "did it", 0.1)
+        self.answer_file("use EUR")
+
+        self.assertIsNone(loop.find_answered(self.cfg, self.state, self.source))
+
+
+class AnsweredMainLoopTest(unittest.TestCase):
+    """The whole path, against the fake CLI."""
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "repo" / ".git").mkdir(parents=True)
+        self.tasks = self.tmp / "tasks.md"
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        self.fake = bin_dir / "claude"
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+
+    def blocking_cli(self) -> None:
+        self.fake.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\' \'{"status":"blocked","summary":"stuck",'
+            '"question":"which currency?"}\' > "$CLAUDELOOP_RESULT"\n'
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
+        )
+        self.fake.chmod(0o755)
+
+    def test_a_blocked_task_parks_and_the_next_task_still_runs(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n- [ ] second thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(),
+                         "- [!] ambiguous thing\n- [!] second thing\n")
+        state = State(self.cfg.home / "state.db")
+        rows = state.db.execute("SELECT status FROM tasks").fetchall()
+        self.assertEqual([row["status"] for row in rows], ["blocked", "blocked"])
+
+    def test_an_answered_task_is_reopened_and_resumed_before_new_work(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n")
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        self.assertEqual(self.tasks.read_text(), "- [!] ambiguous thing\n")
+
+        # A human answers, exactly as the dashboard's POST route will.
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        run_dir = self.cfg.home / "runs" / parked["id"]
+        (run_dir / "answer.json").write_text(json.dumps({"answer": "use EUR"}))
+
+        # Back to a CLI that finishes.
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [x] ambiguous thing\n")
+        row = State(self.cfg.home / "state.db").db.execute(
+            "SELECT status FROM tasks").fetchone()
+        self.assertEqual(row["status"], "done")
+        self.assertFalse((run_dir / "answer.json").exists(),
+                         "the answer must be consumed, not left to fire again")
+
+    def test_a_source_that_cannot_be_reopened_still_resumes(self):
+        self.blocking_cli()
+        self.tasks.write_text("- [ ] ambiguous thing\n")
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        (self.cfg.home / "runs" / parked["id"] / "answer.json").write_text(
+            json.dumps({"answer": "use EUR"}))
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        with mock.patch.object(FileSource, "reopen", side_effect=OSError("disk gone")):
+            with self.assertLogs("claudeloop", level="WARNING") as logs:
+                asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertTrue(
+            any("could not reopen" in line for line in logs.output), logs.output
+        )
+        row = State(self.cfg.home / "state.db").db.execute(
+            "SELECT status FROM tasks").fetchone()
+        self.assertEqual(row["status"], "done")
+
+    def test_a_fault_in_the_answered_scan_does_not_stop_ordinary_work(self):
+        # A locked database or a Jira fault must cost this poll its answer
+        # check, not the loop's ability to do ordinary pending work.
+        self.tasks.write_text("- [ ] first thing\n")
+
+        with mock.patch.object(loop, "find_answered", side_effect=RuntimeError("boom")):
+            with self.assertLogs("claudeloop", level="ERROR"):
+                asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
+
+    def test_a_resumed_task_returns_to_the_default_branch_not_the_intervening_tasks(self):
+        # Regression for the S2b live smoke test: a task parked before its
+        # first commit (the usual case -- the question that blocks it blocks
+        # it early). The next task then ran and left its own branch checked
+        # out. When the parked task was answered and resumed, it skipped
+        # reset_to_default_branch and committed onto that leftover branch
+        # instead of its own -- observed for real as "File committed to
+        # add-gitignore branch". This must fail against the pre-fix code and
+        # pass against the fix.
+        #
+        # setUp already made self.cfg.repo a directory with an empty .git
+        # inside it; `git init` on top of that turns it into a real repo, per
+        # ResetToDefaultBranchTest's convention elsewhere in this file.
+        for args in (
+            ["init", "-q", "-b", "main"],
+            ["config", "user.email", "test@example.com"],
+            ["config", "user.name", "Test"],
+            # 1Password signs commits globally on this machine, which hangs
+            # headless -- see ResetToDefaultBranchTest.setUp for the same fix.
+            ["config", "commit.gpgsign", "false"],
+        ):
+            subprocess.run(["git", *args], cwd=self.cfg.repo, check=True,
+                           capture_output=True, stdin=subprocess.DEVNULL)
+        (self.cfg.repo / "README.md").write_text("hi\n")
+        subprocess.run(["git", "add", "README.md"], cwd=self.cfg.repo, check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=self.cfg.repo,
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+        # A fake CLI that blocks on its first invocation (task 1, parking
+        # before it ever branches) and finishes cleanly on every invocation
+        # after (task 2). It never touches git itself -- the branch task 2
+        # "leaves behind" is driven directly below, per the task instructions,
+        # since the fake CLI can't be trusted to make real commits.
+        count_file = self.tmp / "invocations"
+        self.fake.write_text(
+            "#!/usr/bin/env bash\n"
+            f'n=$(( $(cat "{count_file}" 2>/dev/null || echo 0) + 1 ))\n'
+            f'echo "$n" > "{count_file}"\n'
+            'if [ "$n" -eq 1 ]; then\n'
+            '  printf \'%s\' \'{"status":"blocked","summary":"stuck",'
+            '"question":"which currency?"}\' > "$CLAUDELOOP_RESULT"\n'
+            "else\n"
+            '  printf \'%s\' \'{"status":"done","summary":"ok"}\' > "$CLAUDELOOP_RESULT"\n'
+            "fi\n"
+            "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
+        )
+        self.fake.chmod(0o755)
+        self.tasks.write_text("- [ ] ambiguous thing\n- [ ] second thing\n")
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertEqual(self.tasks.read_text(),
+                         "- [!] ambiguous thing\n- [x] second thing\n")
+
+        # Stand in for what task 2's session left behind: its own branch,
+        # checked out, exactly like the live run's "add-gitignore".
+        subprocess.run(["git", "checkout", "-q", "-b", "add-gitignore"],
+                       cwd=self.cfg.repo, check=True, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+
+        # A human answers the parked task.
+        state = State(self.cfg.home / "state.db")
+        parked = state.blocked()[0]
+        run_dir = self.cfg.home / "runs" / parked["id"]
+        (run_dir / "answer.json").write_text(json.dumps({"answer": "use EUR"}))
+
+        # Back to a CLI that finishes and does not touch git.
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", self.fake)
+        self.fake.chmod(0o755)
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.cfg.repo,
+            check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        ).stdout.strip()
+        self.assertEqual(branch, "main",
+                         "the resumed task must start from the default branch, "
+                         "not the branch the intervening task left checked out")
 
 
 if __name__ == "__main__":

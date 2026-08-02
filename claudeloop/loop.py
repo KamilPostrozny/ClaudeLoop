@@ -46,15 +46,53 @@ NUDGE_PROMPT = (
     "at the path in the CLAUDELOOP_RESULT environment variable -- not your "
     "last message -- is what ends this task; write it now. If the work is "
     "already complete and committed, do not redo it: write status \"done\" "
-    "and say so in the summary. Nobody is available to answer a question, "
-    "so do not end your turn asking what to do next -- write the result "
-    "file instead."
+    "and say so in the summary. If instead you genuinely need a human to "
+    "decide something, that is also the result file's job: write status "
+    "\"blocked\" with the one thing you need decided in the \"question\" "
+    "field, and a human will answer it when they next look. Either way, do "
+    "not end your turn with a question in your last message -- nobody reads "
+    "it; write the result file instead."
 )
 """Sent after a resume with no result file and no rate limit -- a nudge. Two
 live smoke-test sessions read the old \"Continue.\" prompt as confirmation
 there was nothing left to do and ended their turn with prose instead of the
 result file, burning every resume at $0.10 despite finished, committed work.
-This names the actual problem instead."""
+This names the actual problem instead. S2b reworded the tail: "nobody is
+available to answer a question" stopped being true once a human could
+answer one, and a session with a real question now has somewhere to put it."""
+
+ANSWER_PROMPT = (
+    "A human has answered the question you were blocked on.\n\n"
+    "Their answer: {answer}\n\n"
+    "Act on that answer and finish the task. The working tree has been reset "
+    "to this repository's default branch since you stopped, so it is no "
+    "longer on the branch you created: if you created one, check out the "
+    "branch you were working on before you continue -- your commits on it "
+    "are intact. When the work is complete, "
+    "write the result file at the path in the CLAUDELOOP_RESULT environment "
+    "variable exactly as before; that file, not your last message, is what "
+    "ends the task."
+)
+"""Sent when resuming a parked task whose question has been answered.
+
+The branch sentence is load-bearing and cannot be replaced by anything the
+orchestrator does itself: every task that ran while this one was parked
+called reset_to_default_branch on the way in, so the tree has moved, and
+ClaudeLoop never learns what the session named its branch. The session does
+-- which is the main reason an answered task resumes its original session
+rather than starting fresh."""
+
+FRESH_ANSWER_PROMPT = (
+    "{task}\n\n"
+    "A human has already answered a question about this task: {answer}\n\n"
+    "The session that asked that question is no longer available, so start "
+    "this task from the beginning, using that answer. An earlier attempt may "
+    "have left a branch in this repository; look before you redo work that is "
+    "already committed."
+)
+"""For the edge case where a parked task has no session to resume -- a
+state.db from before this slice, or a task whose runs were pruned. The work
+is not lost, only the context."""
 
 
 @dataclass(frozen=True)
@@ -358,28 +396,72 @@ def build_source(cfg: Config, state: State) -> TaskSource:
     return FileSource(cfg.tasks_file)
 
 
-async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) -> dict:
-    """Run one task to a terminal status, resuming through rate limits."""
+async def run_task(
+    cfg: Config,
+    state: State,
+    source: TaskSource,
+    task: Task,
+    resume_with: str | None = None,
+) -> dict:
+    """Run one task to a terminal status, resuming through rate limits.
+
+    `resume_with` is a human's answer to a question this task parked on. It
+    continues the session that asked -- which still holds the repository
+    context and the name of the branch it created -- rather than starting the
+    task over.
+    """
     run_dir = cfg.home / "runs" / task.id
     result_path = run_dir / "result.json"
     run_dir.mkdir(parents=True, exist_ok=True)
     # A previous attempt's verdict would otherwise end this one immediately.
+    # For an answered task that previous verdict is the `blocked` result the
+    # session wrote before it parked, so this matters more, not less.
     result_path.unlink(missing_ok=True)
+    # Same reasoning as the result file above: an answer written into the
+    # window between find_answered consuming the previous one and this row
+    # going back to 'running' would otherwise survive, and be read as the
+    # answer to a different question the next time this task parks.
+    (run_dir / "answer.json").unlink(missing_ok=True)
 
-    session_id = str(uuid.uuid4())
+    # None when there is no session to resume: a state.db from before S2b, or
+    # a task whose runs were pruned. The answer still gets through, only the
+    # context is lost.
+    resumed = state.last_session(task.id) if resume_with is not None else None
+    session_id = resumed or str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
-    # After start_task, so a fault here (reset_to_default_branch is
-    # defensive and shouldn't raise, but this is not load-bearing on that)
-    # lands against a real task row like every other crash, rather than
-    # main_loop's crash handler finding nothing to update. Offloaded to a
-    # thread: it shells out to git synchronously, and this coroutine must
-    # not block the event loop the heartbeat task and the dashboard share.
+    # Also run on a resume: the live smoke test proved skipping it here was
+    # wrong. A task usually parks *before* its first commit, since the
+    # question that blocks it blocks it early -- so between the park and the
+    # answer, other tasks run and leave their own branches checked out. A
+    # resume that skipped the reset picked up whatever branch the last of
+    # those left behind and committed there instead of its own. This is safe
+    # in the direction that matters: a session that did create a branch is
+    # told by ANSWER_PROMPT to check it back out, and its commits are intact
+    # because the reset never forces anything; a session that did not create
+    # one now starts from the default branch, same as a fresh task would.
+    # Uncommitted work in a parked tree was already lost the moment the next
+    # task ran, so resetting here costs nothing that parking had not already
+    # cost. Do not skip this again.
+    #
+    # Offloaded to a thread: it shells out to git synchronously, and this
+    # coroutine must not block the event loop the heartbeat task and the
+    # dashboard share.
     await asyncio.to_thread(reset_to_default_branch, cfg.repo)
-    # Offloaded for the same reason as the git call above: under the Jira
-    # source this is a blocking HTTP round trip, and this coroutine shares
-    # its thread with the heartbeat and the dashboard.
-    await asyncio.to_thread(source.start, task)
-    log.info("task %s starting: %s", task.id, task.text)
+    if resume_with is None:
+        # source.start would re-fire transition_start against an issue
+        # already in that status; reopen() covers the source-side state
+        # instead, so this stays conditional even though the reset above
+        # no longer is.
+        #
+        # Offloaded for the same reason: under the Jira source this is a
+        # blocking HTTP round trip.
+        await asyncio.to_thread(source.start, task)
+    log.info(
+        "task %s %s: %s",
+        task.id,
+        "resuming with an answer" if resume_with is not None else "starting",
+        task.text,
+    )
     status_module.set_status(
         state="running",
         task_id=task.id,
@@ -395,8 +477,13 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     resume_count = 0  # plain nudges: no result, no rate limit
     wait_count = 0  # quota waits: bounded separately, see decide()
     cost = 0.0
-    prompt = task.text
-    resume = False
+    if resume_with is None:
+        prompt, resume = task.text, False
+    elif resumed:
+        prompt, resume = ANSWER_PROMPT.format(answer=resume_with), True
+    else:
+        prompt = FRESH_ANSWER_PROMPT.format(task=task.text, answer=resume_with)
+        resume = False
     while True:
         attempt = resume_count + wait_count
         run_id = state.start_run(task.id, session_id, attempt)
@@ -459,41 +546,113 @@ async def run_task(cfg: Config, state: State, source: TaskSource, task: Task) ->
     return result
 
 
+def read_answer(run_dir: Path) -> str | None:
+    """The dashboard's answer for a parked task, consumed as it is read.
+
+    Unlinked whatever it contained: a file left in place would resume the
+    task a second time on the next poll, or -- if it is malformed -- warn on
+    every poll forever.
+    """
+    path = run_dir / "answer.json"
+    try:
+        raw = path.read_text(errors="replace")
+    except OSError:
+        return None
+    path.unlink(missing_ok=True)
+    try:
+        answer = str(json.loads(raw)["answer"]).strip()
+    except (json.JSONDecodeError, TypeError, KeyError) as error:
+        log.warning("ignoring an unreadable answer file at %s (%s)", path, error)
+        return None
+    return answer or None
+
+
+def find_answered(cfg: Config, state: State, source: TaskSource) -> tuple[Task, str] | None:
+    """The first parked task with an answer waiting, through either channel.
+
+    Blocking on both counts -- sqlite3 on this connection and, under the Jira
+    source, one HTTP round trip per parked task -- so the loop calls this
+    through asyncio.to_thread. The Jira reads are only paid while something
+    is actually parked, and only for a task with no answer file waiting.
+    """
+    for row in state.blocked():
+        task = Task(row["id"], row["text"], row["source"], row["source_ref"])
+        try:
+            answer = read_answer(cfg.home / "runs" / task.id) or source.answer(task)
+        except Exception as error:
+            # Confined to this row on purpose: one faulty task must not hide
+            # every later parked task's answer from the same scan.
+            log.warning("could not check task %s for an answer (%s)", task.id, error)
+            continue
+        if answer:
+            return task, answer
+    return None
+
+
+def _reopen(source: TaskSource, task: Task) -> None:
+    """Undo the source's blocked mark. Never raises: state.db is what drives
+    the resume, and the mark is only for humans."""
+    try:
+        source.reopen(task)
+    except Exception as error:
+        log.warning("could not reopen task %s in its source (%s)", task.id, error)
+
+
 async def main_loop(cfg: Config, once: bool = False) -> None:
     """Run pending tasks one at a time, forever.
 
-    `once` drains the tasks pending right now and returns, for tests.
+    A task parked on a question is checked for an answer before new work is
+    polled for, so an answered task resumes ahead of starting something
+    fresh.
+
+    `once` drains the tasks pending right now -- including any that have been
+    answered -- and returns, for tests.
     """
     state = State(cfg.home / "state.db")
     source = build_source(cfg, state)
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         while True:
-            pending = await asyncio.to_thread(source.pending)
-            if not pending:
-                if once:
-                    status_module.set_status(**IDLE_FIELDS)
-                    return
-                status_module.set_status(**IDLE_FIELDS)
-                await asyncio.sleep(POLL_S)
-                continue
-            # Re-read after every task: the file may have been edited meanwhile.
-            task = pending[0]
-            # Published for the dashboard: web reads this off the snapshot
-            # rather than re-reading the task source itself, since under the
-            # Jira source that would be a network call on the web thread.
-            # As a result the list is only as fresh as the start of the
-            # current task, not live -- under the file source that's a small
-            # step back from the old per-request re-read (an edit to
-            # tasks.md mid-task won't show until the next task starts); under
-            # the Jira source a per-request re-read would mean a network
-            # round trip on the web thread, which is the whole reason this
-            # rides on the snapshot instead.
-            status_module.set_status(
-                pending=tuple((t.id, t.text) for t in pending)
-            )
             try:
-                await run_task(cfg, state, source, task)
+                answered = await asyncio.to_thread(find_answered, cfg, state, source)
+            except Exception:
+                # A locked database or a Jira fault must not stop the loop
+                # from picking up ordinary pending work.
+                log.exception("could not check for answers to parked tasks")
+                answered = None
+            if answered is not None:
+                # Before new pending work on purpose: an answer a human has
+                # already given is worth more than starting something fresh.
+                # One per iteration, because the loop is serial.
+                task, resume_with = answered
+                await asyncio.to_thread(_reopen, source, task)
+            else:
+                pending = await asyncio.to_thread(source.pending)
+                if not pending:
+                    status_module.set_status(**IDLE_FIELDS)
+                    if once:
+                        return
+                    await asyncio.sleep(POLL_S)
+                    continue
+                # Re-read after every task: the file may have been edited
+                # meanwhile.
+                task, resume_with = pending[0], None
+                # Published for the dashboard: web reads this off the
+                # snapshot rather than re-reading the task source itself,
+                # since under the Jira source that would be a network call on
+                # the web thread. As a result the list is only as fresh as
+                # the start of the current task, not live -- under the file
+                # source that's a small step back from the old per-request
+                # re-read (an edit to tasks.md mid-task won't show until the
+                # next task starts); under the Jira source a per-request
+                # re-read would mean a network round trip on the web thread,
+                # which is the whole reason this rides on the snapshot
+                # instead.
+                status_module.set_status(
+                    pending=tuple((t.id, t.text) for t in pending)
+                )
+            try:
+                await run_task(cfg, state, source, task, resume_with=resume_with)
             except Exception as error:
                 # A crash here (claude missing from PATH, ENOSPC on events.jsonl,
                 # a fork failing under memory pressure, ...) is an environment

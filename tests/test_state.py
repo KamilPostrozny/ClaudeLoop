@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -152,6 +153,67 @@ class TerminalIdsTest(unittest.TestCase):
         self.finished("aaaa", "done")
         result = asyncio.run(asyncio.to_thread(self.state.terminal_ids))
         self.assertEqual(result, {"aaaa"})
+
+
+class BlockedTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "state.db")
+
+    def test_blocked_returns_what_a_task_can_be_rebuilt_from(self):
+        self.state.start_task("aaaa", "jira", "OPS-1", "OPS-1: do a thing")
+        self.state.finish_task("aaaa", "blocked", "stuck", 0.25, "which currency?")
+
+        rows = self.state.blocked()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "aaaa")
+        self.assertEqual(rows[0]["source"], "jira")
+        self.assertEqual(rows[0]["source_ref"], "OPS-1")
+        self.assertEqual(rows[0]["text"], "OPS-1: do a thing")
+        self.assertEqual(rows[0]["question"], "which currency?")
+
+    def test_blocked_ignores_every_other_status(self):
+        for index, status in enumerate(("done", "failed", "error", "running")):
+            self.state.start_task(f"id{index}", "file", "- [ ] x", "x")
+            if status != "running":
+                self.state.finish_task(f"id{index}", status, "", 0.0)
+
+        self.assertEqual(self.state.blocked(), [])
+
+    def test_blocked_is_oldest_first(self):
+        for key in ("first", "second"):
+            self.state.start_task(key, "file", f"- [ ] {key}", key)
+            self.state.finish_task(key, "blocked", "", 0.0, "?")
+            time.sleep(0.01)
+
+        self.assertEqual([row["id"] for row in self.state.blocked()],
+                         ["first", "second"])
+
+    def test_last_session_is_the_most_recent_run(self):
+        self.state.start_task("aaaa", "file", "- [ ] x", "x")
+        self.state.start_run("aaaa", "session-one", 0)
+        self.state.start_run("aaaa", "session-two", 1)
+
+        self.assertEqual(self.state.last_session("aaaa"), "session-two")
+
+    def test_last_session_is_none_when_the_task_never_ran(self):
+        self.state.start_task("aaaa", "file", "- [ ] x", "x")
+
+        self.assertIsNone(self.state.last_session("aaaa"))
+
+    def test_blocked_ignores_a_task_interrupted_by_a_dead_process(self):
+        # State.__init__ rewrites 'running' to 'interrupted' when a previous
+        # process died mid-task. That task never finished, so it is not
+        # parked on a question.
+        self.state.start_task("aaaa", "file", "- [ ] x", "x")
+
+        reopened = State(self.tmp / "state.db")
+
+        status = reopened.db.execute(
+            "SELECT status FROM tasks WHERE id='aaaa'").fetchone()["status"]
+        self.assertEqual(status, "interrupted")
+        self.assertEqual(reopened.blocked(), [])
 
 
 if __name__ == "__main__":

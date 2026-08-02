@@ -59,10 +59,29 @@ deliberate decision recorded in a spec.
   makes the S4 addon image a base image plus a copy.
 - **No build step.** The dashboard is one HTML file with inline CSS and an
   inline module script, making no off-origin requests.
-- **The dashboard is read-only.** No route mutates state, the task file, or the
-  database. S5 will break this deliberately, for setup only.
+- **The dashboard is read-only, with one exception.** No route mutates the
+  loop's state, the task file, or the database. S2b broke the rule
+  deliberately and narrowly: `POST /api/tasks/<id>/answer` writes one file,
+  `runs/<id>/answer.json`, which the loop reads and consumes. Any further
+  write needs the same justification — S5's setup wizard is the next one.
 - **The web layer never touches the loop's objects.** Its SQLite connection is
   its own and opened read-only; event logs are read from disk.
+- **The web layer is never a second writer to `status.py`.** `set_status` is a
+  read-modify-write and is safe only because exactly one thread calls it. S2b
+  was the case that warning was written for, and it writes a file the loop
+  picks up rather than calling `set_status` — so the hazard is dodged, not
+  solved. A future route that needs to write from the web thread must add a
+  lock first.
+- **Any route that returns early without draining the request body must
+  close its connection.** `do_POST` sets `self.close_connection = True`
+  before anything else. Its rejection paths answer without draining the
+  request body, and on an HTTP/1.1 keep-alive connection those
+  attacker-controlled bytes are otherwise parsed as the next request — which
+  made the answer route's content-type guard, the CSRF defence at the
+  loopback default, bypassable by request smuggling. `do_GET` returns early
+  on its 403 and 404 paths without closing, and genuinely does not need the
+  fix: smuggling requires an unread request body, and no browser-issuable GET
+  carries one.
 - **`CLAUDELOOP_RESULT` is merged last** into the session's environment. The
   loop decides a task is finished by that file appearing; a `session_env` entry
   must never be able to redirect it.
