@@ -6,8 +6,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -16,6 +14,7 @@ from pathlib import Path
 from . import session
 from . import status as status_module
 from . import web
+from . import worktree
 from .config import DEFAULT_CONFIG, Config, load_config
 from .jira import JiraClient, JiraSource
 from .source import FileSource, Task, TaskSource
@@ -64,35 +63,37 @@ answer one, and a session with a real question now has somewhere to put it."""
 ANSWER_PROMPT = (
     "A human has answered the question you were blocked on.\n\n"
     "Their answer: {answer}\n\n"
-    "Act on that answer and finish the task. The working tree has been reset "
-    "to this repository's default branch since you stopped, so it is no "
-    "longer on the branch you created: if you created one, check out the "
-    "branch you were working on before you continue -- your commits on it "
-    "are intact. When the work is complete, "
+    "Act on that answer and finish the task. Your working tree is exactly as "
+    "you left it -- still on your branch, with any uncommitted changes still "
+    "there -- so carry on from where you stopped. When the work is complete, "
     "write the result file at the path in the CLAUDELOOP_RESULT environment "
     "variable exactly as before; that file, not your last message, is what "
     "ends the task."
 )
 """Sent when resuming a parked task whose question has been answered.
 
-The branch sentence is load-bearing and cannot be replaced by anything the
-orchestrator does itself: every task that ran while this one was parked
-called reset_to_default_branch on the way in, so the tree has moved, and
-ClaudeLoop never learns what the session named its branch. The session does
--- which is the main reason an answered task resumes its original session
-rather than starting fresh."""
+Before S6 this had to talk the session back onto its own branch: every task
+that ran while this one was parked reset the single shared working tree. Each
+task now has its own worktree, which nothing else touches while it is parked
+-- so the honest thing to say is the opposite, and saying it stops a resumed
+session guessing at a branch name it may have renamed."""
 
 FRESH_ANSWER_PROMPT = (
     "{task}\n\n"
     "A human has already answered a question about this task: {answer}\n\n"
     "The session that asked that question is no longer available, so start "
-    "this task from the beginning, using that answer. An earlier attempt may "
-    "have left a branch in this repository; look before you redo work that is "
-    "already committed."
+    "this task from the beginning, using that answer. You are on this task's "
+    "branch, and any commits an earlier attempt made are on it; look before "
+    "you redo work that is already done."
 )
 """For the edge case where a parked task has no session to resume -- a
-state.db from before this slice, or a task whose runs were pruned. The work
-is not lost, only the context."""
+state.db from before this slice, or a task whose runs were pruned. `ensure`
+reuses `claudeloop/<task.id>` when it already exists, so a pruned task from
+this slice lands back on its own commits. A pre-slice task never had that
+branch -- its session named its own -- so `ensure` cuts a fresh one from the
+default instead, and there is nothing of the earlier attempt on it. The
+wording promises only the branch, not what is on it, so it stays true either
+way."""
 
 
 @dataclass(frozen=True)
@@ -273,116 +274,6 @@ def sleep_delay(wait_until: float) -> float:
     return min(max(0.0, wait_until - time.time()), MAX_WAIT_S)
 
 
-DEFAULT_BRANCH_CANDIDATES = ("main", "master")
-"""Checked, in order, when a repository has no remote to ask -- never
-assumed outright. Neither name is guaranteed; this only picks one that
-actually exists as a local branch."""
-
-GIT_TIMEOUT_S = 10
-"""Bounds every git call this module makes. Local git commands finish in
-milliseconds; this exists only so a wedged one (a lock held by another
-process, anything unforeseen) can't hang an unattended loop forever."""
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    """Run one git command, hardened for an unattended caller: no inherited
-    stdin (a prompt for credentials or an editor would otherwise block
-    forever reading from the loop's own terminal -- the same class of bug
-    session.py's stdin=DEVNULL already guards against for the CLI itself),
-    no interactive terminal prompting, and a bounded timeout.
-    """
-    return subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        timeout=GIT_TIMEOUT_S,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-    )
-
-
-def _try_git(repo: Path, *args: str) -> subprocess.CompletedProcess | None:
-    """`_git`, or None with a warning already logged if git could not be run
-    at all -- a missing binary, a timeout. Distinct from a clean invocation
-    that simply exits non-zero, which callers handle themselves."""
-    try:
-        return _git(repo, *args)
-    except (OSError, subprocess.SubprocessError) as error:
-        log.warning(
-            "could not run `git %s` in %s (%s); running the next task from"
-            " the repository's current state",
-            " ".join(args),
-            repo,
-            error,
-        )
-        return None
-
-
-def default_branch(repo: Path) -> str | None:
-    """The repository's default branch, without guessing.
-
-    `git symbolic-ref refs/remotes/origin/HEAD` is authoritative when there
-    is a remote (set by a clone, or `git remote set-head origin -a`). Most
-    repositories driven by an unattended loop have none, so this falls back
-    to whichever of the two common initial-branch names actually exists
-    locally. If neither does, this gives up rather than guess -- the caller
-    then leaves the working tree exactly as it found it.
-    """
-    origin_head = _try_git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-    if origin_head is None:
-        return None
-    prefix = "refs/remotes/origin/"
-    ref = origin_head.stdout.strip()
-    if origin_head.returncode == 0 and ref.startswith(prefix):
-        return ref[len(prefix):]
-    for name in DEFAULT_BRANCH_CANDIDATES:
-        check = _try_git(repo, "rev-parse", "-q", "--verify", f"refs/heads/{name}")
-        if check is None:
-            return None
-        if check.returncode == 0:
-            return name
-    return None
-
-
-def reset_to_default_branch(repo: Path) -> None:
-    """Return the working tree to the repository's default branch before a
-    task starts.
-
-    Without this, task N's session inherits whatever branch task N-1's
-    session left checked out -- confirmed in a smoke run where a
-    twenty-task list would have produced one branch carrying every task's
-    changes stacked on the last, instead of twenty independent ones each
-    branched from the same base. The built-in definition of done already
-    tells sessions to branch from the default themselves; a live smoke test
-    measured only 50% compliance with that instruction, hence doing it
-    structurally here instead.
-
-    Never forces anything -- no checkout -f, no reset --hard, no clean. A
-    session may have deliberately left uncommitted work, and destroying a
-    user's working tree in an unattended loop is worse than one stacked
-    branch. If the default branch can't be determined, or the checkout
-    fails for any reason (a dirty tree, a detached HEAD, no such branch, git
-    itself missing), this logs and leaves the repository exactly as it is --
-    the task then simply runs from wherever the tree currently sits. Never
-    raises: called from inside run_task, where a fault here must not look
-    any different from any other environment fault the loop already
-    survives.
-    """
-    branch = default_branch(repo)
-    if branch is None:
-        return
-    result = _try_git(repo, "checkout", branch)
-    if result is not None and result.returncode != 0:
-        log.warning(
-            "could not check out default branch %r in %s before starting the"
-            " next task -- running from the repository's current state (%s)",
-            branch,
-            repo,
-            result.stderr.strip(),
-        )
-
-
 def build_source(cfg: Config, state: State) -> TaskSource:
     """The one place that knows which task source a config selects."""
     if cfg.source == "jira" and cfg.jira is not None:
@@ -407,8 +298,7 @@ async def run_task(
 
     `resume_with` is a human's answer to a question this task parked on. It
     continues the session that asked -- which still holds the repository
-    context and the name of the branch it created -- rather than starting the
-    task over.
+    context -- rather than starting the task over.
     """
     run_dir = cfg.home / "runs" / task.id
     result_path = run_dir / "result.json"
@@ -429,29 +319,46 @@ async def run_task(
     resumed = state.last_session(task.id) if resume_with is not None else None
     session_id = resumed or str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
-    # Also run on a resume: the live smoke test proved skipping it here was
-    # wrong. A task usually parks *before* its first commit, since the
-    # question that blocks it blocks it early -- so between the park and the
-    # answer, other tasks run and leave their own branches checked out. A
-    # resume that skipped the reset picked up whatever branch the last of
-    # those left behind and committed there instead of its own. This is safe
-    # in the direction that matters: a session that did create a branch is
-    # told by ANSWER_PROMPT to check it back out, and its commits are intact
-    # because the reset never forces anything; a session that did not create
-    # one now starts from the default branch, same as a fresh task would.
-    # Uncommitted work in a parked tree was already lost the moment the next
-    # task ran, so resetting here costs nothing that parking had not already
-    # cost. Do not skip this again.
+    # One worktree per task, so nothing is shared between tasks and there is
+    # nothing to reset. reset_to_default_branch lived here until S6: it
+    # compensated for a single shared tree by mutating it between tasks, and
+    # the S2b live smoke test showed the cost -- a task that parked before
+    # its first commit resumed onto the *next* task's branch. A parked task
+    # now keeps its own tree, uncommitted work included, until its answer
+    # arrives.
     #
-    # Offloaded to a thread: it shells out to git synchronously, and this
-    # coroutine must not block the event loop the heartbeat task and the
-    # dashboard share.
-    await asyncio.to_thread(reset_to_default_branch, cfg.repo)
+    # Offloaded to a thread for the same reason the reset was: it shells out
+    # to git synchronously, and this coroutine must not block the event loop
+    # the heartbeat and the dashboard share.
+    #
+    # Deliberately not caught: a worktree that cannot be created is an
+    # environment fault, not a verdict on the task, and main_loop's crash
+    # handler is where this file already says what to do about those. The
+    # causes worth designing for are box-wide -- an index.lock a stray process
+    # is holding, a full disk -- and failing the task here would mark the
+    # whole list `- [!]` in seconds, since 'failed' is terminal and
+    # State.terminal_ids() would then keep a task source from ever offering
+    # any of them again. Recorded as 'error' by the handler instead, with no
+    # source.mark, so the work survives the box being fixed.
+    #
+    # The price is head-of-line blocking when the cause is task-local and
+    # permanent instead. A non-empty leftover directory at
+    # worktrees/<task.id> with no `.git` in it -- ClaudeLoop killed mid-`add`,
+    # a reboot, an operator deleting `.git` while tidying -- falls past
+    # `ensure`'s reuse check into `add`, which fails with "already exists",
+    # and the branch retry fails identically. 'error' is non-terminal by
+    # design, so source.pending() keeps offering this task, the loop keeps
+    # re-picking it every POLL_S, and no later task ever runs. Left as an
+    # environment fault an operator clears (delete the directory); recorded
+    # in ROADMAP.md's open issues so it is not a surprise.
+    tree = await asyncio.to_thread(
+        worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
+    )
     if resume_with is None:
         # source.start would re-fire transition_start against an issue
         # already in that status; reopen() covers the source-side state
-        # instead, so this stays conditional even though the reset above
-        # no longer is.
+        # instead, so this stays conditional even though the worktree above
+        # is not.
         #
         # Offloaded for the same reason: under the Jira source this is a
         # blocking HTTP round trip.
@@ -494,6 +401,7 @@ async def run_task(
             session_id,
             prompt=prompt,
             resume=resume,
+            cwd=tree,
         )
         # session.run returns only this invocation's events, so cost has to
         # accumulate here rather than being read once at the end.
@@ -542,6 +450,12 @@ async def run_task(
     await asyncio.to_thread(
         source.mark, task, result["status"], result["summary"], cost
     )
+    if result["status"] != "blocked":
+        # A parked task keeps its tree -- that is what its resumed session
+        # comes back to. Everything else is released, which never forces
+        # anything: git refuses to remove a tree with uncommitted changes and
+        # that refusal is kept.
+        await asyncio.to_thread(worktree.release, cfg.repo, tree)
     log.info("task %s %s ($%.4f): %s", task.id, result["status"], cost, result["summary"])
     return result
 
@@ -729,6 +643,12 @@ def main() -> None:
         # config.toml at the default umask (0644) is the common case here --
         # every such install must get that message, not a raw traceback.
         raise SystemExit(str(error))
+    # Before anything starts listening or runs: a box whose git cannot make
+    # worktrees would otherwise fail every task in turn, one paid session at
+    # a time, instead of saying so once.
+    problem = worktree.probe(cfg.repo)
+    if problem:
+        raise SystemExit(problem)
     # After the config validates, so a non-loopback bind with no token fails
     # before anything is listening.
     _serve_dashboard(cfg)

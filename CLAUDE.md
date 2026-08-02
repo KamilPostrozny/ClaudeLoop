@@ -34,6 +34,7 @@ temptation to add workflow logic here.
 |---|---|
 | `loop.py` | The decision state machine (`decide`), per-task orchestration, the polling loop, `main()` |
 | `session.py` | Spawns one `claude -p` invocation, streams and tees its output |
+| `worktree.py` | One git worktree per task: create, reuse, release, and the startup probe |
 | `prompt.py` | Composes the session's system prompt from three layers. Pure |
 | `source.py` | `Task`, the `TaskSource` protocol, `FileSource` over a markdown checklist |
 | `state.py` | SQLite record of what happened. Not the source of truth for what is pending |
@@ -85,11 +86,31 @@ deliberate decision recorded in a spec.
 - **`CLAUDELOOP_RESULT` is merged last** into the session's environment. The
   loop decides a task is finished by that file appearing; a `session_env` entry
   must never be able to redirect it.
-- **No trace of ClaudeLoop lives in a repository it works in.** The result
-  file, event log and database all live under `~/.claudeloop/`, and
+- **Nothing ClaudeLoop writes into a repository may be committable.** The
+  result file, event log and database all live under `~/.claudeloop/`, and
   `load_config` refuses a `tasks_file` that resolves inside `repo`. A session
-  doing ordinary branch hygiene would otherwise revert ClaudeLoop's own mark and
-  make finished work look pending.
+  doing ordinary branch hygiene — `git add -A`, `git checkout -- .`, `git
+  stash` — would otherwise revert ClaudeLoop's own mark and make finished work
+  look pending. S6's deliberate exception is what `git worktree add` leaves in
+  the target repository: `.git/worktrees/<task-id>/`, a `.git` file in the
+  worktree, and the `claudeloop/<task-id>` branch ref. None of the three is
+  reachable from any working tree's staging area, so none can revert the mark
+  — that is the whole test. The first two are usually transient:
+  `worktree.release` runs `git worktree remove` on every non-`blocked` result
+  `run_task` returns, which takes the administrative entry and the tree
+  holding that `.git` file in one go, and declines only when the tree is
+  dirty, since it is never forced. A crash out of `run_task` never reaches
+  that call at all, so an `error` outcome leaves both behind. The
+  `git worktree prune` in `worktree.probe` is a startup backstop for entries
+  orphaned from outside git — a wiped `~/.claudeloop` — not the routine
+  cleanup. **The branch alone is permanent.**
+  Nothing in `worktree.py` or `loop.py` deletes it, on any outcome, so a task
+  that finishes cleanly leaves one behind exactly as a parked one does.
+  Branches in the target repository are not new — a pre-S6 session that
+  complied with "branch before your first commit" left its own, and nothing
+  deleted that either — but S6 makes it every task, under a name ClaudeLoop
+  chose. Any further exception needs the same justification, recorded in a
+  spec.
 - **Every stdout line is written to `events.jsonl` verbatim before it is
   parsed.** A parser bug must never lose the record.
 - **Strictly serial.** One task at a time, one session at a time.
@@ -132,7 +153,7 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Five slices have run one. Four of them surfaced defects the passing suite could
+Six slices have run one. Four of them surfaced defects the passing suite could
 not have caught — eight between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
@@ -162,10 +183,14 @@ not have caught — eight between them:
   scoped reviews and 421 passing tests had gone by without noticing, because
   nothing but a real session picks its own branch names.
 
-The third — S1's — found nothing wrong, and was still worth running: it is what
+The two that found nothing wrong were still worth running. S1's is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that
-`--resume` reattaches with the appended system prompt intact. Those were
-assumptions the whole recovery path rests on.
+`--resume` reattaches with the appended system prompt intact — assumptions the
+whole recovery path rests on. S6's confirmed that `--resume` still reattaches
+when the session's working directory is a git worktree rather than the
+repository, which nothing in a fixture suite can tell you, and that no session
+tried to check out the default branch — which under a worktree fails outright
+with `already checked out at`.
 
 Prompt text, live payload shapes, and what a session does when it thinks it is
 done are all invisible to a suite built on fixtures and a fake CLI — and
@@ -181,7 +206,7 @@ come back differently broken.
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -t .        # whole suite, ~30s
+python -m unittest discover -s tests -t .        # whole suite, ~75s
 python -m unittest tests.test_loop -v            # one module
 ```
 

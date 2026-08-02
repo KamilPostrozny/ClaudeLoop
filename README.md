@@ -11,8 +11,11 @@ whatever it says — and ClaudeLoop's per-task instruction just points at it.
 
 ## Requirements
 
-Python 3.11 or newer, and the Claude Code CLI on `PATH`, already authenticated
-(`claude setup-token` for an unattended host). No Python packages to install.
+Python 3.11 or newer, the Claude Code CLI on `PATH`, already authenticated
+(`claude setup-token` for an unattended host), and a `git` with `git worktree`
+— 2.5, from 2015, which is what ClaudeLoop checks for at startup, though
+cleanup uses `git worktree remove` from 2.17 and anything older just leaves
+finished worktrees on disk. No Python packages to install.
 
 ## Configure
 
@@ -134,12 +137,13 @@ order of precedence:
    fallback, in case that file doesn't say when the work is finished).
    A repository with none of those gets the built-in definition of done on
    its own instead: implement the change, run the repository's own tests and
-   checks if it has any, commit on a new branch created from the default
-   branch, open a pull request — or, if there's no remote, or push
-   credentials or a forge CLI are missing, stop after committing and say
-   exactly what was missing. `definition_of_done_file` overrides the
-   built-in default; the repository's own file, if it has one, always wins
-   over both.
+   checks if it has any, commit, open a pull request — or, if there's no
+   remote, or push credentials or a forge CLI are missing, stop after
+   committing and say exactly what was missing. It doesn't ask the session to
+   create a branch, because ClaudeLoop has already made one for it (see
+   below); it only forbids checking out the default branch and committing
+   there. `definition_of_done_file` overrides the built-in default; the
+   repository's own file, if it has one, always wins over both.
 
 Where layers conflict, the higher one wins and the session says so in its
 summary.
@@ -169,6 +173,43 @@ and each breaks something different:
   *subscription* rate limits, so with one of these set the `rate_limit_event`s
   the loop is built around simply stop arriving, and cost accrues silently
   with nothing on the dashboard to say so.
+
+## Branches and worktrees
+
+Each task runs in its own `git worktree` at
+`~/.claudeloop/worktrees/<task-id>`, checked out on a branch ClaudeLoop
+creates for it, `claudeloop/<task-id>`, cut from your repository's default
+branch. The session commits there; it may rename that branch to something
+descriptive. Your own working copy of `repo` is never checked out, reset or
+otherwise moved — ClaudeLoop only uses it to create the worktree and to cut
+the branch, and the finished commits land in it like any other local branch.
+
+A task's worktree is removed when the task finishes. It is kept when the task
+parks on a question, which is what its resumed session comes back to, and
+kept when removal would destroy work: `git worktree remove` is never forced,
+so a tree with uncommitted changes in it simply stays on disk and is logged.
+
+The branch is never removed — not when the task finishes, not when it fails.
+That is deliberate, since the branch is where the work is, but it means every
+task ClaudeLoop has ever run leaves a `claudeloop/<task-id>` branch in `repo`,
+and nothing cleans them up by age or count. Tidying is yours to do:
+
+```bash
+git worktree list                    # directories still registered
+git worktree remove <path>           # clear one you're done with
+git branch --list 'claudeloop/*'     # every task branch ClaudeLoop has made
+git branch -d claudeloop/<task-id>   # delete one -- refuses if unmerged
+```
+
+Prefer `git branch -d` over `-D`: it refuses to delete a branch whose commits
+aren't merged anywhere, which is what stops a finished task's work going
+quietly when you sweep up.
+
+Because of this, ClaudeLoop refuses to start if `repo` isn't a git repository,
+if its git is too old for `git worktree`, or if it has no default branch it
+can find — a local `main` or `master`, or an origin with its HEAD set
+(`git remote set-head origin -a`). It says so once at startup rather than
+failing every task in turn.
 
 ## Dashboard
 
@@ -212,12 +253,10 @@ resuming the **same session** — so it still knows what it had already done
 and which branch it was working on. There is no deadline: a parked task waits
 indefinitely, and nothing is lost if nobody answers today.
 
-One thing worth knowing: while a task is parked, other tasks run, and each
-checks out the repository's default branch on the way in. The parked
-session's branch and commits survive, but the working tree will have moved
-off it — the resumed session is told to check its own branch back out. If it
-left uncommitted changes behind, that checkout can fail and the next task
-runs on the parked task's branch instead.
+While a task is parked, other tasks run — but each of those has its own
+worktree, so the parked task's is left untouched. The resumed session finds
+its branch, its commits and its uncommitted changes exactly as it left them,
+and doesn't have to check anything back out.
 
 ## Tasks
 
@@ -265,6 +304,7 @@ python -m claudeloop
     events.jsonl                # the raw stream-json stream, appended per attempt
     result.json                 # the session's own verdict
     stderr.log
+  worktrees/<task-id>/          # the task's checkout -- see Branches and worktrees
 ```
 
 ## Warning

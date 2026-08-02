@@ -131,11 +131,18 @@ class PromptTest(unittest.TestCase):
             BUILTIN_DEFINITION_OF_DONE,
         )
 
-    def test_the_builtin_requires_a_new_branch_from_the_default(self):
-        # "committed on a branch" was satisfiable by committing to main
-        # itself, or by branching a second task off the first task's branch.
-        self.assertIn("new branch", BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("default branch", BUILTIN_DEFINITION_OF_DONE)
+    def test_the_definition_of_done_does_not_ask_the_session_to_branch(self):
+        # ClaudeLoop creates the branch now, so the instruction a live smoke
+        # test measured at ~50% compliance is gone rather than reworded.
+        self.assertNotIn("Create that branch before your first commit",
+                         BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("already on a branch", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_definition_of_done_still_forbids_the_default_branch(self):
+        self.assertIn("Never check out the default branch", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_definition_of_done_allows_a_rename(self):
+        self.assertIn("git branch -m", BUILTIN_DEFINITION_OF_DONE)
 
     def test_the_builtin_qualifies_the_tests_requirement(self):
         # The target case for this feature -- a scratch repo -- very likely
@@ -219,6 +226,20 @@ class PromptTest(unittest.TestCase):
         # documentation" was wrong whenever it wasn't a repo CLAUDE.md.
         self.assertNotIn("repository's own documentation", precedence(has_operator=True))
         self.assertNotIn("repository's own documentation", precedence(has_operator=False))
+
+    def test_the_definition_of_done_names_the_tree_the_session_works_in(self):
+        # Under worktrees the session's cwd is not cfg.repo, and pointing a
+        # literal-minded agent at a CLAUDE.md outside its own working
+        # directory invites it to edit the wrong copy.
+        (self.repo / "CLAUDE.md").write_text("repo rules\n")
+        tree = self.tmp / "worktrees" / "abc123"
+        tree.mkdir(parents=True)
+        (tree / "CLAUDE.md").write_text("repo rules\n")
+
+        text = compose(self.cfg(), tree)
+
+        self.assertIn(str(tree / "CLAUDE.md"), text)
+        self.assertNotIn(str(self.repo / "CLAUDE.md"), text)
 
 
 class TaskSourceSectionTest(unittest.TestCase):
