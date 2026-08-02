@@ -108,10 +108,12 @@ class PromptTest(unittest.TestCase):
         # as a question. The old text said "stop after committing" and never
         # named a status, so both readings were defensible. This pins the
         # fix: the status to write is spelled out, and "blocked" is
-        # explicitly ruled out with the reason (nobody is present mid-run to
-        # answer).
+        # explicitly ruled out with the reason (supplying a remote or
+        # credentials is not a decision anyone can hand you mid-run).
         self.assertIn("that is not blocked", BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("no human is present mid-run", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn(
+            "is not a decision anyone can hand you mid-run", BUILTIN_DEFINITION_OF_DONE
+        )
         self.assertIn(
             'write status "done" (not "blocked")', BUILTIN_DEFINITION_OF_DONE
         )
