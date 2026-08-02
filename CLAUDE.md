@@ -153,7 +153,7 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Five slices have run one. Four of them surfaced defects the passing suite could
+Six slices have run one. Four of them surfaced defects the passing suite could
 not have caught — eight between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
@@ -183,10 +183,14 @@ not have caught — eight between them:
   scoped reviews and 421 passing tests had gone by without noticing, because
   nothing but a real session picks its own branch names.
 
-The third — S1's — found nothing wrong, and was still worth running: it is what
+The two that found nothing wrong were still worth running. S1's is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that
-`--resume` reattaches with the appended system prompt intact. Those were
-assumptions the whole recovery path rests on.
+`--resume` reattaches with the appended system prompt intact — assumptions the
+whole recovery path rests on. S6's confirmed that `--resume` still reattaches
+when the session's working directory is a git worktree rather than the
+repository, which nothing in a fixture suite can tell you, and that no session
+tried to check out the default branch — which under a worktree fails outright
+with `already checked out at`.
 
 Prompt text, live payload shapes, and what a session does when it thinks it is
 done are all invisible to a suite built on fixtures and a fake CLI — and

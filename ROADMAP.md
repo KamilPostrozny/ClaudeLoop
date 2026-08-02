@@ -190,9 +190,26 @@ burned the whole list to `- [!]` in seconds. And `FRESH_ANSWER_PROMPT` lost
 the clause asserting an earlier attempt's commits are on the branch: true for
 a task pruned since S6, false for one parked before it.
 
-**The live smoke test has not been run yet.** Nothing here is merged until it
-has: this slice changes three prompt strings and the branch a real session
-commits on, which is exactly the surface a fixture suite cannot see.
+**The live smoke test passed, and is the first one that found nothing wrong
+with the slice it tested.** Two tasks on `haiku` against a scratch
+repository, $0.13: task 1 parked on a question it could not decide, task 2
+ran and finished while it was parked, the question was answered on the
+dashboard, and task 1 resumed. Every claim held. Each task committed on its
+own `claudeloop/<task-id>` branch carrying exactly its own commit — task 1's
+branch has the LICENSE and not task 2's function, which is the S2b defect
+this slice exists to remove. The parked tree sat untouched in
+`~/.claudeloop/worktrees/` for the whole of task 2. `--resume` reattached
+from a worktree cwd on the same session id, and the resumed session went
+straight to the work for $0.016 rather than rediscovering the repository.
+The scratch repository never left `main` and its tree was never dirtied.
+Both worktrees were released on completion, leaving the directory empty and
+both branches in place.
+
+Two things it confirmed rather than caught: no session tried to check out the
+default branch (which under a worktree fails with `already checked out at`),
+and none renamed its branch, though the prompt now allows it. It also
+surfaced one pre-existing accounting bug, recorded in the open issues below:
+a task that parks and is answered reports only the cost of its resume.
 
 Spec: `docs/superpowers/specs/2026-08-02-claudeloop-worktree-per-task-design.md`
 
@@ -326,6 +343,14 @@ Real, deliberately deferred, tracked here so they are not lost.
   recreates the tree from the task's branch and the session is told about work
   that is gone. Left as written: qualifying it would cost every honest resume
   clarity to cover an operator action.
+- **A task that parks and is later answered reports only the cost of its
+  resume.** `run_task` starts its `cost` accumulator at zero on every call and
+  `State.finish_task` writes `cost_usd=?` rather than adding to it, so the
+  money spent before the question was asked is overwritten. Measured in S6's
+  live smoke test: a task that spent $0.0395 parking and $0.0162 finishing is
+  recorded at $0.0162, and the dashboard and the source's closing comment both
+  report that. Pre-existing, from S2b — parking is what made a task able to
+  span two `run_task` calls.
 - The answered path does not publish `set_status(pending=...)`, so the
   dashboard's backlog list can be stale while a resumed task runs. Deliberate:
   publishing it would cost a `source.pending()` network round trip on every
