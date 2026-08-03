@@ -19,7 +19,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S6** | A git worktree per task | merged |
 | **S5** | Setup wizard and config schema | merged |
 | **S7** | Proposed plugin set | merged |
-| **S4** | Home Assistant OS addon | not started |
+| **S4** | Home Assistant OS addon | merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -462,32 +462,101 @@ and `worktree.release` is never forced. That is S6 behaving as designed.
 
 Spec: `docs/superpowers/specs/2026-08-03-claudeloop-plugin-set-design.md`
 
+### S4 — Home Assistant OS addon
+
+`addon/` — `config.yaml`, `Dockerfile`, `run.sh`, `DOCS.md` — plus
+`repository.yaml` at the root, so this repository *is* an addon repository, and
+`.github/workflows/addon.yml`, which builds the image the supervisor pulls.
+
+**The image is prebuilt, and that is forced rather than chosen.** The
+supervisor builds an addon with the addon's own folder as the docker context
+(`AddonBuild.get_docker_args` passes `path=addon.path_location`), and
+ClaudeLoop's source is the repository root. The alternatives were duplicating
+`claudeloop/` into `addon/`, or having the Dockerfile clone this repository at
+build time and build whatever is on the remote rather than what the operator
+installed. So `config.yaml` names
+`image: ghcr.io/kamilpostrozny/claudeloop-{arch}` and the workflow builds it
+from the root with `docker/build-push-action` — not `home-assistant/builder`,
+which has the same addon-folder context the supervisor does. **Nothing installs
+until this repository is pushed and that workflow has run once.**
+
+**Ingress is the part the roadmap did not have.** All three of the web layer's
+assumptions — bind `web_host`, compare `Host`, require `?token=` — are false
+behind the supervisor's proxy. `CLAUDELOOP_INGRESS=1`, set by `run.sh` and read
+by `config.ingress()` at request time, moves the bind to `0.0.0.0:8765`
+(`bind_address`, shared by both servers) and drops the other two. Each is
+replaced, not removed: an ingress addon publishes **no port**, so there is no
+address for DNS rebinding to reach, and the supervisor authenticates a real
+Home Assistant user before proxying — a login rather than a secret in a query
+string, which also keeps the token out of the ingress access log. It is an
+environment variable rather than a config key because the wizard has to be
+reachable on a box with no `config.toml` to read a key out of. **This is a
+deliberate reversal of half of S5's second barrier**, recorded in the spec:
+outside ingress both barriers are exactly as S5 left them.
+
+`index.html` and `setup.html` each derive a base path from `location.pathname`,
+so their absolute routes resolve under `/api/hassio_ingress/<session>/`. The
+server needs nothing: the supervisor strips the prefix before proxying.
+
+**Configuration stays in S5's wizard**, not in addon options — a second
+description of 23 keys next to `SCHEMA` is the one thing S5 exists to prevent,
+and the S4 operator is exactly the operator with no terminal. The addon
+declares four options, all of them things the wizard structurally cannot carry:
+`claude_code_oauth_token`, `git_user_name`, `git_user_email`, and `setup`,
+which is the `--setup` flag an addon has no command line to pass.
+
+Landmines, and what became of them:
+
+| Landmine | Outcome |
+|---|---|
+| Commit signing | Closed. `run.sh` sets `commit.gpgsign false` in the container's global git config; `[session_env]`'s `GIT_CONFIG_COUNT` trio still wins for an operator with a real key. |
+| Claude-in-Chrome cannot run headless | Not closeable here — it is a statement about what an operator writes in `instructions.md`. Documented in `DOCS.md`. |
+| First-run trust prompts | Closed. `run.sh` seeds `~/.claude.json` with `hasCompletedOnboarding` and `bypassPermissionsModeAccepted` when it is absent. |
+| Secrets the target repo needs | Already `[session_env]`, and it reaches the wizard. Nothing to build. |
+| Claude authentication | Closed, by the `claude_code_oauth_token` option. |
+
+**The live smoke test ran in the container itself**, which is the only place
+that means anything for this slice: the image built with podman, a scratch
+repository reached as `file:///share/…` and cloned into `/data`, two tasks on
+`haiku`, the wizard driven over HTTP with Home Assistant's own `Host` header
+and no token. **It found two defects, one of them expensive.**
+
+- **`claude --permission-mode bypassPermissions` refuses to run as root** —
+  "--dangerously-skip-permissions cannot be used with root/sudo privileges for
+  security reasons" — and an addon container is root. Every task failed in
+  about three seconds with no result file and `$0.0000`. The image now creates
+  `claudeloop` (uid 1000) with `/data` as its home, `run.sh` hands `/data` over
+  and starts the loop through `setpriv`. Invisible to the test suite, whose
+  fake `claude` has no opinion about who runs it.
+- **An unwritable tasks file is a silent, unbounded, paid loop.**
+  `FileSource._rewrite` suppresses the `OSError` from its write on purpose —
+  the checklist is the operator's file and may vanish mid-run — but an
+  unwritten mark leaves the line `- [ ]`, so the task is offered again on the
+  next poll and paid for again. **37 runs of one task in fifteen minutes,
+  $1.10**, stopped only because a human was watching a terminal, which is the
+  one thing this project assumes nobody is doing. Not an addon defect in
+  origin; the addon is what makes it ordinary, since the loop now runs as uid
+  1000 and a checklist on `/share` belongs to root. Fixed at both ends:
+  `tasks_file` gains a writability check in `SCHEMA` (a file that does not
+  exist yet still passes — `pending()` reads a missing checklist as an empty
+  backlog), and a failed mark is now logged as an error naming the task.
+
+Everything else held. The wizard was served and saved through a foreign `Host`
+with no token; the new writability check refused `/share/smoke/tasks.md` live,
+with its own message, before anything was paid for; the same process then bound
+the dashboard on `0.0.0.0:8765` and started task 1; both tasks completed, were
+marked `- [x]`, and landed on their own `claudeloop/<task-id>` branch carrying
+exactly their own commit; the clone stayed on `main` and was never dirtied;
+both worktrees were released; and `/api/state` and `/logo.png` answered through
+the same ingress-shaped requests afterwards. $0.073 for the successful pair.
+
+Spec: `docs/superpowers/specs/2026-08-04-claudeloop-home-assistant-addon-design.md`
+
 ---
 
 ## Next
 
-### S4 — Home Assistant OS addon
-
-Dockerfile, `config.yaml`, ingress sidebar, persistent `/data`. Nothing blocks
-it. The work is mostly in the landmines below rather than in the packaging.
-
-**Landmines, all discovered by reading the first real target repository:**
-
-- **Commit signing.** The reference repo signs with an SSH key held in a
-  1Password agent. A headless box cannot unlock it. S1.1's `[session_env]`
-  addresses this — the `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0` trio forces
-  `commit.gpgsign=false` for the session's git alone — but it has not been
-  verified live.
-- **Claude-in-Chrome is a browser extension** and cannot run headless. A repo
-  mandating a Chrome verification sweep needs Playwright instead, which belongs
-  in the operator instruction layer.
-- **Plugin and hook first-run trust prompts** stall a headless session. The
-  image has to pre-trust them.
-- **Secrets** the target repo's own verification phase needs must exist in the
-  container.
-- **Claude authentication.** `claude setup-token` produces the long-lived
-  credential; subscription session limits are what the whole recovery path
-  exists for.
+Nothing is scheduled. The open issues below are the backlog.
 
 ---
 
@@ -514,10 +583,21 @@ Real, deliberately deferred, tracked here so they are not lost.
   Linux caps a single argument at 128 KiB; a very large operator instructions
   file would fail `execve` with an opaque error.
 - The dashboard token travels in the query string, because `EventSource` cannot
-  set headers. It therefore reaches browser history and screenshots, and in S4
-  it will reach the Home Assistant ingress access log. The complete fix is a
-  `Set-Cookie` plus `history.replaceState` pair, worth doing when the token path
-  is actually used.
+  set headers. It therefore reaches browser history and screenshots. S4 no
+  longer adds the ingress access log to that list — under ingress the token is
+  not checked at all — so this is back to affecting only an operator who
+  deliberately exposes `web_host`. The complete fix is a `Set-Cookie` plus
+  `history.replaceState` pair, worth doing when the token path is actually used.
+- **The add-on's `setup` option is a flag, not a button.** It stays on until
+  the operator turns it off, so a restart with it still set reopens the wizard
+  and waits there instead of working. `DOCS.md` says so; the supervisor has no
+  way to offer a one-shot action.
+- **A repository checked out under `/share` is not usable by the add-on
+  without a `chown`.** Sessions run as uid 1000 and `/share` belongs to root,
+  so `git worktree add` fails with "Permission denied" — observed. The
+  supported path is a URL cloned into `/data`, which the loop's own user owns;
+  the `share:rw` mapping is for an operator who has already dealt with the
+  ownership.
 - `Config` has a `dict` field, so it is unhashable. Nothing hashes it.
 - `JiraSource.pending` fetches one page of 50 issues and never paginates, so an
   ordering that puts wanted work past the 50th row never reaches it.

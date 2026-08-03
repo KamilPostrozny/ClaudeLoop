@@ -4,13 +4,13 @@ version: "0.1.0"
 description: >-
   Unattended orchestrator for Claude Code: one headless session per task,
   against one repository, surviving rate limits.
-url: https://github.com/OWNER/ClaudeLoop
+url: https://github.com/KamilPostrozny/ClaudeLoop
 arch:
   - aarch64
   - amd64
 # Prebuilt, because the supervisor would build this folder as the context and
 # the orchestrator's source is the repository root. See addon/Dockerfile.
-image: ghcr.io/OWNER/claudeloop-{arch}
+image: ghcr.io/kamilpostrozny/claudeloop-{arch}
 init: false
 # Ingress only, and deliberately no `ports:`. The listener exists on the
 # supervisor's internal network and nothing is published to the host, which is

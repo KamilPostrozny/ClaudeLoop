@@ -177,16 +177,16 @@ repository root. The three ways out:
    repository root.
 
 The third is what every published addon does anyway, so that is what this
-slice does: `image: ghcr.io/OWNER/claudeloop-{arch}`, produced by
+slice does: `image: ghcr.io/kamilpostrozny/claudeloop-{arch}`, produced by
 `.github/workflows/addon.yml` from the repository root with
 `docker/build-push-action` — not `home-assistant/builder`, which has the same
 addon-folder context the supervisor does. `addon/Dockerfile` keeps a default
 `BUILD_FROM` so the same file builds by hand from the repository root.
 
-**The consequence, and it is a real one: `OWNER` is a placeholder in three
-files** — `addon/config.yaml`, `repository.yaml`, `addon/DOCS.md` — because
-this repository has never been pushed and has no remote. Nothing installs
-until the first push fills them in and the workflow has run once.
+**The consequence, and it is a real one: nothing installs until this
+repository is pushed and the workflow has run once.** The image name is taken
+from the configured `origin` (`github.com/KamilPostrozny/ClaudeLoop`, lowercased
+for ghcr), which has never had anything pushed to it.
 
 ### Sessions run unprivileged, and that is not a preference
 

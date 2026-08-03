@@ -414,8 +414,9 @@ Three things differ from running it on a workstation:
   is the repository root. `.github/workflows/addon.yml` builds it from the root;
   by hand it is `docker build -f addon/Dockerfile .`.
 
-`OWNER` is a placeholder in `repository.yaml`, `addon/config.yaml` and
-`addon/DOCS.md` until this repository is pushed somewhere.
+The add-on cannot be installed until this repository is pushed and the
+workflow has published the image once: `image:` names a tag that does not exist
+yet.
 
 ## Where things go
 

@@ -83,6 +83,19 @@ deliberate decision recorded in a spec.
   yet there is no `web_token` to authenticate against, so that barrier can't
   be the only one. It writes exactly one file, `config.toml`, and only once
   a full `validate()` pass has approved it.
+- **Both of those barriers, and the dashboard's `Host` check, are dropped
+  under `CLAUDELOOP_INGRESS=1` — and nowhere else.** S4's addon runs behind
+  Home Assistant's ingress proxy, where all three are false rather than
+  relaxed: the supervisor connects from another container, its `Host` names
+  Home Assistant, and no sidebar link can carry `?token=`. Each is replaced
+  rather than removed. An ingress addon publishes **no port**, so there is no
+  address for DNS rebinding to reach, and the supervisor authenticates a real
+  Home Assistant user before proxying anything — which is why the wizard's
+  console token can go with the loopback bind that justified it. The variable
+  is read through `config.ingress()` at request time, and it is not a config
+  key because the wizard has to be reachable on a box that has no
+  `config.toml` to read one out of. Anything else that wants these guards off
+  needs its own spec, and had better bring a replacement this specific.
 - **The web layer never touches the loop's objects.** Its SQLite connection is
   its own and opened read-only; event logs are read from disk.
 - **The web layer is never a second writer to `status.py`.** `set_status` is a
