@@ -87,20 +87,36 @@ def _coerce(field: Field, value: object) -> object:
     return str(value)
 
 
-def _raw(data: dict, field: Field) -> object | None:
-    """The submitted value, or None when the key is absent.
+_BLANK = object()
+"""Sentinel for _raw: a key present but whitespace-only, distinct from a key
+truly absent. An empty string "" is what the wizard posts for every field the
+operator left alone, so it must still mean absent -- but "   " is a typo, not
+a blank submission, and silently vanishing it undercuts _must_exist's whole
+point (see validate())."""
 
-    A blank string counts as absent. The wizard posts every field it renders,
-    so an untouched optional key arrives as "" and must fall back to its
-    default rather than becoming an empty path or an empty model name.
+
+def _raw(data: dict, field: Field) -> object:
+    """The submitted value, `None` when the key is absent, or `_BLANK` when
+    it is present but whitespace-only.
+
+    A genuinely empty string counts as absent. The wizard posts every field
+    it renders, so an untouched optional key arrives as "" and must fall
+    back to its default rather than becoming an empty path or an empty model
+    name.
     """
     table = data.get(field.section) if field.section else data
     if not isinstance(table, dict):
         return None
     value = table.get(field.name)
-    if value is None or (isinstance(value, str) and not value.strip()):
+    if value is None:
         return None
-    return value.strip() if isinstance(value, str) else value
+    if isinstance(value, str):
+        if value == "":
+            return None
+        if not value.strip():
+            return _BLANK
+        return value.strip()
+    return value
 
 
 # --- the checks and conditions the table refers to ------------------------
@@ -305,26 +321,36 @@ def validate(data: dict) -> tuple[dict, list[tuple[str, str]]]:
     values: dict = {}
     errors: list[tuple[str, str]] = []
     for field in SCHEMA:
+        # Coerced once so an absent/invalid field lands on the same type its
+        # Config field declares -- session_timeout_s: float defaults to
+        # 4 * 3600, a bare int, without this.
+        fallback = _coerce(field, field.default) if field.default is not None else None
         raw = _raw(data, field)
+        if raw is _BLANK:
+            errors.append(
+                (field.key, f"{field.key} is blank -- remove the key or give it a value")
+            )
+            values[field.key] = fallback
+            continue
         if raw is None:
             if field.required or (field.required_if and field.required_if(values)):
                 errors.append(
                     (field.key, field.required_error or f"{field.key} is required")
                 )
-            values[field.key] = field.default
+            values[field.key] = fallback
             continue
         try:
             value = _coerce(field, raw)
         except ValueError as error:
             errors.append((field.key, str(error)))
-            values[field.key] = field.default
+            values[field.key] = fallback
             continue
         if field.choices and value not in field.choices:
             errors.append((
                 field.key,
                 f"{field.key} {value!r} is not one of {', '.join(field.choices)}",
             ))
-            values[field.key] = field.default
+            values[field.key] = fallback
             continue
         values[field.key] = value
         if field.check:
@@ -418,7 +444,16 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
     if errors:
         # The first, not all of them: this is a command-line caller, and one
         # actionable sentence beats a wall. The wizard shows the whole list.
-        raise ValueError(f"{path}: {errors[0][1]}")
+        # But a bare errors[0] hid the rest entirely -- an operator fixing a
+        # [jira] table missing three keys would fix one, re-run, and only
+        # then discover the next. Naming the remaining keys costs one clause
+        # and saves that many re-runs.
+        message = f"{path}: {errors[0][1]}"
+        if len(errors) > 1:
+            rest = len(errors) - 1
+            others = ", ".join(key for key, _ in errors[1:])
+            message += f" (and {rest} more problem{'s' if rest != 1 else ''}: {others})"
+        raise ValueError(message)
 
     jira = None
     if values["source"] == "jira":

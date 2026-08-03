@@ -123,6 +123,17 @@ class ConfigTest(unittest.TestCase):
         cfg = load_config(path, home=self.tmp / "home")
         self.assertEqual(cfg.jira.jql, 'project = "OPS" AND status = "To Do" ORDER BY created ASC')
 
+    def test_session_timeout_s_default_is_a_float(self):
+        # validate() writes field.default verbatim on the absent path, and
+        # 4 * 3600 is a bare int -- 14400 == 14400.0 so assertEqual would not
+        # catch a regression here, only assertIsInstance does.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertIsInstance(cfg.session_timeout_s, float)
+
 
 class WebConfigTest(unittest.TestCase):
     def setUp(self):
@@ -261,6 +272,20 @@ class SessionEnvironmentConfigTest(unittest.TestCase):
                 self.write(f'mcp_config = "{self.tmp}/nope-mcp.json"\n'), home=self.home
             )
         self.assertIn("mcp_config", str(caught.exception))
+
+    def test_a_blank_settings_file_is_refused_but_an_absent_one_is_not(self):
+        # "" is what the wizard posts for every field left untouched, and
+        # must keep meaning absent -- but "   " is a present, blank value:
+        # silently dropping it to None would undercut _must_exist's whole
+        # point, which exists to catch exactly this class of typo.
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('settings_file = "   "\n'), home=self.home)
+        message = str(caught.exception)
+        self.assertIn("settings_file", message)
+        self.assertIn("blank", message)
+
+        cfg = load_config(self.write(), home=self.home)
+        self.assertIsNone(cfg.settings_file)
 
     def test_session_env_defaults_empty(self):
         self.assertEqual(load_config(self.write(), home=self.home).session_env, {})
@@ -426,6 +451,19 @@ class JiraConfigTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as caught:
                     load_config(self.write(body), home=self.home)
                 self.assertIn(key, str(caught.exception))
+
+    def test_multiple_missing_jira_keys_are_all_named_in_one_message(self):
+        # The old code reported every missing [jira] key in one message. An
+        # operator fixing one key per run, only to discover the next on
+        # re-run, is the regression this pins.
+        with self.assertRaises(ValueError) as caught:
+            load_config(self.write('source = "jira"\n[jira]\n'), home=self.home)
+        message = str(caught.exception)
+        self.assertIn("site", message)  # the lead error
+        self.assertIn("jira.email", message)
+        self.assertIn("jira.token", message)
+        self.assertIn("jira.project", message)
+        self.assertIn("more problem", message)
 
     def test_a_tasks_file_inside_the_repo_is_still_refused_under_jira(self):
         # tasks_file must come before [jira] opens -- TOML assigns any key
