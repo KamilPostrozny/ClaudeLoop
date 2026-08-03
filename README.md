@@ -71,6 +71,7 @@ definition_of_done_file  = "~/.claudeloop/definition-of-done.md"  # optional, th
 settings_file            = ""     # optional, default unset -- passed to the CLI as --settings
 mcp_config               = ""     # optional, default unset -- passed to the CLI as --mcp-config
 strict_mcp               = false  # optional, default false -- requires mcp_config; passes --strict-mcp-config
+plugins                  = []     # optional, default [] -- see Plugins below
 
 [session_env]              # optional, default empty -- extra environment variables for the session
 # GH_TOKEN = "ghp_..."
@@ -163,7 +164,7 @@ never burns through tasks.
 
 ## The session's instructions
 
-Every session carries a system prompt assembled from three layers, in this
+Every session carries a system prompt assembled from four layers, in this
 order of precedence:
 
 1. **The ClaudeLoop protocol** — invariant, not configurable. It tells the
@@ -172,7 +173,12 @@ order of precedence:
 2. **Operator instructions** — `instructions_file`, read from the machine
    running ClaudeLoop. It outranks the repository because the operator, not
    the repository, controls this machine. Optional: absent when the file is.
-3. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
+3. **Plugin usage instructions** — ClaudeLoop's own advice about the plugins
+   it installed, one block per selected plugin that has any. It ranks below
+   the operator instructions, because it is ClaudeLoop's advice and the
+   operator runs the machine. Optional: absent when nothing selected has
+   anything to say.
+4. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
    or `AGENTS.md`, followed end to end when present (with the built-in as a
    fallback, in case that file doesn't say when the work is finished).
    A repository with none of those gets the built-in definition of done on
@@ -213,6 +219,47 @@ and each breaks something different:
   *subscription* rate limits, so with one of these set the `rate_limit_event`s
   the loop is built around simply stop arriving, and cost accrues silently
   with nothing on the dashboard to say so.
+
+## Plugins
+
+`plugins` names Claude Code plugins ClaudeLoop installs and enables for every
+session:
+
+```toml
+plugins = ["superpowers", "caveman", "ponytail"]
+```
+
+Three names are built in, and each carries its marketplace so you don't have
+to:
+
+| Name | What it is |
+|---|---|
+| `superpowers` | Brainstorm, plan, test-drive and review, as explicit workflows |
+| `caveman` | Terse output; code, commits and reports stay written normally |
+| `ponytail` | Prefers the smallest solution that works over the general one |
+
+Anything else is named as `plugin@marketplace` and its marketplace must
+already be configured on the machine (`claude plugin marketplace add ...`).
+
+Installation happens once at startup, at **user scope** — never project or
+local scope, which would write into the repository being worked on.
+ClaudeLoop reads the installed set first and touches the network only when
+something is genuinely missing, so a marketplace outage cannot stop a loop
+that is already reconciled. A plugin it cannot install stops startup with a
+message rather than running days of sessions without it.
+
+`superpowers` ships usage instructions, because two of its habits are wrong
+under an orchestrator: its brainstorming skill asks a human one question at a
+time, and it refuses to implement until a human approves the design. The
+shipped text tells the session to read the repository instead of asking, and
+that queuing the task *was* the approval. `caveman` and `ponytail` ship none —
+both already state their own rules.
+
+To replace what a plugin's block says, drop your own
+`~/.claudeloop/plugin-usage/<name>.md`. The same file gives a plugin outside
+the built-in three a block of its own.
+
+Omitting `plugins` entirely installs nothing and adds no prompt layer.
 
 ## Branches and worktrees
 

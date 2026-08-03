@@ -101,6 +101,12 @@ Four configuration keys mapping directly onto flags the CLI already has. No
 plugin installation, no trust management, no marketplace handling — the box's
 own Claude configuration owns all of that.
 
+> **Reversed in part, 2026-08-03.** S7 reverses the installation half of this
+> decision: ClaudeLoop now installs and enables the plugins it proposes, at
+> user scope, rather than assuming the box already carries them. `settings_file`
+> passthrough, described below, is untouched. See
+> `docs/superpowers/specs/2026-08-03-claudeloop-plugin-set-design.md`.
+
 `settings_file` is the significant one: a settings JSON carries
 `enabledPlugins`, `extraKnownMarketplaces`, hooks and permissions together, the
 same shape as `assimo/.claude/settings.json`. One key therefore covers plugin

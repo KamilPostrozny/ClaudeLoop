@@ -20,6 +20,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import plugins as plugins_module
 from . import web, worktree
 from .config import DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, validate
 from .jira import JiraClient, JiraError, compose_jql
@@ -33,6 +34,7 @@ STEPS = (
     {"id": "source", "title": "Task source"},
     {"id": "dashboard", "title": "Dashboard"},
     {"id": "instructions", "title": "Instructions"},
+    {"id": "plugins", "title": "Plugins"},
     {"id": "advanced", "title": "Advanced"},
     {"id": "review", "title": "Review and save"},
 )
@@ -51,6 +53,8 @@ def _scalar(value: object) -> str:
     set, so quotes, backslashes, tabs and control characters are all handled
     by the stdlib rather than by hand.
     """
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_scalar(item) for item in value) + "]"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -81,8 +85,10 @@ def _blank(value: object) -> bool:
 
     An emitted `settings_file = ""` reads back as a path that does not exist,
     and load_config would then refuse the file this module just wrote. False
-    and 0 are real values, not blanks.
+    and 0 are real values, not blanks; an empty list is not.
     """
+    if isinstance(value, (list, tuple)):
+        return not value
     return value is None or (isinstance(value, str) and not value.strip())
 
 
@@ -184,6 +190,12 @@ def schema_payload(existing: dict) -> dict:
         # definition -- that is what the table is for.
         "session_env": {name: "" for name in env} if isinstance(env, dict) else {},
         "editing": bool(existing),
+        # The checkbox list the plugins screen renders. Names and one-line
+        # reasons only -- the prompt text itself never goes to the browser.
+        "proposed": [
+            {"name": plugin.name, "reason": plugin.reason}
+            for plugin in plugins_module.PROPOSED
+        ],
     }
 
 
