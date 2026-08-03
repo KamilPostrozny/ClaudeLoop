@@ -223,16 +223,32 @@ const put = (key, value) => {
   table[field.name] = value;
 };
 
+// What the operator has actually set. Undefined for a field they have not
+// touched, which is exactly what a text input's `value` must reflect: see
+// `get` below for why the two cannot be the same accessor.
+const drafted = (key) => {
+  const field = schema.fields.find((f) => f.key === key);
+  if (!field) return undefined;
+  const table = field.section ? draft[field.section] || {} : draft;
+  return table[field.name];
+};
+
 const get = (key) => {
   const field = schema.fields.find((f) => f.key === key);
   if (!field) return "";
-  const table = field.section ? draft[field.section] || {} : draft;
   // Falls back to the schema default, because the server does: validate()
   // fills every absent key with it before checking required_if. Without
   // this the page believes an untouched `source` is "" while the server
   // believes it is "file" -- so tasks_file never renders, and a first run
   // could not be completed at all.
-  return table[field.name] ?? field.default ?? "";
+  //
+  // This is for *logic* -- which fields are visible, what a select or a
+  // checkbox shows. A text input must not bind its `value` to it: doing so
+  // put the default in the box as real text, and typing "haiku" into a
+  // Model field already reading "opus" produced "opushaiku", which
+  // validate() accepts because model is a free string. Text inputs use
+  // `drafted` for the value and show the default as a placeholder instead.
+  return drafted(key) ?? field.default ?? "";
 };
 
 const payload = () => ({ ...draft, session_env: env });
@@ -319,13 +335,16 @@ function renderField(field, error) {
   } else {
     input = document.createElement("input");
     input.type = field.secret ? "password" : "text";
-    input.value = get(field.key);
-    // Secrets are the one field the server never sends a default or a real
-    // value for -- get() is always "" there, so it needs the placeholder
-    // hint. Every other field's default is now already the input's value
-    // via get(), so a separate placeholder would never be seen.
+    // `drafted`, not `get`: only what the operator actually set belongs in
+    // the box. A default rendered as real text is one the operator types
+    // over the top of rather than replacing.
+    input.value = drafted(field.key) ?? "";
     if (field.secret && schema.secrets_set.includes(field.key)) {
       input.placeholder = "set — leave blank to keep";
+    } else if (field.default !== null && field.default !== undefined) {
+      // Greyed, so it reads as "this is what you get if you leave it alone"
+      // rather than as a value already entered.
+      input.placeholder = String(field.default);
     }
   }
   input.id = field.key;

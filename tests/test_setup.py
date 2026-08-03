@@ -737,6 +737,41 @@ class CheckRouteSecretTest(SetupServerBase):
         self.assertEqual(jira.authorizations[-1], expected)
 
 
+class SetupBannerTest(unittest.TestCase):
+    """The line an operator reads in their terminal before opening the wizard.
+
+    Found by the live smoke test: --setup over a perfectly good config still
+    announced "ClaudeLoop is not configured yet".
+    """
+
+    def banner(self, existing: dict) -> str:
+        return (
+            "Editing the ClaudeLoop configuration"
+            if existing
+            else "ClaudeLoop is not configured yet"
+        )
+
+    def test_a_first_run_says_it_is_not_configured(self):
+        tmp = Path(tempfile.mkdtemp())
+        server = setup.serve(tmp / "config.toml", tmp / "home", 0, "tok")
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.assertEqual(server.existing, {})
+
+    def test_setup_over_an_existing_config_reports_it_as_editing(self):
+        tmp = Path(tempfile.mkdtemp())
+        path = tmp / "config.toml"
+        path.write_text('repo = "/somewhere"\n')
+        path.chmod(0o600)
+        server = setup.serve(path, tmp / "home", 0, "tok")
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # run_setup picks its wording off exactly this, so an existing
+        # config must be visible here as a non-empty mapping.
+        self.assertTrue(server.existing)
+        self.assertEqual(server.existing["repo"], "/somewhere")
+
+
 class WizardPageTest(SetupServerBase):
     def test_the_page_is_self_contained(self):
         page = self.get("/")[1].decode()

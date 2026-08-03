@@ -559,7 +559,12 @@ def run_setup(path: Path = DEFAULT_CONFIG, home: Path = HOME, port: int = 8765) 
     token = secrets.token_urlsafe(32)
     server = serve(path, home, port, token)
     url = f"http://127.0.0.1:{server.server_port}/?token={token}"
-    log.warning("ClaudeLoop is not configured yet. Open the setup wizard:\n\n    %s\n", url)
+    opening = (
+        "Editing the ClaudeLoop configuration"
+        if server.existing
+        else "ClaudeLoop is not configured yet"
+    )
+    log.warning("%s. Open the setup wizard:\n\n    %s\n", opening, url)
     try:
         server.saved.wait()
     except KeyboardInterrupt:
