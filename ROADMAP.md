@@ -18,7 +18,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S2b** | Question and answer channel | merged |
 | **S6** | A git worktree per task | merged |
 | **S5** | Setup wizard and config schema | merged |
-| **S7** | Proposed plugin set | in progress |
+| **S7** | Proposed plugin set | merged |
 | **S4** | Home Assistant OS addon | not started |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
