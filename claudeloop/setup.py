@@ -9,9 +9,34 @@ forbid.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import secrets
+import threading
+import tomllib
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
 
-from .config import SCHEMA
+from . import web
+from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config
+
+log = logging.getLogger("claudeloop.setup")
+
+STATIC = Path(__file__).parent / "static"
+
+STEPS = (
+    {"id": "repository", "title": "Repository"},
+    {"id": "source", "title": "Task source"},
+    {"id": "dashboard", "title": "Dashboard"},
+    {"id": "instructions", "title": "Instructions"},
+    {"id": "advanced", "title": "Advanced"},
+    {"id": "review", "title": "Review and save"},
+)
+
+MAX_BODY_BYTES = 256 * 1024
+"""A whole config is a few kilobytes. This bounds what an unauthenticated
+peer can make the process allocate before the token check has even run."""
 
 _BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -105,3 +130,168 @@ def dump_toml(data: dict) -> str:
             out.append(f"{_key(name)} = {_scalar(value)}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
+
+
+def field_payload(field) -> dict:
+    return {
+        "key": field.key,
+        "name": field.name,
+        "section": field.section,
+        "type": field.type,
+        "default": str(field.default) if isinstance(field.default, Path) else field.default,
+        "step": field.step,
+        "label": field.label,
+        "help": field.help,
+        "secret": field.secret,
+        "choices": list(field.choices),
+        "required": field.required or field.required_if is not None,
+    }
+
+
+def schema_payload(existing: dict) -> dict:
+    """The table, plus whatever is already configured -- minus every secret.
+
+    Secret values never leave this process. The browser is told only which
+    ones are set, so the form can say "leave blank to keep".
+    """
+    values: dict = {}
+    secrets_set: list[str] = []
+    for field in SCHEMA:
+        table = existing.get(field.section) if field.section else existing
+        if not isinstance(table, dict) or field.name not in table:
+            continue
+        if field.secret:
+            if str(table[field.name]).strip():
+                secrets_set.append(field.key)
+            continue
+        target = values.setdefault(field.section, {}) if field.section else values
+        target[field.name] = table[field.name]
+    env = existing.get("session_env")
+    return {
+        "fields": [field_payload(field) for field in SCHEMA],
+        "steps": list(STEPS),
+        "values": values,
+        "secrets_set": secrets_set,
+        # Names, never values: a [session_env] entry is a credential by
+        # definition -- that is what the table is for.
+        "session_env": {name: "" for name in env} if isinstance(env, dict) else {},
+        "editing": bool(existing),
+    }
+
+
+class Handler(web.Handler):
+    """Subclassed, not rewritten. `_host_allowed`, `_authorized`, `_json` and
+    -- the load-bearing one -- do_POST's `close_connection = True` all come
+    from web.Handler. That line is the request-smuggling fix; a hand-rolled
+    second handler is how a project loses it."""
+
+    server_version = "ClaudeLoopSetup"
+
+    def do_GET(self) -> None:
+        if not self._host_allowed():
+            self._json(403, {"error": "bad host"})
+            return
+        parsed = urlparse(self.path)
+        if not self._authorized(parsed.query):
+            self._json(403, {"error": "bad or missing token"})
+            return
+        if parsed.path == "/":
+            self._file(STATIC / "setup.html", "text/html; charset=utf-8")
+        elif parsed.path in ("/logo.png", "/favicon.ico"):
+            self._file(STATIC / "logo.png", "image/png", cache=True)
+        elif parsed.path == "/api/setup/schema":
+            self._json(200, schema_payload(self.server.existing))
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_POST(self) -> None:
+        self.close_connection = True
+        if not self._host_allowed():
+            self._json(403, {"error": "bad host"})
+            return
+        parsed = urlparse(self.path)
+        if not self._authorized(parsed.query):
+            self._json(403, {"error": "bad or missing token"})
+            return
+        self._json(404, {"error": "not found"})
+
+    def _read_json(self) -> dict | None:
+        """The request body, or None having already answered with an error."""
+        if self.headers.get_content_type() != "application/json":
+            # A cross-origin fetch with this content type triggers a CORS
+            # preflight this server never answers, so the browser does not
+            # send the POST at all; an HTML form cannot set it either.
+            self._json(415, {"error": "expected application/json"})
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json(400, {"error": "bad content length"})
+            return None
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._json(413, {"error": f"the body must be 1..{MAX_BODY_BYTES} bytes"})
+            return None
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._json(400, {"error": "expected a JSON object"})
+            return None
+        return payload if isinstance(payload, dict) else None
+
+
+class _SetupServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, address, handler, path: Path, home: Path, token: str):
+        # Setup mode binds loopback unconditionally, whatever an existing
+        # config says: with no config there is no web_token to authenticate
+        # against, so the network barrier cannot be the only one.
+        self.cfg = Config(repo=Path("."), web_host="127.0.0.1", web_token=token)
+        self.path = path
+        self.home = home
+        self.saved = threading.Event()
+        self.existing = _read_existing(path)
+        super().__init__(address, handler)
+
+
+def _read_existing(path: Path) -> dict:
+    """The current config as raw TOML data, or {} on a first run.
+
+    Read as data, not through load_config: a config that no longer validates
+    -- a repo that moved, a settings_file that was deleted -- is exactly the
+    one an operator is opening the wizard to fix.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def serve(path: Path, home: Path, port: int, token: str) -> _SetupServer:
+    server = _SetupServer(("127.0.0.1", port), Handler, path, home, token)
+    threading.Thread(
+        target=server.serve_forever, name="claudeloop-setup", daemon=True
+    ).start()
+    return server
+
+
+def run_setup(path: Path = DEFAULT_CONFIG, home: Path = HOME, port: int = 8765) -> None:
+    """Serve the wizard until it has written a valid config, then return.
+
+    Blocking on purpose: main() calls this and then falls through into the
+    ordinary startup path, so the config the loop runs is the one the
+    ordinary loader read back off disk.
+    """
+    token = secrets.token_urlsafe(32)
+    server = serve(path, home, port, token)
+    url = f"http://127.0.0.1:{server.server_port}/?token={token}"
+    log.warning("ClaudeLoop is not configured yet. Open the setup wizard:\n\n    %s\n", url)
+    try:
+        server.saved.wait()
+    except KeyboardInterrupt:
+        raise SystemExit("setup cancelled")
+    finally:
+        server.shutdown()
+        server.server_close()
