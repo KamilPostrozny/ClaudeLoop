@@ -22,6 +22,7 @@ from claudeloop.loop import (
     Resume,
     blocking_reset,
     decide,
+    main,
     read_result,
     sleep_delay,
     total_cost,
@@ -1380,6 +1381,45 @@ class MainSetupTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             loop.main([])
         self.assertEqual(self.calls, [])
+
+
+class MainReconcilesPluginsTest(unittest.TestCase):
+    """main() must refuse to start on a box that could not get the plugins
+    the operator chose -- the same treatment worktree.probe gets, and for
+    the same reason: otherwise every task runs in a shape nobody asked for."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_a_plugin_problem_stops_startup_before_the_dashboard_binds(self):
+        with unittest.mock.patch("claudeloop.loop.load_config") as load, \
+             unittest.mock.patch("claudeloop.worktree.probe", return_value=None), \
+             unittest.mock.patch("claudeloop.plugins.reconcile",
+                                 return_value="marketplace unreachable") as reconcile, \
+             unittest.mock.patch("claudeloop.loop._serve_dashboard") as serve, \
+             unittest.mock.patch("claudeloop.loop.DEFAULT_CONFIG") as config_path:
+            config_path.exists.return_value = True
+            load.return_value = Config(repo=self.tmp, tasks_file=self.tmp / "t.md",
+                                       home=self.tmp, plugins=("caveman",))
+            with self.assertRaises(SystemExit) as raised:
+                main([])
+        self.assertIn("marketplace unreachable", str(raised.exception))
+        reconcile.assert_called_once_with(("caveman",))
+        serve.assert_not_called()
+
+    def test_a_clean_reconcile_lets_startup_continue(self):
+        with unittest.mock.patch("claudeloop.loop.load_config") as load, \
+             unittest.mock.patch("claudeloop.worktree.probe", return_value=None), \
+             unittest.mock.patch("claudeloop.plugins.reconcile", return_value=None), \
+             unittest.mock.patch("claudeloop.loop._serve_dashboard") as serve, \
+             unittest.mock.patch("claudeloop.loop.asyncio.run") as run, \
+             unittest.mock.patch("claudeloop.loop.DEFAULT_CONFIG") as config_path:
+            config_path.exists.return_value = True
+            load.return_value = Config(repo=self.tmp, tasks_file=self.tmp / "t.md",
+                                       home=self.tmp, plugins=("caveman",))
+            main([])
+        serve.assert_called_once()
+        run.assert_called_once()
 
 
 if __name__ == "__main__":

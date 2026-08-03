@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import plugins
 from . import session
 from . import setup
 from . import status as status_module
@@ -659,6 +660,14 @@ def main(argv: list[str] | None = None) -> None:
     # worktrees would otherwise fail every task in turn, one paid session at
     # a time, instead of saying so once.
     problem = worktree.probe(cfg.repo)
+    if problem:
+        raise SystemExit(problem)
+    # Same treatment, same reason: a box that could not get the plugins the
+    # operator selected would otherwise run every task with a system prompt
+    # describing tools the session does not have. Nothing runs here when
+    # `plugins` is empty, and nothing touches the network when the box
+    # already matches.
+    problem = plugins.reconcile(cfg.plugins)
     if problem:
         raise SystemExit(problem)
     # After the config validates, so a non-loopback bind with no token fails
