@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ClaudeLoop setup</title>
+<link rel="icon" id="favicon">
+<style>
+/* ---------------------------------------------------------------- tokens */
+/* Copied verbatim from static/index.html -- same product, same look. */
+:root {
+  --bg: #FDF4EC;
+  --surface: #FFFFFF;
+  --sunken: #FBF2E9;
+  --line: rgba(36, 45, 55, .14);
+  --text: #242D37;
+  --muted: #6B7885;
+  --accent: #FD7C33;      /* fills, rules, the meter                        */
+  --accent-ink: #C4551A;  /* #FD7C33 is 2.6:1 on white and fails as type    */
+  --chip: #FBE3CD;        /* the logo's own peach: the PNG has no alpha     */
+  --ok: #17805A;
+  --warn: #9A6B00;
+  --bad: #C0203F;
+  --idle: #6B7885;
+  --shadow: 0 1px 2px rgba(36, 45, 55, .06), 0 8px 24px rgba(36, 45, 55, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1B222B;
+    --surface: #242D37;
+    --sunken: #1F2731;
+    --line: rgba(242, 232, 224, .12);
+    --text: #F2E8E0;
+    --muted: #9AA6B2;
+    --accent: #FD7C33;
+    --accent-ink: #FD7C33;  /* ~5.5:1 on #242D37, so the brand hue holds    */
+    --chip: #F7E2CE;
+    --ok: #4ECB8D;
+    --warn: #E8B44A;
+    --bad: #F2726B;
+    --idle: #9AA6B2;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1B222B;
+  --surface: #242D37;
+  --sunken: #1F2731;
+  --line: rgba(242, 232, 224, .12);
+  --text: #F2E8E0;
+  --muted: #9AA6B2;
+  --accent: #FD7C33;
+  --accent-ink: #FD7C33;
+  --chip: #F7E2CE;
+  --ok: #4ECB8D;
+  --warn: #E8B44A;
+  --bad: #F2726B;
+  --idle: #9AA6B2;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+}
+:root {
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  padding: 2rem 1rem 4rem;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+main { max-width: 46rem; margin: 0 auto; }
+
+header.page {
+  display: flex; align-items: center; gap: 11px; margin-bottom: 1.5rem;
+}
+.chip {
+  width: 38px; height: 38px; flex: none;
+  border-radius: 11px; overflow: hidden;
+  background: var(--chip);
+  box-shadow: inset 0 0 0 1px rgba(36, 45, 55, .10);
+}
+.chip img { width: 100%; height: 100%; display: block; object-fit: cover; }
+h1 {
+  font: 600 18px/1 var(--mono);
+  letter-spacing: -.02em;
+  margin: 0;
+}
+h1 b { color: var(--accent-ink); font-weight: 600; }
+h1 small {
+  display: block; margin-top: 5px;
+  font: 400 9.5px/1 var(--mono);
+  letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
+}
+
+nav#steps { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
+nav#steps button {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+  padding: .3rem .9rem; color: var(--muted); cursor: pointer; font: inherit;
+}
+nav#steps button[aria-current="step"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+nav#steps button:disabled { cursor: default; opacity: .55; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 1.25rem 1.25rem .25rem;
+  margin-bottom: 1.25rem;
+}
+
+.field { margin-bottom: 1.25rem; }
+.field label { display: block; font-weight: 600; }
+.field .help { color: var(--muted); font-size: .875rem; margin: .15rem 0 .4rem; }
+.field input[type="text"], .field input[type="password"], .field select {
+  width: 100%; padding: .5rem; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--sunken);
+  color: var(--text); font: inherit;
+}
+.field input[type="checkbox"] { width: 1.1rem; height: 1.1rem; vertical-align: middle; }
+.field .error { color: var(--bad); font-size: .875rem; margin-top: .35rem; }
+.field.bad input, .field.bad select { border-color: var(--bad); }
+
+.check { display: flex; align-items: center; gap: .75rem; margin-top: .5rem; }
+.result { font-size: .875rem; margin: 0; }
+.result.ok { color: var(--ok); }
+.result.bad { color: var(--bad); }
+
+button {
+  font: inherit; cursor: pointer; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+  padding: .5rem 1rem;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+button:disabled { opacity: .5; cursor: default; }
+
+.actions { display: flex; gap: .75rem; align-items: center; margin: 1.5rem 0; }
+#message { color: var(--muted); font-size: .9rem; }
+#message.bad { color: var(--bad); }
+
+dl.review { margin: 0; padding: 0 0 1rem; }
+dl.review > div {
+  display: flex; gap: 1rem; padding: .5rem 0; border-top: 1px solid var(--line);
+}
+dl.review > div:first-child { border-top: none; }
+dl.review dt { flex: 0 0 14rem; color: var(--muted); overflow-wrap: anywhere; }
+dl.review dd { margin: 0; overflow-wrap: anywhere; }
+
+.env-row { display: flex; gap: .5rem; margin-bottom: .6rem; align-items: center; }
+.env-row input {
+  flex: 1; padding: .5rem; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--sunken); color: var(--text); font: inherit;
+}
+.env-row button { flex: none; padding: .4rem .7rem; }
+
+.done-panel { text-align: center; padding: 3rem 1rem; }
+.done-panel code {
+  font: 600 15px/1 var(--mono); background: var(--sunken);
+  border: 1px solid var(--line); border-radius: 6px; padding: .2rem .5rem;
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="page">
+    <span class="chip"><img id="logo" alt=""></span>
+    <h1>Claude<b>Loop</b><small>Setup</small></h1>
+  </header>
+
+  <noscript>
+    <p>This wizard needs JavaScript. Its six steps are: Repository,
+    Task source, Dashboard, Instructions, Advanced, and Review and save.</p>
+  </noscript>
+
+  <nav id="steps" aria-label="Setup steps"></nav>
+  <form id="form" novalidate></form>
+  <p id="message" role="status"></p>
+  <div class="actions">
+    <button type="button" id="back">Back</button>
+    <button type="button" id="next" class="primary">Next</button>
+  </div>
+</main>
+<script type="module">
+const token = new URLSearchParams(location.search).get("token") || "";
+const url = (route) => route + "?token=" + encodeURIComponent(token);
+
+// Static markup left these bare: an href/src attribute fires before this
+// script runs and would 403, since setup mode always sets a non-empty
+// web_token and every route -- including /logo.png -- is token-gated.
+document.getElementById("favicon").href = url("/logo.png");
+document.getElementById("logo").src = url("/logo.png");
+
+const api = async (route, body) => {
+  const response = await fetch(url(route), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.json();
+};
+
+const schema = await (await fetch(url("/api/setup/schema"))).json();
+const draft = structuredClone(schema.values);
+const env = structuredClone(schema.session_env);
+let step = 0;
+
+const put = (key, value) => {
+  const field = schema.fields.find((f) => f.key === key);
+  const table = field.section ? (draft[field.section] ||= {}) : draft;
+  table[field.name] = value;
+};
+
+// What the operator has actually set. Undefined for a field they have not
+// touched, which is exactly what a text input's `value` must reflect: see
+// `get` below for why the two cannot be the same accessor.
+const drafted = (key) => {
+  const field = schema.fields.find((f) => f.key === key);
+  if (!field) return undefined;
+  const table = field.section ? draft[field.section] || {} : draft;
+  return table[field.name];
+};
+
+const get = (key) => {
+  const field = schema.fields.find((f) => f.key === key);
+  if (!field) return "";
+  // Falls back to the schema default, because the server does: validate()
+  // fills every absent key with it before checking required_if. Without
+  // this the page believes an untouched `source` is "" while the server
+  // believes it is "file" -- so tasks_file never renders, and a first run
+  // could not be completed at all.
+  //
+  // This is for *logic* -- which fields are visible, what a select or a
+  // checkbox shows. A text input must not bind its `value` to it: doing so
+  // put the default in the box as real text, and typing "haiku" into a
+  // Model field already reading "opus" produced "opushaiku", which
+  // validate() accepts because model is a free string. Text inputs use
+  // `drafted` for the value and show the default as a placeholder instead.
+  return drafted(key) ?? field.default ?? "";
+};
+
+const payload = () => ({ ...draft, session_env: env });
+
+// The keys actually rendered on the current screen -- recomputed by every
+// render(). A field's declared `step` alone is not enough to know whether
+// it is on screen right now: the [jira] block and tasks_file are also
+// gated on `source`, so an error on a hidden field must not be judged
+// against this set, or it can block Next with no visible way to fix it.
+let visibleFields = new Set();
+
+function render(errors = {}) {
+  renderNav();
+
+  const current = schema.steps[step].id;
+  const form = document.getElementById("form");
+  form.replaceChildren();
+  visibleFields = new Set();
+
+  if (current === "review") {
+    form.append(renderReview(errors));
+  } else {
+    const card = document.createElement("div");
+    card.className = "card";
+    for (const field of schema.fields) {
+      if (field.step !== current) continue;
+      // The [jira] block only means anything once source = "jira"; the
+      // tasks-file field only under source = "file".
+      if (field.section === "jira" && get("source") !== "jira") continue;
+      if (field.name === "tasks_file" && get("source") !== "file") continue;
+      visibleFields.add(field.key);
+      card.append(renderField(field, errors[field.key]));
+    }
+    if (current === "advanced") card.append(renderEnvRows());
+    form.append(card);
+  }
+
+  document.getElementById("back").disabled = step === 0;
+  const isLast = step === schema.steps.length - 1;
+  document.getElementById("next").textContent = isLast ? "Save" : "Next";
+}
+
+function renderNav() {
+  document.getElementById("steps").replaceChildren(...schema.steps.map((s, i) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = s.title;
+    if (i === step) button.setAttribute("aria-current", "step");
+    // Editing an existing config: jumping straight to the one key you came
+    // to change should not be a five-click walk. On a first run the
+    // operator walks forward one screen at a time.
+    button.disabled = !schema.editing && i > step;
+    button.onclick = () => { step = i; render(); };
+    return button;
+  }));
+}
+
+function renderField(field, error) {
+  const wrap = document.createElement("div");
+  wrap.className = "field" + (error ? " bad" : "");
+  const label = document.createElement("label");
+  label.textContent = field.label + (field.required ? " *" : "");
+  label.htmlFor = field.key;
+  const help = document.createElement("p");
+  help.className = "help";
+  const helpId = field.key + "-help";
+  help.id = helpId;
+  help.textContent = field.help;
+  const describedBy = [helpId];
+
+  let input;
+  if (field.type === "choice") {
+    input = document.createElement("select");
+    input.append(...field.choices.map((choice) => new Option(choice, choice)));
+    input.value = get(field.key);
+  } else if (field.type === "bool") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    // get() resolves an absent value to field.default itself now (using ??,
+    // which only substitutes on null/undefined) -- a real `false` still
+    // reads as unchecked, and a `true` default now reads as checked even
+    // before the operator ever touches this field.
+    input.checked = Boolean(get(field.key));
+  } else {
+    input = document.createElement("input");
+    input.type = field.secret ? "password" : "text";
+    // `drafted`, not `get`: only what the operator actually set belongs in
+    // the box. A default rendered as real text is one the operator types
+    // over the top of rather than replacing.
+    input.value = drafted(field.key) ?? "";
+    if (field.secret && schema.secrets_set.includes(field.key)) {
+      input.placeholder = "set — leave blank to keep";
+    } else if (field.default !== null && field.default !== undefined) {
+      // Greyed, so it reads as "this is what you get if you leave it alone"
+      // rather than as a value already entered.
+      input.placeholder = String(field.default);
+    }
+  }
+  input.id = field.key;
+  input.oninput = () => put(field.key, field.type === "bool" ? input.checked : input.value);
+  input.onchange = input.oninput;
+  // source drives which fields exist at all, so redraw the whole screen.
+  if (field.key === "source") {
+    input.onchange = () => { put(field.key, input.value); render(); };
+  }
+
+  wrap.append(label, help, input);
+
+  if (error) {
+    const message = document.createElement("p");
+    message.className = "error";
+    const errorId = field.key + "-error";
+    message.id = errorId;
+    message.textContent = error;
+    describedBy.push(errorId);
+    wrap.append(message);
+  }
+  input.setAttribute("aria-describedby", describedBy.join(" "));
+  if (field.required) input.setAttribute("aria-required", "true");
+
+  if (field.key === "repo") wrap.append(testButton("repo", "Check this repository"));
+  if (field.key === "token" && field.section === "jira") {
+    wrap.append(testButton("jira", "Test the Jira connection"));
+  }
+  return wrap;
+}
+
+function testButton(what, label) {
+  const wrap = document.createElement("div");
+  wrap.className = "check";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  const result = document.createElement("p");
+  result.className = "result";
+  result.setAttribute("role", "status");
+  button.onclick = async () => {
+    result.textContent = "Checking…";
+    result.className = "result";
+    button.disabled = true;
+    try {
+      const answer = await api("/api/setup/test", { what, values: payload() });
+      result.textContent = answer.message;
+      result.className = "result " + (answer.ok ? "ok" : "bad");
+    } finally {
+      button.disabled = false;
+    }
+  };
+  wrap.append(button, result);
+  return wrap;
+}
+
+function renderEnvRows() {
+  const box = document.createElement("div");
+  const label = document.createElement("p");
+  label.textContent = "Extra environment variables for every session";
+  label.style.fontWeight = "600";
+  box.append(label);
+  const help = document.createElement("p");
+  help.className = "help";
+  help.textContent = "Applied to every claude session this loop runs, for things like GH_TOKEN.";
+  box.append(help);
+
+  const rows = document.createElement("div");
+  const names = Object.keys(env);
+  if (!names.length) names.push("");
+
+  for (const name of names) {
+    rows.append(envRow(name, name ? env[name] : ""));
+  }
+  box.append(rows);
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "Add variable";
+  add.onclick = () => { rows.append(envRow("", "")); };
+  box.append(add);
+  return box;
+}
+
+function envRow(name, value) {
+  const row = document.createElement("div");
+  row.className = "env-row";
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "NAME";
+  nameInput.value = name;
+  nameInput.setAttribute("aria-label", "Environment variable name");
+
+  const valueInput = document.createElement("input");
+  valueInput.type = "text";
+  valueInput.placeholder = "value";
+  valueInput.value = value;
+  valueInput.setAttribute("aria-label", "Environment variable value");
+
+  // Takes the container explicitly rather than reading row.parentElement
+  // itself: on removal the row is detached *before* syncing, so by then
+  // row.parentElement is already null and there would be nothing left to
+  // rebuild from but the removed row.
+  const sync = (container) => {
+    // Rebuild the whole table from the rows currently on screen: simplest
+    // way to keep a rename from silently duplicating the old key.
+    for (const key of Object.keys(env)) delete env[key];
+    for (const r of container.children) {
+      const [n, v] = r.querySelectorAll("input");
+      if (n.value.trim()) env[n.value.trim()] = v.value;
+    }
+  };
+  nameInput.oninput = () => sync(row.parentElement);
+  valueInput.oninput = () => sync(row.parentElement);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.setAttribute("aria-label", "Remove this variable");
+  remove.onclick = () => { const list = row.parentElement; row.remove(); sync(list); };
+
+  row.append(nameInput, valueInput, remove);
+  return row;
+}
+
+function renderReview(errors = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+
+  // A failed save answers with every error at once -- unlike the per-step
+  // Next flow, there is no single screen left to walk back to, so every
+  // one has to surface here, named by field and by which step holds it.
+  const problems = Object.entries(errors);
+  if (problems.length) {
+    const box = document.createElement("div");
+    for (const [key, message] of problems) {
+      const field = schema.fields.find((f) => f.key === key);
+      const stepTitle = field
+        ? (schema.steps.find((s) => s.id === field.step) || {}).title || field.step
+        : "";
+      const line = document.createElement("p");
+      line.className = "error";
+      line.textContent = field
+        ? `${field.label} (${stepTitle}): ${message}`
+        : `${key}: ${message}`;
+      box.append(line);
+    }
+    wrap.append(box);
+  }
+
+  // get() now resolves an untouched field to its schema default, so this
+  // list is the effective configuration ClaudeLoop will run with -- not a
+  // preview of what Save is about to write. Only what the operator actually
+  // changed lands in the file; everything else keeps tracking this
+  // version's default for free on the next upgrade. Said explicitly here so
+  // a defaulted row (e.g. "Model: opus") doesn't read as "this is about to
+  // be pinned to your file".
+  const note = document.createElement("p");
+  note.className = "help";
+  note.textContent =
+    "The effective configuration, including defaults you haven't changed. " +
+    "Only what you actually set here is written to the file.";
+  wrap.append(note);
+
+  const list = document.createElement("dl");
+  list.className = "review";
+  for (const field of schema.fields) {
+    const value = get(field.key);
+    if (value === "" || value === null || value === undefined) continue;
+    if (field.section === "jira" && get("source") !== "jira") continue;
+    if (field.name === "tasks_file" && get("source") !== "file") continue;
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = field.label;
+    const definition = document.createElement("dd");
+    definition.textContent = field.secret ? "••••••" : String(value);
+    row.append(term, definition);
+    list.append(row);
+  }
+  wrap.append(list);
+  if (Object.keys(env).length) {
+    const envTerm = document.createElement("p");
+    envTerm.style.color = "var(--muted)";
+    envTerm.textContent = "session_env: " + Object.keys(env).join(", ");
+    wrap.append(envTerm);
+  }
+  wrap.append(testButton("claude", "Check the Claude CLI"));
+  return wrap;
+}
+
+document.getElementById("back").onclick = () => {
+  if (step > 0) { step -= 1; render(); }
+};
+
+document.getElementById("next").onclick = async () => {
+  const message = document.getElementById("message");
+  const last = step === schema.steps.length - 1;
+  if (last) {
+    const answer = await api("/api/setup/save", { values: payload() });
+    if (answer.ok) {
+      // No automatic redirect: the setup server shuts down as the dashboard
+      // binds, so a redirect races it -- and a redirect carrying a
+      // freshly-set web_token in its query string would write that token
+      // into browser history.
+      const host = get("web_host") || "127.0.0.1";
+      const port = get("web_port") || "8765";
+      document.body.replaceChildren();
+      const done = document.createElement("main");
+      done.className = "done-panel";
+      const h = document.createElement("h1");
+      h.textContent = "Saved";
+      const p = document.createElement("p");
+      p.append("ClaudeLoop is starting. The dashboard will be at ");
+      const code = document.createElement("code");
+      code.textContent = `http://${host}:${port}/`;
+      p.append(code, ".");
+      done.append(h, p);
+      document.body.append(done);
+      return;
+    }
+    if (answer.error) {
+      // A 500 (e.g. the config could not be written) carries "error", not
+      // "errors" -- there is no field to blame, so show it verbatim rather
+      // than the generic "fix the errors above" when nothing is rendered.
+      message.className = "bad";
+      message.textContent = answer.error;
+      return;
+    }
+    render(answer.errors || {});
+    message.className = "bad";
+    message.textContent = "Fix the errors above before saving.";
+    return;
+  }
+  const answer = await api("/api/setup/validate", { values: payload() });
+  const errors = answer.errors || {};
+  // Judged against what this screen actually rendered, not just its
+  // declared step: the [jira] block and tasks_file are also gated on
+  // `source`, so an error on a field this screen hid must not block Next --
+  // it would have nowhere visible to be fixed. It still surfaces on Review.
+  const mine = Object.fromEntries(
+    Object.entries(errors).filter(([key]) => visibleFields.has(key))
+  );
+  // Only this screen's errors block advancing: a later screen's unfilled
+  // requirement must never trap the operator on an earlier one.
+  if (Object.keys(mine).length) {
+    render(mine);
+    message.className = "bad";
+    message.textContent = "Fix the errors on this screen before moving on.";
+    return;
+  }
+  step += 1;
+  message.className = "";
+  message.textContent = "";
+  render();
+};
+
+render();
+</script>
+</body>
+</html>

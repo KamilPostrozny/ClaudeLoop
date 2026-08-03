@@ -39,6 +39,7 @@ temptation to add workflow logic here.
 | `source.py` | `Task`, the `TaskSource` protocol, `FileSource` over a markdown checklist |
 | `state.py` | SQLite record of what happened. Not the source of truth for what is pending |
 | `config.py` | Loads and validates `config.toml` |
+| `setup.py` | Setup mode: the schema-rendered wizard and the TOML writer. Runs only when the loop does not |
 | `status.py` | The one value crossing the loop/web-thread boundary |
 | `render.py` | Raw `stream-json` events to compact display entries. Pure |
 | `web.py` | The dashboard's HTTP surface, routes, SSE pump |
@@ -48,6 +49,13 @@ The pure modules — `prompt.py`, `render.py`, and `decide`/`blocking_reset` in
 `loop.py` — are pure on purpose: they hold the logic that would otherwise be
 untestable behind a subprocess or a socket. Keep new logic in that shape where
 you can.
+
+`config.py`'s `SCHEMA` tuple's declaration order is load-bearing: a field's
+`required_if` and `check` are only ever called with the coerced values of
+fields declared earlier in the tuple, not the whole submission. `tasks_file`'s
+check reads `repo`, `web_token`'s condition reads `web_host`, `jira.project`'s
+reads `jira.jql` — moving a field earlier than something it depends on breaks
+silently, since Python doesn't enforce it.
 
 ## Hard constraints
 
@@ -64,7 +72,16 @@ deliberate decision recorded in a spec.
   loop's state, the task file, or the database. S2b broke the rule
   deliberately and narrowly: `POST /api/tasks/<id>/answer` writes one file,
   `runs/<id>/answer.json`, which the loop reads and consumes. Any further
-  write needs the same justification — S5's setup wizard is the next one.
+  write needs the same justification. S5's setup wizard is not that further
+  exception — it isn't the dashboard at all. Setup mode is a **separate
+  server**, running only while the loop is not: `main()` calls
+  `setup.run_setup()` and blocks before the dashboard or the loop ever starts,
+  so the two never run in the same process at once. It binds `127.0.0.1`
+  unconditionally, ignoring whatever `web_host` says, and requires a
+  one-time token printed to the console on every request — with no config
+  yet there is no `web_token` to authenticate against, so that barrier can't
+  be the only one. It writes exactly one file, `config.toml`, and only once
+  a full `validate()` pass has approved it.
 - **The web layer never touches the loop's objects.** Its SQLite connection is
   its own and opened read-only; event logs are read from disk.
 - **The web layer is never a second writer to `status.py`.** `set_status` is a

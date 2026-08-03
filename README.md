@@ -17,6 +17,41 @@ Python 3.11 or newer, the Claude Code CLI on `PATH`, already authenticated
 cleanup uses `git worktree remove` from 2.17 and anything older just leaves
 finished worktrees on disk. No Python packages to install.
 
+## Setup
+
+`python -m claudeloop` with no config file prints a loopback URL carrying a
+one-time token instead of exiting. Open it and a six-screen wizard —
+Repository, Task source, Dashboard, Instructions, Advanced, Review and save —
+writes `~/.claudeloop/config.toml` for you, at `0600`.
+
+`python -m claudeloop --setup` reopens the wizard against an existing config.
+Secret fields (`web_token`, `jira.token`, every `[session_env]` value) come
+back blank, marked *set — leave blank to keep*: leave one blank to keep the
+stored value, type in it to replace it. It never sends a secret to the
+browser to begin with.
+
+The wizard binds `127.0.0.1` regardless of what `web_host` says, and the
+one-time token is required on every request, page load included — with no
+config yet there is no `web_token` to check requests against, so the network
+barrier can't be the only one.
+
+It can check three things live, on demand: that `repo` is a repository `git`
+can make worktrees in, that the configured Jira query gets a real answer
+(rather than the empty-backlog result a bad token, an unreachable site, and a
+rejected JQL all produce identically), and that the `claude` CLI is installed,
+signed in, and — under whatever `[session_env]` you've set — still billing to
+your subscription rather than a stray API key.
+
+Hand-editing `config.toml` still works and is documented below; the wizard
+writes the same file, and the same table of keys that validates it also
+supplies the `#` comments above each one.
+
+**With no config file and no `--setup`, `python -m claudeloop` now blocks on
+the wizard instead of exiting.** A `systemd` unit with `Restart=on-failure`,
+or the S4 addon, whose config goes missing will hang holding the loopback
+socket rather than crash-looping visibly — worth knowing before you find out
+at 3am that the service is "up" and doing nothing.
+
 ## Configure
 
 `~/.claudeloop/config.toml`:
@@ -46,6 +81,11 @@ must be `chmod 600`; ClaudeLoop refuses to load it otherwise.
 
 One instance serves one repository. For a second repository, run a second
 instance with its own config.
+
+The `#` comments in a wizard-written file aren't hand-maintained: they come
+from the same table of `Field`s that `load_config` validates every key
+against, so a key's help text and its validation rule can never drift apart
+the way two hand-written copies could.
 
 ## Taking tasks from Jira
 
