@@ -13,6 +13,7 @@ from pathlib import Path
 
 from claudeloop import setup
 from claudeloop.config import load_config
+from claudeloop.setup import STEPS, dump_toml, schema_payload
 
 from .gitrepo import make_repo      # a real repo, one commit on main, gpgsign off
 from .jira_fake import FakeJira     # routes {"POST /search/jql": (status, body)}
@@ -123,6 +124,36 @@ class DumpTomlTest(unittest.TestCase):
         self.assertEqual(cfg.repo, self.repo)
         self.assertEqual(cfg.model, "haiku")
         self.assertEqual(cfg.web_port, 9000)
+
+
+class PluginsStepTest(unittest.TestCase):
+    def test_the_wizard_has_a_plugins_step_before_advanced(self):
+        ids = [step["id"] for step in STEPS]
+        self.assertIn("plugins", ids)
+        self.assertLess(ids.index("plugins"), ids.index("advanced"))
+        self.assertLess(ids.index("instructions"), ids.index("plugins"))
+
+    def test_the_schema_payload_carries_the_proposed_set(self):
+        payload = schema_payload({})
+        names = [entry["name"] for entry in payload["proposed"]]
+        self.assertEqual(names, ["superpowers", "caveman", "ponytail"])
+        for entry in payload["proposed"]:
+            self.assertTrue(entry["reason"])
+
+    def test_dump_toml_writes_a_plugins_array_that_reads_back(self):
+        text = dump_toml({"repo": "/tmp/r", "plugins": ["superpowers", "caveman"]})
+        self.assertIn('plugins = ["superpowers", "caveman"]', text)
+        self.assertEqual(tomllib.loads(text)["plugins"], ["superpowers", "caveman"])
+
+    def test_dump_toml_omits_an_empty_selection(self):
+        # `plugins = []` would be a key that says nothing, and every other
+        # unset key is left out too.
+        text = dump_toml({"repo": "/tmp/r", "plugins": []})
+        self.assertNotIn("plugins", text)
+
+    def test_dump_toml_escapes_a_plugin_name_like_any_other_string(self):
+        text = dump_toml({"repo": "/tmp/r", "plugins": ['odd"name@m']})
+        self.assertEqual(tomllib.loads(text)["plugins"], ['odd"name@m'])
 
 
 class SetupServerBase(unittest.TestCase):
@@ -829,3 +860,12 @@ class WizardPageTest(SetupServerBase):
         # message must reach the operator rather than the generic line.
         page = self.get("/")[1].decode()
         self.assertIn("answer.error", page)
+
+    def test_the_page_renders_a_list_field_as_checkboxes(self):
+        page = (Path(__file__).parent.parent / "claudeloop" / "static"
+                / "setup.html").read_text()
+        self.assertIn('field.type === "list"', page)
+        self.assertIn("schema.proposed", page)
+        # The escape hatch for a plugin outside the set. Without it the only
+        # way to use one is hand-editing the file the wizard exists to avoid.
+        self.assertIn("plugin@marketplace", page)
