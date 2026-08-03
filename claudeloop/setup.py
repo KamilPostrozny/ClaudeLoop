@@ -23,7 +23,8 @@ from urllib.parse import urlparse
 from . import plugins as plugins_module
 from . import web, worktree
 from .config import (
-    DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, is_url, validate,
+    DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, bind_address,
+    ingress, is_url, validate,
 )
 from .jira import JiraClient, JiraError, compose_jql
 
@@ -540,7 +541,11 @@ class _SetupServer(ThreadingHTTPServer):
     def __init__(self, address, handler, path: Path, home: Path, token: str):
         # Setup mode binds loopback unconditionally, whatever an existing
         # config says: with no config there is no web_token to authenticate
-        # against, so the network barrier cannot be the only one.
+        # against, so the network barrier cannot be the only one. Under Home
+        # Assistant ingress both barriers are replaced by one that is
+        # stronger than either -- the supervisor authenticates a real user,
+        # and nothing is published to the host at all -- so bind_address
+        # moves the bind and web.Handler skips the token. See the S4 spec.
         self.cfg = Config(repo=Path("."), web_host="127.0.0.1", web_token=token, home=home)
         self.path = path
         self.home = home
@@ -564,7 +569,7 @@ def _read_existing(path: Path) -> dict:
 
 
 def serve(path: Path, home: Path, port: int, token: str) -> _SetupServer:
-    server = _SetupServer(("127.0.0.1", port), Handler, path, home, token)
+    server = _SetupServer(bind_address("127.0.0.1", port), Handler, path, home, token)
     threading.Thread(
         target=server.serve_forever, name="claudeloop-setup", daemon=True
     ).start()
@@ -580,13 +585,21 @@ def run_setup(path: Path = DEFAULT_CONFIG, home: Path = HOME, port: int = 8765) 
     """
     token = secrets.token_urlsafe(32)
     server = serve(path, home, port, token)
-    url = f"http://127.0.0.1:{server.server_port}/?token={token}"
     opening = (
         "Editing the ClaudeLoop configuration"
         if server.existing
         else "ClaudeLoop is not configured yet"
     )
-    log.warning("%s. Open the setup wizard:\n\n    %s\n", opening, url)
+    # Under ingress there is no URL worth printing: the operator reaches the
+    # wizard by clicking the add-on's Web UI, on a path only the supervisor
+    # knows, and cannot append a query string to it either.
+    where = (
+        "Open the ClaudeLoop add-on from the Home Assistant sidebar."
+        if ingress()
+        else f"Open the setup wizard:\n\n    http://127.0.0.1:{server.server_port}"
+             f"/?token={token}\n"
+    )
+    log.warning("%s. %s", opening, where)
     try:
         server.saved.wait()
     except KeyboardInterrupt:

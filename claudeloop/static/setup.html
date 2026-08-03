@@ -197,7 +197,13 @@ dl.review dd { margin: 0; overflow-wrap: anywhere; }
 </main>
 <script type="module">
 const token = new URLSearchParams(location.search).get("token") || "";
-const url = (route) => route + "?token=" + encodeURIComponent(token);
+// "" when this page is served from "/", the ingress prefix when Home Assistant
+// serves it from "/api/hassio_ingress/<session>/" -- where an absolute route
+// would escape to Home Assistant itself. The supervisor strips the prefix
+// before proxying, so the server sees the same routes either way, and under
+// ingress it does not check the token at all.
+const base = location.pathname.replace(/\/[^/]*$/, "");
+const url = (route) => base + route + "?token=" + encodeURIComponent(token);
 
 // Static markup left these bare: an href/src attribute fires before this
 // script runs and would 403, since setup mode always sets a non-empty

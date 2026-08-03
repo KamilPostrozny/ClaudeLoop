@@ -11,8 +11,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from unittest import mock
+
 from claudeloop import setup
-from claudeloop.config import load_config
+from claudeloop.config import INGRESS_ENV, load_config
 from claudeloop.setup import STEPS, dump_toml, schema_payload
 
 from .gitrepo import make_repo      # a real repo, one commit on main, gpgsign off
@@ -278,6 +280,53 @@ class FirstRunTest(SetupServerBase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             self.get("/nope")
         self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
+
+
+class IngressTest(SetupServerBase):
+    """S5's two barriers are the loopback bind and the one-time console
+    token. Under ingress both are replaced by supervisor authentication --
+    which the operator has already passed, and which is the only reason the
+    token can go: there is no query string to put it in on a sidebar link.
+    See the S4 spec.
+
+    The variable is set after serve(), because it is read per request; the
+    bind half is pinned by IngressTest in tests/test_config.py."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.dict(os.environ, {INGRESS_ENV: "1"}))
+
+    def test_the_page_is_served_with_no_token_at_all(self):
+        code, _ = self.get("/", token=None)
+        self.assertEqual(code, 200)
+
+    def test_the_schema_route_is_served_with_no_token_at_all(self):
+        code, body = self.get("/api/setup/schema", token=None)
+        self.assertEqual(code, 200)
+        self.assertIn("repo", [field["key"] for field in json.loads(body)["fields"]])
+
+    def test_a_save_is_accepted_with_no_token_at_all(self):
+        code, payload = self.post(
+            "/api/setup/save",
+            {"values": {"repo": str(self.repo), "tasks_file": str(self.tmp / "t.md")}},
+            token=None,
+        )
+        self.assertEqual((code, payload.get("errors", {})), (200, {}))
+        self.assertTrue(self.path.exists())
+
+    def test_home_assistants_own_host_header_is_accepted(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_port, timeout=5)
+        self.addCleanup(connection.close)
+        connection.request("GET", "/", headers={"Host": "homeassistant.local:8123"})
+        self.assertEqual(connection.getresponse().status, 200)
+
+    def test_both_barriers_come_back_without_the_variable(self):
+        os.environ.pop(INGRESS_ENV)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/", token=None)
+        self.assertEqual(caught.exception.code, 403)
         caught.exception.close()
 
 

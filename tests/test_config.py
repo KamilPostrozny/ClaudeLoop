@@ -1,8 +1,22 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from claudeloop.config import SCHEMA, Config, Field, JiraConfig, load_config, validate
+from claudeloop.config import (
+    INGRESS_ENV,
+    INGRESS_HOST,
+    INGRESS_PORT,
+    SCHEMA,
+    Config,
+    Field,
+    JiraConfig,
+    bind_address,
+    ingress,
+    load_config,
+    validate,
+)
 
 
 class ConfigTest(unittest.TestCase):
@@ -137,6 +151,29 @@ class ConfigTest(unittest.TestCase):
         )
         cfg = load_config(path, home=self.tmp / "home")
         self.assertEqual(cfg.tasks_file, self.tmp / "tasks.md")
+
+    def test_rejects_a_tasks_file_it_cannot_write(self):
+        # An unmarked task stays `- [ ]` and is offered again on the next
+        # poll, and paid for again, forever: 37 runs of one task and $1.10 in
+        # S4's live smoke test, where the loop ran unprivileged and the
+        # checklist sat on a root-owned mount.
+        tasks = self.tmp / "readonly-tasks.md"
+        tasks.write_text("- [ ] something\n")
+        tasks.chmod(0o444)
+        self.addCleanup(tasks.chmod, 0o644)
+        path = self.write(f'repo = "{self.repo}"\ntasks_file = "{tasks}"\n')
+        with self.assertRaises(ValueError) as caught:
+            load_config(path, home=self.tmp / "home")
+        self.assertIn("not writable", str(caught.exception))
+
+    def test_accepts_a_tasks_file_that_does_not_exist_yet(self):
+        # pending() reads a missing checklist as an empty backlog, so there
+        # is nothing to mark and nothing to loop on.
+        path = self.write(
+            f'repo = "{self.repo}"\ntasks_file = "{self.tmp}/not-yet.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.tasks_file, self.tmp / "not-yet.md")
 
     def test_config_is_frozen(self):
         with self.assertRaises(Exception):
@@ -726,6 +763,42 @@ class SchemaTest(unittest.TestCase):
     def test_secret_fields_are_marked(self):
         secret = {field.key for field in SCHEMA if field.secret}
         self.assertEqual(secret, {"web_token", "jira.token"})
+
+
+class IngressTest(unittest.TestCase):
+    """Ingress mode drops the Host check, the token check and the operator's
+    own bind, so what turns it on is worth pinning exactly."""
+
+    def setUp(self):
+        # Restores the whole environment on the way out, whatever the test
+        # does to it.
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(INGRESS_ENV, None)
+
+    def test_it_is_off_when_the_variable_is_absent(self):
+        self.assertFalse(ingress())
+        self.assertEqual(bind_address("127.0.0.1", 8765), ("127.0.0.1", 8765))
+
+    def test_it_is_on_for_exactly_one(self):
+        os.environ[INGRESS_ENV] = "1"
+        self.assertTrue(ingress())
+
+    def test_anything_else_is_off(self):
+        # run.sh sets exactly "1". A stray value from a hand-written `docker
+        # run -e CLAUDELOOP_INGRESS=false` must not drop three guards.
+        for value in ("", "0", "false", "true", "yes", "on"):
+            with self.subTest(value=value):
+                os.environ[INGRESS_ENV] = value
+                self.assertFalse(ingress())
+
+    def test_the_bind_moves_to_the_ingress_address(self):
+        os.environ[INGRESS_ENV] = "1"
+        # Both the dashboard's configured bind and setup mode's unconditional
+        # loopback are equally unreachable from the supervisor's container,
+        # and the port has to match addon/config.yaml's ingress_port rather
+        # than whatever the operator typed into the wizard.
+        self.assertEqual(bind_address("127.0.0.1", 9999), (INGRESS_HOST, INGRESS_PORT))
+        self.assertEqual(bind_address("192.168.1.5", 0), (INGRESS_HOST, INGRESS_PORT))
 
 
 if __name__ == "__main__":

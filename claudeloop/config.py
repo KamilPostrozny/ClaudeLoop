@@ -18,6 +18,37 @@ DEFAULT_ORDER = "ORDER BY created ASC"
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 WILDCARD_HOSTS = ("0.0.0.0", "::")
 
+INGRESS_ENV = "CLAUDELOOP_INGRESS"
+INGRESS_HOST = "0.0.0.0"
+INGRESS_PORT = 8765
+"""Must match addon/config.yaml's ingress_port. Under ingress the bind is
+ClaudeLoop's own decision rather than the operator's: web_host and web_port
+describe a listener a browser reaches directly, and there is not one -- the
+supervisor proxies from its own container, and nothing is published to the
+host at all."""
+
+
+def ingress() -> bool:
+    """Whether this process is behind Home Assistant's ingress proxy.
+
+    An environment variable rather than a config key, because the setup wizard
+    has to be reachable on a box that has no config.toml yet -- there is
+    nothing to read a key out of. Read on every call rather than captured at
+    import, so a test can set it around a running server.
+    """
+    return os.environ.get(INGRESS_ENV) == "1"
+
+
+def bind_address(host: str, port: int) -> tuple[str, int]:
+    """Where a server actually listens.
+
+    The operator's choice, or the ingress one when the supervisor is the only
+    route in. Both servers go through this: the dashboard's loopback default
+    and setup mode's unconditional loopback are equally unreachable from
+    another container.
+    """
+    return (INGRESS_HOST, INGRESS_PORT) if ingress() else (host, port)
+
 
 def _secrets_file_guard(path: Path) -> None:
     """Refuse to load a config readable beyond its owner.
@@ -198,6 +229,35 @@ def _outside_repo(value, values) -> str | None:
     return None
 
 
+def _tasks_file(value, values) -> str | None:
+    """Both of tasks_file's rules, in the order a bad path should hear them."""
+    return _outside_repo(value, values) or _writable_tasks_file(value, values)
+
+
+def _writable_tasks_file(value, values) -> str | None:
+    """A tasks file this process cannot write is an unbounded, paid loop.
+
+    `FileSource._rewrite` suppresses the OSError deliberately -- the file is
+    the operator's and may vanish mid-run -- so a failed mark is silent, and
+    the task stays `- [ ]`, and it is picked up again on the next poll, and
+    paid for again, forever. Measured in S4's live smoke test: 37 runs of one
+    task in fifteen minutes, $1.10, before it was killed by hand.
+
+    Reachable the moment the loop and the file have different owners, which is
+    ordinary in the add-on: the loop runs unprivileged and /share is root's.
+    """
+    if Path(value).exists() and not os.access(value, os.W_OK):
+        # A file that is not there yet is left alone: pending() reads a
+        # missing checklist as an empty backlog, so there is nothing to mark
+        # and nothing to loop on.
+        return (
+            f"tasks_file {value} is not writable. ClaudeLoop marks each task"
+            " in this file as it finishes; a task it cannot mark is offered"
+            " again on the next poll and paid for again."
+        )
+    return None
+
+
 def _ascii_token(value, values) -> str | None:
     if not str(value).isascii():
         return (
@@ -301,7 +361,7 @@ SCHEMA: tuple[Field, ...] = (
                " Jira Cloud project (jira)."),
     Field("tasks_file", "path", step="source", required_if=_file_source,
           required_error='source = "file" requires tasks_file',
-          check=_outside_repo, label="Tasks file",
+          check=_tasks_file, label="Tasks file",
           help="A markdown checklist, one task per `- [ ]` line. It must live"
                " outside the repository, or a session's branch hygiene can"
                " revert ClaudeLoop's own completion marks."),

@@ -178,6 +178,22 @@ class ReopenTest(unittest.TestCase):
         source.mark(task, "done", "finished")  # must not raise
         source.reopen(task)
 
+    def test_a_mark_that_cannot_be_written_is_logged(self):
+        # It still must not raise -- the file is the operator's and the
+        # database holds the record -- but silence is what let one task run
+        # 37 times for $1.10 in S4's live smoke test: an unwritten mark
+        # leaves the line `- [ ]`, so the loop offers it again every poll.
+        source = self.source_for("- [ ] alpha\n")
+        task = source.pending()[0]
+        self.path.chmod(0o444)
+        self.addCleanup(self.path.chmod, 0o644)
+
+        with self.assertLogs("claudeloop.source", level="ERROR") as caught:
+            source.mark(task, "done", "finished")  # must not raise
+
+        self.assertIn("alpha", caught.output[0])
+        self.assertIn("paid for again", caught.output[0])
+
     def test_a_crlf_checklist_keeps_its_line_endings(self):
         # Marking one task must not silently rewrite every line ending in
         # the file. read_text()/write_text() would: they translate CRLF to

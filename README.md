@@ -391,6 +391,32 @@ identical lines collapse to the same database row while still running twice.
 python -m claudeloop
 ```
 
+## Run it as a Home Assistant add-on
+
+A laptop sleeps, reboots into an update, and leaves with its owner. A Home
+Assistant OS box does none of those, so `addon/` packages ClaudeLoop as an
+add-on: `repository.yaml` at the root makes this repository an add-on
+repository, and `addon/config.yaml` describes the add-on itself.
+`addon/DOCS.md` is the operator's page — install, first run, what persists.
+
+Three things differ from running it on a workstation:
+
+- **The web UI is reached through ingress**, not a port. `run.sh` sets
+  `CLAUDELOOP_INGRESS=1`, which makes both the dashboard and the setup wizard
+  bind the ingress port, skip the `Host` check and skip the token — the
+  supervisor authenticates a Home Assistant user before anything reaches them,
+  and nothing is published to the host. Set it yourself only if something else
+  is doing the same job; on a workstation the two checks are the defence.
+- **`/data` is `HOME`**, so `~/.claudeloop` and Claude Code's own `~/.claude`
+  both live on the add-on's persistent volume.
+- **The image is prebuilt** and pulled by tag, because the supervisor builds an
+  add-on with the add-on's folder as the docker context and ClaudeLoop's source
+  is the repository root. `.github/workflows/addon.yml` builds it from the root;
+  by hand it is `docker build -f addon/Dockerfile .`.
+
+`OWNER` is a placeholder in `repository.yaml`, `addon/config.yaml` and
+`addon/DOCS.md` until this repository is pushed somewhere.
+
 ## Where things go
 
 ```

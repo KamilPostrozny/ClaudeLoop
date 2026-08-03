@@ -527,8 +527,17 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 // trusted, and none of it is ever handed to innerHTML.
 
 const TOKEN = new URLSearchParams(location.search).get("token");
+// Everything below asks for absolute paths ("/api/state"), which is right when
+// this page is served from "/" and wrong under Home Assistant ingress, where it
+// is served from "/api/hassio_ingress/<session>/" and an absolute path escapes
+// the prefix to Home Assistant itself. BASE is everything up to the last "/":
+// "" at the root, the ingress prefix under ingress. The server sees the same
+// routes either way -- the supervisor strips the prefix before proxying.
+const BASE = location.pathname.replace(/\/[^/]*$/, "");
 const url = (path) =>
-  TOKEN ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : path;
+  TOKEN
+    ? BASE + path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN)
+    : BASE + path;
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {

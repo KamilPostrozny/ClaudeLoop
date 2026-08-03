@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import socket
 import sqlite3
 import tempfile
@@ -9,8 +10,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
-from claudeloop import status, web
+from claudeloop import config, status, web
 from claudeloop.config import Config
 from claudeloop.source import task_id
 from claudeloop.state import State
@@ -337,6 +339,44 @@ class WildcardHostHeaderTest(WebTestBase):
 
     def test_the_wrong_port_is_still_rejected(self):
         self.assertEqual(self._request(f"192.168.1.5:{self.server.server_port + 1}"), 403)
+
+
+class IngressTest(WebTestBase):
+    """Behind Home Assistant's ingress proxy the three guards that assume a
+    browser talking to this server directly are all replaced -- see the S4
+    spec. The variable is set *after* serve(), because it is read per request:
+    binding here would mean binding the real ingress port, and the point of
+    reading it late is that a test does not have to."""
+
+    token = "a-token-nobody-sends"
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.dict(os.environ, {config.INGRESS_ENV: "1"}))
+
+    def _request(self, host_header: str, path: str = "/api/state") -> int:
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", path, headers={"Host": host_header})
+        response = conn.getresponse()
+        response.read()
+        return response.status
+
+    def test_home_assistants_own_host_header_is_accepted(self):
+        # What the supervisor forwards: the Host the browser sent to Home
+        # Assistant, which names neither this server nor its port.
+        self.assertEqual(self._request("homeassistant.local:8123"), 200)
+
+    def test_the_token_is_not_required(self):
+        # web_token is set and no request here carries it: the supervisor
+        # authenticated the user before this request existed, and a sidebar
+        # entry has no query string to put it in.
+        self.assertEqual(self._request("homeassistant.local:8123", "/"), 200)
+
+    def test_both_guards_come_back_without_the_variable(self):
+        # The same server, the same request: only ingress mode relaxes it.
+        os.environ.pop(config.INGRESS_ENV)
+        self.assertEqual(self._request("homeassistant.local:8123"), 403)
 
 
 class ReadLogTest(unittest.TestCase):

@@ -3,11 +3,13 @@ checklist; S3 adds a Jira one behind the same protocol."""
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+log = logging.getLogger("claudeloop.source")
 
 UNCHECKED = "- [ ]"
 DONE = "- [x]"
@@ -86,12 +88,22 @@ class FileSource:
             indent = line[: len(line) - len(line.lstrip())]
             eol = line[len(body):]
             lines[index] = f"{indent}{marker} {text}{eol}"
-            # Suppressed for the same reason as the read above: the task
+            # Not raised, for the same reason as the read above: the task
             # file is the user's, and it can vanish or turn unwritable
-            # between the two. The database still holds the record.
-            with contextlib.suppress(OSError):
+            # between the two. The database still holds the record. Logged,
+            # though, and loudly: an unwritten mark leaves the line `- [ ]`,
+            # so the loop offers that task again on the next poll and pays
+            # for it again, indefinitely -- 37 runs of one task, $1.10, in
+            # S4's live smoke test, with nothing in the log to say why.
+            try:
                 with self.path.open("w", newline="") as handle:
                     handle.write("".join(lines))
+            except OSError as error:
+                log.error(
+                    "could not mark %s in %s (%s) -- that task will be offered"
+                    " and paid for again on the next poll",
+                    text, self.path, error,
+                )
             return
 
     def mark(self, task: Task, status: str, summary: str, cost: float = 0.0) -> None:

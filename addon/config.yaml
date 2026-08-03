@@ -1,0 +1,40 @@
+name: ClaudeLoop
+slug: claudeloop
+version: "0.1.0"
+description: >-
+  Unattended orchestrator for Claude Code: one headless session per task,
+  against one repository, surviving rate limits.
+url: https://github.com/OWNER/ClaudeLoop
+arch:
+  - aarch64
+  - amd64
+# Prebuilt, because the supervisor would build this folder as the context and
+# the orchestrator's source is the repository root. See addon/Dockerfile.
+image: ghcr.io/OWNER/claudeloop-{arch}
+init: false
+# Ingress only, and deliberately no `ports:`. The listener exists on the
+# supervisor's internal network and nothing is published to the host, which is
+# what lets the web layer drop its Host check: DNS rebinding needs an address
+# the victim's browser can reach.
+ingress: true
+ingress_port: 8765
+panel_icon: mdi:sync
+panel_title: ClaudeLoop
+# The repository is normally a URL ClaudeLoop clones into /data. share is for
+# an operator who would rather keep a checkout of their own on the box.
+map:
+  - share:rw
+options:
+  claude_code_oauth_token: ""
+  git_user_name: ClaudeLoop
+  git_user_email: claudeloop@localhost
+  setup: false
+schema:
+  # The wizard opens by itself when there is no config.toml. This is how an
+  # operator with no shell on the box reopens it to change one.
+  setup: bool
+  # Optional so the add-on can start unconfigured and say so in its log,
+  # rather than refusing to save an empty configuration on a fresh install.
+  claude_code_oauth_token: password?
+  git_user_name: str
+  git_user_email: str

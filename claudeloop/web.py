@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import status as status_module
-from .config import LOOPBACK_HOSTS, WILDCARD_HOSTS, Config
+from .config import LOOPBACK_HOSTS, WILDCARD_HOSTS, Config, bind_address, ingress
 from .render import render_event
 
 log = logging.getLogger("claudeloop.web")
@@ -363,6 +363,15 @@ class Handler(BaseHTTPRequestHandler):
         checks the port, since that costs nothing and catches a stray
         request landing on the wrong listener.
         """
+        if ingress():
+            # Through Home Assistant's ingress proxy, Host names Home
+            # Assistant itself (homeassistant.local:8123) rather than this
+            # server, so there is nothing to compare it against. What this
+            # check defends -- DNS rebinding -- needs the port reachable from
+            # the victim's browser, and an ingress addon publishes none: the
+            # listener exists only on the supervisor's internal docker
+            # network. See the S4 spec.
+            return True
         cfg = self.server.cfg
         parsed = urlparse(f"//{self.headers.get('Host', '')}")
         try:
@@ -375,6 +384,12 @@ class Handler(BaseHTTPRequestHandler):
         return parsed.hostname in allowed_hosts and port_ok
 
     def _authorized(self, query: str) -> bool:
+        if ingress():
+            # The supervisor authenticates a Home Assistant user before it
+            # proxies anything here -- a real login, not a shared secret in a
+            # query string -- and the operator arrives by clicking a sidebar
+            # entry they have no way to append ?token= to.
+            return True
         expected = self.server.cfg.web_token
         if not expected:
             return True
@@ -515,9 +530,12 @@ class _Server(ThreadingHTTPServer):
 
 def serve(cfg: Config) -> ThreadingHTTPServer:
     """Start the dashboard on a daemon thread and return its server."""
-    server = _Server((cfg.web_host, cfg.web_port), Handler, cfg)
+    host, port = bind_address(cfg.web_host, cfg.web_port)
+    server = _Server((host, port), Handler, cfg)
     threading.Thread(
         target=server.serve_forever, name="claudeloop-web", daemon=True
     ).start()
-    log.info("dashboard on http://%s:%s", cfg.web_host, server.server_port)
+    # host, not cfg.web_host: under ingress the two differ, and the log line
+    # is the only place an operator can see which one actually got bound.
+    log.info("dashboard on http://%s:%s", host, server.server_port)
     return server
