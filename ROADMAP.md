@@ -17,7 +17,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S3** | Jira task source | merged |
 | **S2b** | Question and answer channel | merged |
 | **S6** | A git worktree per task | merged |
-| **S5** | Setup wizard and config schema | in progress |
+| **S5** | Setup wizard and config schema | merged |
 | **S7** | Proposed plugin set | not started |
 | **S4** | Home Assistant OS addon | not started |
 
@@ -248,8 +248,8 @@ requires a `secrets.token_urlsafe(32)` printed to the console on every
 request, page load included. With no config there is no `web_token` to
 authenticate against, so the network barrier can't be the only one.
 
-Five things surfaced across the build and a real-browser pass that the design
-had not anticipated:
+Five things surfaced across the build and a first real-browser pass that the
+design had not anticipated:
 
 - `json.dumps`'s default `ensure_ascii=True` encodes a non-BMP character as a
   UTF-16 surrogate pair, which TOML rejects outright as not a Unicode scalar
@@ -287,15 +287,50 @@ had not anticipated:
   back. No fixture and no headless DOM shim caught it; only an actual Chrome
   session did.
 
-Verified in that same browser session, against a scratch repository: the full
-six-screen first run completes end to end; the saved `config.toml` is `0600`,
-carries only the keys actually supplied (no pinned defaults), and is annotated
-with the schema's own help text as `#` comments; `load_config` reads it back
-with correct types; `run_setup`'s blocking wait returns, handing off to the
-loop in the same process; the repo check returns real `worktree.probe` output.
-**The two-task live smoke test this slice's spec calls for — driving the
-wizard from nothing and letting the loop it hands off to actually run two
-tasks — has not been run yet.**
+**The live smoke test found two more, and both were the same shape as the
+worst of the five above.** It ran against no `~/.claudeloop` at all, a scratch
+repository, and two tasks on `haiku`, for $0.136.
+
+- Typing `haiku` into the Model field produced **`opushaiku`**. The `get()`
+  fix immediately above was correct for the visibility logic it was written
+  for, and wrong where a text input bound its `value` to it: the default
+  landed in the box as real text rather than a greyed placeholder, so the
+  operator types over the top of it instead of replacing it. `validate()`
+  accepts it, because `model` is a free string — the run would have started
+  on a model that does not exist. Text inputs now read `drafted`, which is
+  the operator's own value and nothing else. That the fix for one live
+  finding created the next one is the argument for running this thing rather
+  than reasoning about it.
+- `run_setup` announced `ClaudeLoop is not configured yet` on the `--setup`
+  path, over a config that plainly existed.
+
+Everything else held. **First run:** the six screens complete end to end; all
+three live checks answer from reality, `claude auth status --json` reporting
+`signed in via claude.ai (pro)` on its first run against the real CLI; the
+saved `config.toml` is `0600`, annotated with the schema's help text as `#`
+comments, and carries only the keys actually supplied with no pinned
+defaults; `load_config` reads it back with correct types; and the **same
+process** then bound the dashboard and started task 1, so the in-process
+handoff works. Both tasks ran and were marked `- [x]`, the target repository
+never left `main` and was never dirtied, and each task got its own
+`claudeloop/<task-id>` branch.
+
+**The `--setup` path, which the whole-branch review flagged as never having
+been driven live, was driven:** the schema payload comes back with
+`editing: true`, `secrets_set: ["web_token"]` and `session_env` carrying names
+with empty values — and **neither secret value anywhere in it**; the token
+field renders blank with `set — leave blank to keep` and no `*`; a
+deliberately-`0644` config comes back `0600` after saving, which is the
+narrowing no unit test can distinguish; and `model` changed while both the
+`web_token` and the `[session_env]` entry survived being left blank.
+
+One observation that is **not** an S5 defect: task 2 wrote `status: "done"`
+with a summary claiming it had created `BETA.md`, but never committed — its
+branch still points at the base commit and the file sits untracked. That is
+session compliance with `BUILTIN_DEFINITION_OF_DONE` under `haiku`, the same
+~50% rate S1's smoke test measured against a similar instruction. S6's safety
+net did its job: `worktree.release` refused to remove the dirty tree, so the
+uncommitted work survives on disk rather than being destroyed.
 
 Spec: `docs/superpowers/specs/2026-08-03-claudeloop-setup-wizard-design.md`
 
