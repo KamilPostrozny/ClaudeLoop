@@ -576,6 +576,23 @@ class CheckRouteTest(SetupServerBase):
         self.assertFalse(payload["ok"])
         self.assertIn("worktree", payload["message"])
 
+    def test_the_repo_check_asks_the_remote_when_repo_is_a_url(self):
+        # Nothing is cloned during setup, so probe has nothing to look at:
+        # the check has to reach the remote instead. file:// is a real URL to
+        # git and needs no network.
+        repo = make_repo(self.tmp / "remote")
+        _, payload = self.post("/api/setup/test",
+                               {"what": "repo", "values": {"repo": repo.as_uri()}})
+        self.assertTrue(payload["ok"], payload["message"])
+        self.assertIn("cloned", payload["message"])
+
+    def test_the_repo_check_explains_a_url_it_cannot_reach(self):
+        url = (self.tmp / "no-such-repo").as_uri()
+        _, payload = self.post("/api/setup/test",
+                               {"what": "repo", "values": {"repo": url}})
+        self.assertFalse(payload["ok"])
+        self.assertIn("cannot reach", payload["message"])
+
     def test_an_unknown_check_is_refused(self):
         code, payload = self.post("/api/setup/test",
                                   {"what": "astrology", "values": {}})

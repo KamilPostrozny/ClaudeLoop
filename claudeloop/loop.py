@@ -656,6 +656,12 @@ def main(argv: list[str] | None = None) -> None:
         # config.toml at the default umask (0644) is the common case here --
         # every such install must get that message, not a raw traceback.
         raise SystemExit(str(error))
+    # A `repo` given as a URL is cloned once, here, so everything downstream
+    # sees an ordinary local repository.
+    if cfg.repo_url:
+        problem = worktree.clone(cfg.repo_url, cfg.repo)
+        if problem:
+            raise SystemExit(problem)
     # Before anything starts listening or runs: a box whose git cannot make
     # worktrees would otherwise fail every task in turn, one paid session at
     # a time, instead of saying so once.

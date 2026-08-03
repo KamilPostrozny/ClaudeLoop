@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,8 +70,40 @@ class Field:
         return f"{self.section}.{self.name}" if self.section else self.name
 
 
+def is_url(value: object) -> bool:
+    """Whether `repo` names a remote to clone rather than a checkout on disk.
+
+    Both forms git itself accepts: a scheme (`https://`, `ssh://`, `file://`)
+    and the scp-like shorthand (`git@github.com:owner/repo.git`).
+    """
+    text = str(value)
+    return "://" in text or re.match(r"^[^/\s]+@[^/\s:]+:", text) is not None
+
+
+def repo_path(value: object, home: Path = HOME) -> Path:
+    """Where the repository lives on this box: the path itself, or the
+    directory a remote is cloned into.
+
+    The clone directory is named after the URL and keyed by a hash of it.
+    Basenames collide -- `github.com/us/api` and `github.com/them/api` are
+    different projects -- and an unattended loop silently running tasks
+    against the wrong checkout is the worst way to find that out.
+    """
+    if not is_url(value):
+        return Path(str(value)).expanduser()
+    url = str(value).rstrip("/")
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", url.rsplit("/", 1)[-1].removesuffix(".git"))
+    digest = hashlib.sha256(url.encode()).hexdigest()[:8]
+    return home / "clones" / f"{name or 'repo'}-{digest}"
+
+
 def _coerce(field: Field, value: object) -> object:
     """Raises ValueError with a message written for a human."""
+    if field.type == "repo":
+        # A URL is kept verbatim, not turned into its clone path: the wizard
+        # writes coerced values back to config.toml, and a config that had
+        # lost the URL could never re-clone.
+        return str(value) if is_url(value) else Path(str(value)).expanduser()
     if field.type == "bool":
         if isinstance(value, bool):
             return value
@@ -134,6 +168,11 @@ def _raw(data: dict, field: Field) -> object:
 # --- the checks and conditions the table refers to ------------------------
 
 def _is_git_repo(value, values) -> str | None:
+    if is_url(value):
+        # Nothing to check without the network, and this runs in the wizard
+        # too. `worktree.clone` at startup reports a bad URL, once, before
+        # anything is listening.
+        return None
     if not (Path(value) / ".git").exists():
         return f"repo {value} is not a git repository"
     return None
@@ -151,7 +190,7 @@ def _outside_repo(value, values) -> str | None:
     repo = values.get("repo")
     if repo is None:
         return None  # repo already has its own error; do not pile a second on
-    if Path(value).resolve().is_relative_to(Path(repo).resolve()):
+    if Path(value).resolve().is_relative_to(repo_path(repo).resolve()):
         return (
             f"tasks_file {value} is inside repo {repo}. ClaudeLoop's task list"
             " must live outside the repository it works in."
@@ -245,11 +284,13 @@ def _exposed(values) -> bool:
 
 
 SCHEMA: tuple[Field, ...] = (
-    Field("repo", "path", step="repository", required=True,
+    Field("repo", "repo", step="repository", required=True,
           check=_is_git_repo, label="Repository",
-          help="The git repository ClaudeLoop works in. Each task gets its own"
-               " worktree cut from this repository's default branch; your own"
-               " checkout is never moved."),
+          help="The git repository ClaudeLoop works in: a local path, or a URL"
+               " (https://, ssh://, git@host:owner/repo.git) which is cloned"
+               " once into ~/.claudeloop/clones/ and worked in from there."
+               " Each task gets its own worktree cut from the default branch;"
+               " your own checkout is never moved."),
     Field("model", step="repository", default="opus",
           label="Model",
           help="Which Claude model each session runs on, e.g. opus, sonnet,"
@@ -461,6 +502,9 @@ class JiraConfig:
 @dataclass(frozen=True)
 class Config:
     repo: Path
+    """Always local: the clone directory when `repo_url` is set."""
+    repo_url: str = ""
+    """The remote to clone, when config.toml gave a URL rather than a path."""
     tasks_file: Path | None = None
     model: str = "opus"
     max_resumes: int = 20
@@ -521,7 +565,8 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         )
 
     return Config(
-        repo=values["repo"],
+        repo=repo_path(values["repo"], home),
+        repo_url=values["repo"] if is_url(values["repo"]) else "",
         tasks_file=values["tasks_file"],
         model=values["model"],
         max_resumes=values["max_resumes"],

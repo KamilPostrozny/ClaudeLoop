@@ -110,6 +110,33 @@ class WorktreeTest(unittest.TestCase):
         self.assertTrue((path / "uncommitted.txt").exists(),
                         "an unattended loop must never destroy a working tree")
 
+    def test_clone_fetches_a_url_repo_and_worktrees_come_out_of_it(self):
+        dest = self.tmp / "clones" / "thing-abc12345"
+
+        self.assertIsNone(worktree.clone(self.repo.as_uri(), dest))
+
+        self.assertTrue((dest / "README.md").exists())
+        self.assertIsNone(worktree.probe(dest))
+        path = worktree.ensure(dest, self.root, "abc123")
+        self.assertEqual(branch_of(path), "claudeloop/abc123")
+
+    def test_clone_leaves_an_existing_clone_alone(self):
+        dest = self.tmp / "clones" / "thing-abc12345"
+        worktree.clone(self.repo.as_uri(), dest)
+        (dest / "local-work.txt").write_text("keep me\n")
+
+        self.assertIsNone(worktree.clone(self.repo.as_uri(), dest))
+
+        self.assertTrue((dest / "local-work.txt").exists())
+
+    def test_clone_reports_a_bad_url_rather_than_raising(self):
+        message = worktree.clone(
+            (self.tmp / "no-such-repo").as_uri(), self.tmp / "clones" / "nope"
+        )
+
+        self.assertIsNotNone(message)
+        self.assertIn("could not clone", message)
+
     def test_probe_accepts_a_real_repository(self):
         self.assertIsNone(worktree.probe(self.repo))
 

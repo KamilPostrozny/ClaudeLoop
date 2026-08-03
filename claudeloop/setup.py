@@ -22,7 +22,9 @@ from urllib.parse import urlparse
 
 from . import plugins as plugins_module
 from . import web, worktree
-from .config import DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, validate
+from .config import (
+    DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, is_url, validate,
+)
 from .jira import JiraClient, JiraError, compose_jql
 
 log = logging.getLogger("claudeloop.setup")
@@ -209,6 +211,14 @@ def check_repo(values: dict) -> tuple[bool, str]:
     repo = str(values.get("repo", "")).strip()
     if not repo:
         return False, "no repository set"
+    if is_url(repo):
+        # Nothing is cloned yet, so probe has nothing to look at. Asking the
+        # remote is the equivalent check, and catches a typo or a missing
+        # credential here rather than at startup.
+        problem = worktree.reachable(repo)
+        return (False, problem) if problem else (
+            True, f"{repo} is reachable and will be cloned when the loop starts",
+        )
     problem = worktree.probe(Path(repo).expanduser())
     return (False, problem) if problem else (
         True, f"{repo} is usable: git worktrees work and the default branch resolves",

@@ -61,6 +61,51 @@ class ConfigTest(unittest.TestCase):
             load_config(path, home=self.tmp / "home")
         self.assertIn("git repository", str(caught.exception))
 
+    def test_a_url_repo_becomes_a_clone_directory_under_home(self):
+        home = self.tmp / "home"
+        url = "https://github.com/owner/thing.git"
+        path = self.write(
+            f'repo = "{url}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=home)
+        self.assertEqual(cfg.repo_url, url)
+        self.assertEqual(cfg.repo.parent, home / "clones")
+        self.assertTrue(cfg.repo.name.startswith("thing-"))
+
+    def test_the_scp_shorthand_counts_as_a_url_too(self):
+        path = self.write(
+            'repo = "git@github.com:owner/thing.git"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.repo_url, "git@github.com:owner/thing.git")
+        self.assertEqual(cfg.repo.parent, self.tmp / "home" / "clones")
+
+    def test_same_basename_on_different_urls_gets_different_clones(self):
+        # Two projects called `api` must never share one checkout: an
+        # unattended loop would work in the wrong repository and say nothing.
+        def clone_for(url: str) -> Path:
+            path = self.write(
+                f'repo = "{url}"\n'
+                f'tasks_file = "{self.tmp}/tasks.md"\n'
+            )
+            return load_config(path, home=self.tmp / "home").repo
+
+        self.assertNotEqual(
+            clone_for("https://github.com/us/api.git"),
+            clone_for("https://github.com/them/api.git"),
+        )
+
+    def test_a_local_repo_still_has_no_url(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.repo, self.repo)
+        self.assertEqual(cfg.repo_url, "")
+
     def test_rejects_a_tasks_file_directly_inside_repo(self):
         # No trace of ClaudeLoop should live in a repository it works in --
         # a session's ordinary branch hygiene (`git checkout .`, `git
@@ -662,8 +707,11 @@ class SchemaTest(unittest.TestCase):
         # be rediscovered: jira.project and jira.status are composed away
         # into jira.jql by _compose_jql and never reach Config, and `home`
         # is a load_config parameter that is never a config key.
+        # repo_url is the same exception in the other direction: `repo` is
+        # one config key, and load_config splits it into the local path and
+        # the URL to clone from.
         composed_away = {"jira.project", "jira.status"}
-        not_a_config_key = {"home", "jira"}
+        not_a_config_key = {"home", "jira", "repo_url"}
         top_level = {f.name for f in SCHEMA if not f.section}
         jira_keys = {f.name for f in SCHEMA if f.section == "jira"}
         self.assertEqual(

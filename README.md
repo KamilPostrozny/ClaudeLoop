@@ -57,7 +57,7 @@ at 3am that the service is "up" and doing nothing.
 `~/.claudeloop/config.toml`:
 
 ```toml
-repo                     = "/home/you/Projects/yourrepo"
+repo                     = "/home/you/Projects/yourrepo"  # or a URL -- see below
 tasks_file               = "/home/you/claudeloop-tasks/yourrepo.md"  # outside repo -- see Tasks below
 model                    = "opus"   # optional, default "opus"
 max_resumes              = 20       # optional, default 20 -- bounds plain nudges
@@ -82,6 +82,19 @@ must be `chmod 600`; ClaudeLoop refuses to load it otherwise.
 
 One instance serves one repository. For a second repository, run a second
 instance with its own config.
+
+`repo` may be a local path or a git URL — `https://…`, `ssh://…`, `file://…`,
+or the scp shorthand `git@github.com:owner/repo.git`. A URL is cloned once, at
+startup, into `~/.claudeloop/clones/<name>-<hash of the URL>`, and everything
+after that works exactly as it does against a local checkout: worktrees are cut
+from that clone, and the clone is the repository the dashboard and `state.db`
+are keyed on. The hash is there so two projects with the same name never share
+one checkout. Nothing prompts for credentials — `GIT_TERMINAL_PROMPT=0` — so a
+private repository needs a credential helper, an SSH agent, or a token in the
+URL, and fails at startup with git's own message if it has none. **The clone is
+never refreshed:** an existing one is left alone on every later start, so tasks
+branch from whatever the default branch held when it was made. Delete the clone
+directory to start again from the remote.
 
 The `#` comments in a wizard-written file aren't hand-maintained: they come
 from the same table of `Field`s that `load_config` validates every key

@@ -100,6 +100,70 @@ def default_branch(repo: Path) -> str | None:
     return None
 
 
+CLONE_TIMEOUT_S = 600
+"""A clone crosses the network and can be large, so GIT_TIMEOUT_S -- written
+for local commands that finish in milliseconds -- would abort a healthy one.
+This is still bounded: an unattended loop must not hang forever on a remote
+that accepts the connection and then stalls."""
+
+
+def clone(url: str, dest: Path) -> str | None:
+    """Clone `url` into `dest` if it is not already there. An error message
+    written for a human, or None.
+
+    Called once at startup, before `probe`. Cloning per task would re-fetch
+    the whole repository every time; the worktrees come out of this one
+    checkout exactly as they do out of a local one.
+    """
+    if (dest / ".git").exists():
+        # ponytail: never refreshed. Tasks branch off whatever the default
+        # branch held when this clone was made. Add a fetch and a
+        # fast-forward here if a long-lived loop starts working stale.
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    log.info("cloning %s into %s", url, dest)
+    try:
+        result = subprocess.run(
+            ["git", "clone", url, str(dest)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=CLONE_TIMEOUT_S,
+            # As in _git: no credential prompt can block an unattended loop.
+            # A private repository needs a credential helper, an SSH agent or
+            # a token in the URL -- otherwise this fails now, saying so.
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"could not clone {url} into {dest}: {error}"
+    if result.returncode != 0:
+        return f"could not clone {url} into {dest}: {result.stderr.strip()}"
+    return None
+
+
+def reachable(url: str) -> str | None:
+    """Whether `url` is a repository this box can read, without cloning it.
+
+    The wizard's live check for a URL repo: a typo or a missing credential
+    otherwise passes setup and only surfaces at startup, after the operator
+    has walked away.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", url],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=GIT_TIMEOUT_S,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"cannot reach {url}: {error}"
+    if result.returncode != 0:
+        return f"cannot reach {url}: {result.stderr.strip()}"
+    return None
+
+
 def probe(repo: Path) -> str | None:
     """Whether this box can run tasks in worktrees at all. An error message
     written for a human, or None.
