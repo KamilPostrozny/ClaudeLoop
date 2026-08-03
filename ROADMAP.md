@@ -18,7 +18,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S2b** | Question and answer channel | merged |
 | **S6** | A git worktree per task | merged |
 | **S5** | Setup wizard and config schema | merged |
-| **S7** | Proposed plugin set | not started |
+| **S7** | Proposed plugin set | in progress |
 | **S4** | Home Assistant OS addon | not started |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
@@ -334,39 +334,87 @@ uncommitted work survives on disk rather than being destroyed.
 
 Spec: `docs/superpowers/specs/2026-08-03-claudeloop-setup-wizard-design.md`
 
+### S7 — Proposed plugin set
+
+`plugins.py` (new) is a single table plus the logic to install it. `Plugin`
+is a frozen dataclass — `name`, `plugin_id` (`name@marketplace`),
+`marketplace`, `reason` (the wizard's one-line checkbox caption) and `usage`
+(the fourth prompt layer's text, empty on the ordinary plugin). `PROPOSED` is
+superpowers, caveman and ponytail, in that order; `by_name` looks one up by
+its `config.toml` shorthand. Only `superpowers` carries `usage` —
+its brainstorming skill asks a human one question at a time and refuses to
+implement without approval, both wrong under an orchestrator, so
+`SUPERPOWERS_USAGE` tells the session to read the repository instead of
+asking, and that queuing the task *was* the approval. `caveman` and
+`ponytail` ship none, by design: both already state their own rules.
+
+`config.py` gained `plugins: tuple[str, ...]` — `Field("plugins", "list",
+step="plugins", default=())`, a `"list"` branch in `_coerce`, and a
+`_known_plugins` check: a bare name must be one of the three proposed, and
+anything else must carry its own `@marketplace`, because `reconcile` has
+nowhere else to learn one.
+
+`plugins.reconcile(names)` is what `main()` calls, once, between
+`worktree.probe` and `_serve_dashboard` — fatal for the same reason as the
+worktree probe: a box that cannot get the plugins the operator chose would
+otherwise run every task with a system prompt describing tools the session
+does not have. It reads `claude plugin list --json` once (`_installed()`), a
+local call with no network round trip, then for each wanted plugin: enables
+it if installed but disabled, or adds its marketplace and installs it if
+missing. An empty `plugins` runs no subprocess at all; an already-satisfied
+non-empty selection makes exactly that one local call and touches the
+network not at all, so a marketplace outage cannot stop a loop that is
+already reconciled. It re-reads the installed set to confirm, but only when
+something actually changed — trusting a `0` exit code that lied would
+otherwise leave a session with a prompt describing skills it does not have.
+Every install and enable happens at **`--scope user`**, never project or
+local: those write `.claude/settings.json` or `.claude/settings.local.json`
+into the target repository, which nothing ClaudeLoop writes may do, and
+would be per-worktree besides — this is the half of S1.1's "pass through, do
+not manage" that S7 reverses, because the S4 addon operator has no terminal
+to run `claude plugin install` in. `settings_file` passthrough is untouched.
+A caught `PluginError` — `claude` missing from `PATH`, a non-zero exit, or a
+timeout past `CLAUDE_TIMEOUT_S` (300s) — becomes the message `main()` exits
+with, the same shape as a bad worktree probe.
+
+One defect found in review rather than by the fixtures: the real CLI's
+`plugin list --json` emits **one row per scope** a plugin is installed in,
+id repeated, not one row per plugin. `_installed()` now prefers the
+user-scope row whenever the same id appears more than once, so a plugin also
+visible at project or local scope cannot mask the user-scope row `reconcile`
+actually cares about.
+
+The fourth prompt layer: `plugins.usage_section(names, home, proposed=
+PROPOSED)` builds one `### <name>` block per selected plugin that has
+something to say, in `PROPOSED` order rather than the operator's config
+order, so the prompt reads the same regardless of how `plugins` is written.
+`~/.claudeloop/plugin-usage/<name>.md`, if present, replaces a built-in
+plugin's text and gives a plugin outside the proposed three a block of its
+own; unreadable counts as absent, so a permissions mistake can't stop a
+session starting. `prompt.precedence()` gained `has_plugins`, stating the
+layer only when it is non-empty, and positions it below the operator layer
+and above the definition of done — ClaudeLoop's own advice about its own
+tooling, which the operator must be able to override. `prompt.compose()`
+slots the block in between the operator instructions and the definition of
+done.
+
+`setup.py` and `static/setup.html` gained a Plugins wizard step: the
+proposed three render as checkboxes with their `reason` as the caption
+(never their `usage` text, which stays server-side), plus a free-text
+`plugin@marketplace, comma separated` row for anything else. `dump_toml`
+writes `plugins` as a TOML array through the same `SCHEMA`-driven path as
+every other key, and an empty selection writes no key at all, exactly like
+every other optional field.
+
+**S7 is not yet merged.** The live smoke test — the step this repository
+treats as not optional for a whole slice — has not run yet; this entry will
+gain a paragraph recording what it found once it has.
+
+Spec: `docs/superpowers/specs/2026-08-03-claudeloop-plugin-set-design.md`
+
 ---
 
 ## Next
-
-### S7 — Proposed plugin set
-
-Split out of S5 during brainstorming: a curated set of plugins and the fourth
-prompt layer their usage files would add is a change to the composed system
-prompt, and prompt strings are the product here — it deserves its own spec,
-its own covering tests, and its own live smoke test rather than riding along
-behind a config refactor.
-
-**Decided, carried over verbatim from S5's original entry:**
-
-- **A curated "proposed plugin set"**, each plugin carrying optional usage
-  instructions in **its own file, separate from `instructions.md`** — different
-  authors, different lifetimes. That adds a fourth prompt layer, slotting below
-  the operator layer and above the definition of done, since it is ClaudeLoop's
-  advice about its own tooling and the operator must be able to override it.
-- **`superpowers` is in the proposed set, and its usage file carries a
-  question-discipline rule.** Its `brainstorming` skill asks the human one
-  question at a time, which is right at a keyboard and wrong under an
-  orchestrator where nobody answers. The rule to ship: *if the answer lives in
-  the repository, the docs, the roadmap or the git history, go read it and
-  never ask; ask only when the answer lives solely in the operator's head —
-  priorities, money, who is watching, what "good" means here.* Delegating to a
-  subagent is for breadth, not for dodging a question: a fresh agent starts
-  cold, costs real money to re-derive context the asking agent already has,
-  and cannot answer a preference question anyway. This is written as plugin
-  usage instructions in config, not as an edit to the plugin's own files —
-  nothing in the addon image may depend on a patched plugin cache. Its worth
-  was measured on this repository: brainstorming S2b asked five questions and
-  two were answerable from `CLAUDE.md` and `ROADMAP.md` alone.
 
 ### S4 — Home Assistant OS addon
 
@@ -498,6 +546,15 @@ Real, deliberately deferred, tracked here so they are not lost.
   `os.fstat(fd)` before any byte is written. Not added: this repo's
   convention is real files on disk, not mocks. Flagged during S5's review for
   triage rather than fixed, so it isn't rediscovered as a silent gap later.
+- Nothing ever *removes* a plugin. Dropping a name from `plugins` leaves it
+  installed and enabled at user scope, so it keeps affecting every session
+  and every other Claude Code run on the box. Deliberate: uninstalling
+  something an operator may also use by hand is a worse failure than leaving
+  it, and `claude plugin uninstall` is one command.
+- `reconcile` pins no version. A plugin updated in its marketplace changes
+  what sessions do with no config change and nothing in the run log to say
+  so. `claude plugin install` takes no version, so pinning would mean
+  managing the plugin cache directly.
 - No automated test executes `static/index.html`'s or `static/setup.html`'s
   JavaScript. `tests/test_setup.py`'s `WizardPageTest` only asserts on the
   file's text. Every real client-side defect S5 found — a `[session_env]` row
