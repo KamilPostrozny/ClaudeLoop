@@ -1392,11 +1392,16 @@ class MainReconcilesPluginsTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
 
     def test_a_plugin_problem_stops_startup_before_the_dashboard_binds(self):
+        # asyncio.run is patched too, not just asserted unreached below: if
+        # the SystemExit gate this test pins were ever deleted, main() would
+        # fall through into the real main_loop and poll forever against this
+        # temp-dir config, hanging the whole suite instead of failing it.
         with unittest.mock.patch("claudeloop.loop.load_config") as load, \
              unittest.mock.patch("claudeloop.worktree.probe", return_value=None), \
              unittest.mock.patch("claudeloop.plugins.reconcile",
                                  return_value="marketplace unreachable") as reconcile, \
              unittest.mock.patch("claudeloop.loop._serve_dashboard") as serve, \
+             unittest.mock.patch("claudeloop.loop.asyncio.run") as run, \
              unittest.mock.patch("claudeloop.loop.DEFAULT_CONFIG") as config_path:
             config_path.exists.return_value = True
             load.return_value = Config(repo=self.tmp, tasks_file=self.tmp / "t.md",
@@ -1406,6 +1411,7 @@ class MainReconcilesPluginsTest(unittest.TestCase):
         self.assertIn("marketplace unreachable", str(raised.exception))
         reconcile.assert_called_once_with(("caveman",))
         serve.assert_not_called()
+        run.assert_not_called()
 
     def test_a_clean_reconcile_lets_startup_continue(self):
         with unittest.mock.patch("claudeloop.loop.load_config") as load, \
