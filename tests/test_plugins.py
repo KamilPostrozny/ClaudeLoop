@@ -1,5 +1,8 @@
+import os
+import shutil
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from claudeloop.plugins import (
@@ -7,6 +10,7 @@ from claudeloop.plugins import (
     SUPERPOWERS_USAGE,
     Plugin,
     by_name,
+    reconcile,
     usage_section,
 )
 
@@ -109,3 +113,119 @@ class UsageSectionTest(unittest.TestCase):
         path.chmod(0o000)
         self.addCleanup(path.chmod, 0o600)
         self.assertIn(SUPERPOWERS_USAGE, usage_section(("superpowers",), self.home))
+
+
+class ReconcileTest(unittest.TestCase):
+    """Against a fake `claude` on PATH, the same harness tests/test_loop.py
+    uses for the real CLI."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude_plugin.sh",
+                    bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.state = self.tmp / "state.txt"
+        self.calls = self.tmp / "calls.txt"
+        self.state.write_text("")
+        patch = unittest.mock.patch.dict(os.environ, {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_PLUGIN_STATE": str(self.state),
+            "FAKE_PLUGIN_CALLS": str(self.calls),
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def calls_made(self) -> list[str]:
+        if not self.calls.exists():
+            return []
+        return [line for line in self.calls.read_text().splitlines() if line]
+
+    def test_an_empty_selection_runs_no_command_at_all(self):
+        self.assertIsNone(reconcile(()))
+        self.assertEqual(self.calls_made(), [])
+
+    def test_an_already_installed_and_enabled_plugin_touches_nothing(self):
+        self.state.write_text("superpowers@claude-plugins-official\n")
+        self.assertIsNone(reconcile(("superpowers",)))
+        # One read, and no network: this is the steady state on every start,
+        # so a marketplace outage must not be able to stop the loop.
+        self.assertEqual(self.calls_made(), ["plugin list --json"])
+
+    def test_a_disabled_plugin_is_enabled_not_reinstalled(self):
+        self.state.write_text("!caveman@caveman\n")
+        self.assertIsNone(reconcile(("caveman",)))
+        self.assertIn("plugin enable caveman@caveman --scope user",
+                      self.calls_made())
+        self.assertNotIn("install", " ".join(self.calls_made()))
+
+    def test_a_missing_plugin_adds_its_marketplace_then_installs_it(self):
+        self.assertIsNone(reconcile(("ponytail",)))
+        calls = self.calls_made()
+        self.assertIn("plugin marketplace add DietrichGebert/ponytail", calls)
+        self.assertIn("plugin install ponytail@ponytail --scope user", calls)
+        self.assertLess(calls.index("plugin marketplace add DietrichGebert/ponytail"),
+                        calls.index("plugin install ponytail@ponytail --scope user"))
+
+    def test_a_plugin_outside_the_set_installs_without_a_marketplace_add(self):
+        self.assertIsNone(reconcile(("mine@market",)))
+        calls = self.calls_made()
+        self.assertIn("plugin install mine@market --scope user", calls)
+        self.assertNotIn("marketplace", " ".join(calls))
+
+    def test_a_failing_marketplace_add_is_reported_and_stops_the_loop(self):
+        with unittest.mock.patch.dict(os.environ, {"FAKE_PLUGIN_FAIL": "marketplace"}):
+            problem = reconcile(("ponytail",))
+        self.assertIsNotNone(problem)
+        self.assertIn("DietrichGebert/ponytail", problem)
+        self.assertIn("fake failure", problem)
+
+    def test_an_install_that_reports_success_and_does_nothing_is_caught(self):
+        # The re-check exists for exactly this: a CLI exiting 0 having
+        # installed nothing must not read as success, or the session runs
+        # with a prompt describing skills it does not have.
+        with unittest.mock.patch.dict(os.environ, {"FAKE_PLUGIN_NOOP_INSTALL": "1"}):
+            problem = reconcile(("caveman",))
+        self.assertIsNotNone(problem)
+        self.assertIn("caveman@caveman", problem)
+
+    def test_a_claude_that_is_not_on_path_is_reported_not_raised(self):
+        with unittest.mock.patch.dict(os.environ, {"PATH": str(self.tmp / "empty")}):
+            problem = reconcile(("caveman",))
+        self.assertIsNotNone(problem)
+        self.assertIn("claude", problem)
+
+    def test_unparseable_output_is_reported_not_raised(self):
+        bad = self.tmp / "bin" / "claude"
+        bad.write_text("#!/usr/bin/env bash\necho not json\n")
+        bad.chmod(0o755)
+        problem = reconcile(("caveman",))
+        self.assertIsNotNone(problem)
+        self.assertIn("could not read", problem)
+
+    def test_the_dict_shaped_list_output_is_accepted_too(self):
+        # `claude plugin list --json` returns a bare list; the --available
+        # variant returns {"installed": [...], "available": [...]}. Accepting
+        # both is one line against CLI version drift.
+        bad = self.tmp / "bin" / "claude"
+        bad.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo '{\"installed\":[{\"id\":\"caveman@caveman\",\"scope\":\"user\","
+            "\"enabled\":true}]}'\n"
+        )
+        bad.chmod(0o755)
+        self.assertIsNone(reconcile(("caveman",)))
+
+    def test_a_plugin_installed_only_in_another_scope_is_installed_at_user(self):
+        # Project and local scope are per-repository and cannot be used here,
+        # so a project-scope row is not evidence this box has it.
+        bad = self.tmp / "bin" / "claude"
+        shutil.copy(Path(__file__).parent / "fake_claude_plugin.sh", bad)
+        self.state.write_text("caveman@caveman\n")
+        with unittest.mock.patch("claudeloop.plugins._installed",
+                                 side_effect=[{"caveman@caveman": ("project", True)},
+                                              {"caveman@caveman": ("user", True)}]):
+            self.assertIsNone(reconcile(("caveman",)))
+        self.assertIn("plugin install caveman@caveman --scope user",
+                      self.calls_made())
