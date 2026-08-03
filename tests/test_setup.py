@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import socket
 import tempfile
 import tomllib
@@ -11,6 +12,9 @@ from pathlib import Path
 
 from claudeloop import setup
 from claudeloop.config import load_config
+
+from .gitrepo import make_repo      # a real repo, one commit on main, gpgsign off
+from .jira_fake import FakeJira     # routes {"POST /search/jql": (status, body)}
 
 
 class DumpTomlTest(unittest.TestCase):
@@ -464,3 +468,112 @@ class JiraRetentionTest(SetupServerBase):
         self.assertEqual(code, 200)
         data = tomllib.loads(self.path.read_text())
         self.assertEqual(data["jira"]["token"], "jira-secret")
+
+
+class CheckRouteTest(SetupServerBase):
+    def test_the_repo_check_passes_on_a_real_repository(self):
+        # A real repository, not a bare .git directory: worktree.probe shells
+        # out to `git worktree prune` and then resolves the default branch.
+        repo = make_repo(self.tmp / "real")
+        code, payload = self.post("/api/setup/test",
+                                  {"what": "repo", "values": {"repo": str(repo)}})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"], payload["message"])
+
+    def test_the_repo_check_explains_a_directory_that_is_not_a_repository(self):
+        (self.tmp / "plain").mkdir()
+        _, payload = self.post("/api/setup/test",
+                               {"what": "repo", "values": {"repo": str(self.tmp / "plain")}})
+        self.assertFalse(payload["ok"])
+        self.assertIn("worktree", payload["message"])
+
+    def test_an_unknown_check_is_refused(self):
+        code, payload = self.post("/api/setup/test",
+                                  {"what": "astrology", "values": {}})
+        self.assertEqual(code, 400)
+
+    def test_the_claude_check_reports_what_the_cli_says(self):
+        # A fake `claude` on PATH, the same technique the session tests use.
+        fake = self.tmp / "bin"
+        fake.mkdir()
+        script = fake / "claude"
+        script.write_text(
+            "#!/bin/sh\n"
+            'echo \'{"loggedIn": true, "authMethod": "claude.ai",'
+            ' "subscriptionType": "pro"}\'\n'
+        )
+        script.chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{fake}:{old}"
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", old))
+        _, payload = self.post("/api/setup/test", {"what": "claude", "values": {}})
+        self.assertTrue(payload["ok"], payload["message"])
+        self.assertIn("claude.ai", payload["message"])
+
+    def test_the_claude_check_says_so_when_the_cli_is_missing(self):
+        old = os.environ["PATH"]
+        os.environ["PATH"] = str(self.tmp / "empty")
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", old))
+        _, payload = self.post("/api/setup/test", {"what": "claude", "values": {}})
+        self.assertFalse(payload["ok"])
+        self.assertIn("claude", payload["message"])
+
+    def test_the_claude_check_applies_session_env(self):
+        # A stray ANTHROPIC_API_KEY in [session_env] moves the session off
+        # subscription billing, so the rate_limit_events the whole recovery
+        # path is built on stop arriving. The check must see what a session
+        # would see, not what this process happens to have.
+        fake = self.tmp / "bin2"
+        fake.mkdir()
+        script = fake / "claude"
+        script.write_text(
+            "#!/bin/sh\n"
+            'echo "{\\"loggedIn\\": true, \\"authMethod\\": \\"$ANTHROPIC_API_KEY\\"}"\n'
+        )
+        script.chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{fake}:{old}"
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", old))
+        _, payload = self.post("/api/setup/test", {
+            "what": "claude",
+            "values": {"session_env": {"ANTHROPIC_API_KEY": "leaked"}},
+        })
+        self.assertIn("leaked", payload["message"])
+
+    def test_the_jira_check_reports_the_matching_issue_count(self):
+        jira = FakeJira({"POST /search/jql": (
+            200, {"issues": [{"key": "OPS-1"}, {"key": "OPS-2"}]})})
+        self.addCleanup(jira.close)
+        _, payload = self.post("/api/setup/test", {"what": "jira", "values": {
+            "source": "jira",
+            "jira": {"site": jira.url, "email": "a@b.c", "token": "t",
+                     "project": "OPS"},
+        }})
+        self.assertTrue(payload["ok"], payload["message"])
+        self.assertIn("2", payload["message"])
+
+    def test_the_jira_check_sends_the_composed_query(self):
+        # The label guard is spliced on by compose_jql. A check that reported
+        # on a different query than the loop will actually poll with would be
+        # worse than no check.
+        jira = FakeJira({"POST /search/jql": (200, {"issues": []})})
+        self.addCleanup(jira.close)
+        self.post("/api/setup/test", {"what": "jira", "values": {
+            "source": "jira",
+            "jira": {"site": jira.url, "email": "a@b.c", "token": "t",
+                     "project": "OPS", "status": "To Do"},
+        }})
+        _, _, body = jira.requests[-1]
+        self.assertIn('project = "OPS"', body["jql"])
+        self.assertIn("claudeloop-done", body["jql"])
+
+    def test_the_jira_check_reports_a_rejected_token(self):
+        jira = FakeJira({"POST /search/jql": (401, {"errorMessages": ["nope"]})})
+        self.addCleanup(jira.close)
+        _, payload = self.post("/api/setup/test", {"what": "jira", "values": {
+            "source": "jira",
+            "jira": {"site": jira.url, "email": "a@b.c", "token": "wrong",
+                     "project": "OPS"},
+        }})
+        self.assertFalse(payload["ok"])
+        self.assertIn("401", payload["message"])

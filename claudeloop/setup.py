@@ -13,14 +13,16 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import threading
 import tomllib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import web
-from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config, validate
+from . import web, worktree
+from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config, _compose_jql, validate
+from .jira import JiraClient, JiraError, compose_jql
 
 log = logging.getLogger("claudeloop.setup")
 
@@ -180,6 +182,88 @@ def schema_payload(existing: dict) -> dict:
     }
 
 
+CHECK_TIMEOUT_S = 30
+"""Bounds the claude subprocess. An operator is watching a spinner; a probe
+that can hang forever is worse than one that reports a timeout."""
+
+
+def check_repo(values: dict) -> tuple[bool, str]:
+    """The same probe main() runs at startup, run early enough to matter."""
+    repo = str(values.get("repo", "")).strip()
+    if not repo:
+        return False, "no repository set"
+    problem = worktree.probe(Path(repo).expanduser())
+    return (False, problem) if problem else (
+        True, f"{repo} is usable: git worktrees work and the default branch resolves",
+    )
+
+
+def check_jira(values: dict) -> tuple[bool, str]:
+    """One authenticated search with the composed query.
+
+    A bad token, an unreachable site and a JQL Jira rejects are otherwise
+    indistinguishable from an empty backlog, forever, with nothing saying why
+    -- the loop is built to idle rather than fail on all three. This is the
+    only place that difference is ever visible.
+    """
+    table = values.get("jira") or {}
+    site = str(table.get("site", "")).strip()
+    if not site:
+        return False, "no Jira site set"
+    jql = str(table.get("jql", "")).strip() or _compose_jql(
+        str(table.get("project", "")).strip(), str(table.get("status", "")).strip()
+    )
+    client = JiraClient(site, str(table.get("email", "")), str(table.get("token", "")),
+                        retries=1)
+    try:
+        data = client.search(compose_jql(jql), max_results=50)
+    except JiraError as error:
+        return False, str(error)
+    issues = data.get("issues")
+    if not isinstance(issues, list):
+        return False, f"Jira answered without an issue list: {str(data)[:200]}"
+    return True, (
+        f"{len(issues)} issue(s) match on the first page. Query: {compose_jql(jql)}"
+    )
+
+
+def check_claude(values: dict) -> tuple[bool, str]:
+    """`claude auth status --json`, with [session_env] applied.
+
+    Applied because that is what a session gets: an ANTHROPIC_API_KEY or a
+    CLAUDE_CODE_USE_BEDROCK in that table quietly moves every session off
+    subscription billing, and the rate_limit_events the entire recovery path
+    is built on then stop arriving, with nothing on the dashboard to say so.
+    Reported here as a changed authMethod.
+    """
+    env = {**os.environ}
+    session_env = values.get("session_env")
+    if isinstance(session_env, dict):
+        env.update({str(k): str(v) for k, v in session_env.items()})
+    try:
+        result = subprocess.run(
+            ["claude", "auth", "status", "--json"],
+            capture_output=True, text=True, timeout=CHECK_TIMEOUT_S,
+            stdin=subprocess.DEVNULL, env=env,
+        )
+    except FileNotFoundError:
+        return False, "claude is not on PATH. Install the Claude Code CLI first."
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f"could not run claude: {error}"
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, (result.stderr or result.stdout or "claude said nothing").strip()[:400]
+    if not payload.get("loggedIn"):
+        return False, "claude is installed but not signed in. Run: claude setup-token"
+    method = payload.get("authMethod", "unknown")
+    plan = payload.get("subscriptionType", "")
+    return True, f"signed in via {method}{f' ({plan})' if plan else ''}"
+
+
+CHECKS = {"repo": check_repo, "jira": check_jira, "claude": check_claude}
+
+
 class Handler(web.Handler):
     """Subclassed, not rewritten. `_host_allowed`, `_authorized`, `_json` and
     -- the load-bearing one -- do_POST's `close_connection = True` all come
@@ -219,6 +303,8 @@ class Handler(web.Handler):
             self._validate()
         elif route == "/api/setup/save":
             self._save()
+        elif route == "/api/setup/test":
+            self._test()
         else:
             self._json(404, {"error": "not found"})
 
@@ -256,6 +342,25 @@ class Handler(web.Handler):
         # Released after the response is written, so the operator's browser
         # gets its answer before run_setup returns and the server shuts down.
         self.server.saved.set()
+
+    def _test(self) -> None:
+        """A live check reports what the network/CLI says; it deliberately
+        does not run validate() first -- see check_jira's docstring for why
+        conflating the two would make the Jira check untestable and, worse,
+        would require a perfect form before any check could run at all."""
+        payload = self._read_json()
+        if payload is None:
+            return
+        check = CHECKS.get(str(payload.get("what", "")))
+        if check is None:
+            self._json(400, {"error": f"unknown check {payload.get('what')!r}"})
+            return
+        values = payload.get("values")
+        if not isinstance(values, dict):
+            values = {}
+        values = merge_secrets(values, self.server.existing)
+        ok, message = check(values)
+        self._json(200, {"ok": ok, "message": message})
 
     def _read_json(self) -> dict | None:
         """The request body, or None having already answered with an error."""
