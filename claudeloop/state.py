@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at REAL,
     summary     TEXT,
     cost_usd    REAL,
-    question    TEXT
+    question    TEXT,
+    repo        TEXT
 );
 CREATE TABLE IF NOT EXISTS runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +35,18 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 class State:
-    def __init__(self, db_path: Path):
+    """One database per machine, many repositories: `~/.claudeloop/state.db`
+    is shared by every config ever run on the box, so every read that means
+    "this loop's work" is scoped by `repo`. Without it a fresh config points
+    at a repository whose dashboard lists another repository's finished
+    tasks, the Jira backstop suppresses a ticket a different loop finished,
+    and `blocked()` offers a parked task belonging to somewhere else.
+
+    Rows written before the column existed carry NULL and match no scope.
+    """
+
+    def __init__(self, db_path: Path, repo: str = ""):
+        self.repo = repo
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None is autocommit: a crash never loses the last write.
         # check_same_thread=False: the loop is strictly serial and awaits every
@@ -58,18 +70,27 @@ class State:
             self.db.execute("ALTER TABLE tasks ADD COLUMN question TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN repo TEXT")
+        except sqlite3.OperationalError:
+            pass
         # A 'running' row can only mean the previous process died mid-task
         # (crash, SIGKILL, power loss): nothing else leaves it in that state.
-        # Left alone it would misreport as in-progress forever.
-        self.db.execute("UPDATE tasks SET status='interrupted' WHERE status='running'")
+        # Left alone it would misreport as in-progress forever. Scoped to this
+        # repository: two loops over two repositories can run at once, and one
+        # starting up must not rewrite the other's live row.
+        self.db.execute(
+            "UPDATE tasks SET status='interrupted' WHERE status='running' AND repo IS ?",
+            (self.repo,),
+        )
 
     def start_task(self, task_id: str, source: str, source_ref: str, text: str) -> None:
         now = time.time()
         self.db.execute(
             "INSERT OR REPLACE INTO tasks"
-            " (id, source, source_ref, text, status, created_at, started_at)"
-            " VALUES (?, ?, ?, ?, 'running', ?, ?)",
-            (task_id, source, source_ref, text, now, now),
+            " (id, source, source_ref, text, status, created_at, started_at, repo)"
+            " VALUES (?, ?, ?, ?, 'running', ?, ?, ?)",
+            (task_id, source, source_ref, text, now, now, self.repo),
         )
 
     def finish_task(
@@ -112,6 +133,8 @@ class State:
         """
         rows = self.db.execute(
             "SELECT id FROM tasks WHERE status IN ('done', 'failed', 'blocked')"
+            " AND repo IS ?",
+            (self.repo,),
         )
         return {row["id"] for row in rows}
 
@@ -123,7 +146,8 @@ class State:
         """
         return self.db.execute(
             "SELECT id, source, source_ref, text, question FROM tasks"
-            " WHERE status='blocked' ORDER BY finished_at"
+            " WHERE status='blocked' AND repo IS ? ORDER BY finished_at",
+            (self.repo,),
         ).fetchall()
 
     def last_session(self, task_id: str) -> str | None:

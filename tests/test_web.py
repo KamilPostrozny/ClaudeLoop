@@ -137,7 +137,7 @@ class StateRouteTest(WebTestBase):
         self.assertEqual(payload["pending"], [])
 
     def test_completed_comes_from_the_database(self):
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         state.start_task("abc", "file", "- [ ] done thing", "done thing")
         state.finish_task("abc", "done", "went fine", 1.5)
         payload = self.get_json("/api/state")
@@ -145,8 +145,29 @@ class StateRouteTest(WebTestBase):
         self.assertEqual(payload["completed"][0]["status"], "done")
         self.assertAlmostEqual(payload["completed"][0]["cost_usd"], 1.5)
 
+    def test_another_repositorys_finished_tasks_are_not_listed(self):
+        # One state.db per machine, one dashboard per repository: a fresh
+        # config pointed at a new repository must not open onto the history
+        # of whatever ran here before it.
+        other = State(self.cfg.home / "state.db", str(self.tmp / "other-repo"))
+        other.start_task("abc", "file", "- [ ] old thing", "old thing")
+        other.finish_task("abc", "done", "went fine", 1.5)
+        self.assertEqual(self.get_json("/api/state")["completed"], [])
+
+    def test_a_database_without_the_repo_column_is_not_an_error(self):
+        # The dashboard is served before main_loop opens State, so a database
+        # written by a version without `repo` can be queried before the
+        # migration has run.
+        path = self.cfg.home / "state.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT)")
+        conn.commit()
+        conn.close()
+        self.assertEqual(self.get_json("/api/state")["completed"], [])
+
     def test_a_running_task_is_not_in_the_completed_list(self):
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         state.start_task("abc", "file", "- [ ] x", "x")
         self.assertEqual(self.get_json("/api/state")["completed"], [])
 
@@ -160,7 +181,7 @@ class StateRouteTest(WebTestBase):
         # ones finished used to fall off the dashboard and become
         # unanswerable under the file source, whose only channel is the
         # answer box in this same list.
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         state.start_task("old-blocked", "file", "- [ ] old", "old")
         state.finish_task("old-blocked", "blocked", "waiting", 0.1, question="ok?")
         for i in range(web.RECENT_TASKS):
@@ -203,7 +224,7 @@ class JiraSourceStateTest(unittest.TestCase):
 
 class TaskRouteTest(WebTestBase):
     def seed(self):
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         state.start_task("0123456789abcdef", "file", "- [ ] x", "x")
         state.start_run("0123456789abcdef", "uuid-1", 0)
         state.finish_task("0123456789abcdef", "done", "fine", 0.25)
@@ -529,7 +550,7 @@ class SseTest(WebTestBase):
 class AnswerRouteTest(WebTestBase):
     def setUp(self):
         super().setUp()
-        self.state = State(self.cfg.home / "state.db")
+        self.state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         self.task_id = task_id("ambiguous thing")
         self.state.start_task(self.task_id, "file", "- [ ] ambiguous thing",
                               "ambiguous thing")

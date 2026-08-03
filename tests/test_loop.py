@@ -330,7 +330,7 @@ class MainLoopTest(unittest.TestCase):
 
     def test_records_status_and_cost(self):
         asyncio.run(loop.main_loop(self.cfg, once=True))
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         rows = state.db.execute("SELECT * FROM tasks ORDER BY started_at").fetchall()
         self.assertEqual([row["status"] for row in rows], ["done", "done"])
         self.assertEqual([row["summary"] for row in rows], ["fake work", "fake work"])
@@ -345,7 +345,7 @@ class MainLoopTest(unittest.TestCase):
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
         self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         runs = state.db.execute("SELECT * FROM runs ORDER BY id").fetchall()
         self.assertEqual(len(runs), 2, "expected one limited run and one resume")
         self.assertEqual(runs[0]["exit_reason"], "RateLimited")
@@ -363,7 +363,7 @@ class MainLoopTest(unittest.TestCase):
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
         self.assertEqual(self.tasks.read_text(), "- [!] doomed thing\n")
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         row = state.db.execute("SELECT * FROM tasks").fetchone()
         self.assertEqual(row["status"], "failed")
         self.assertIn("no_result", row["summary"])
@@ -381,7 +381,7 @@ class MainLoopTest(unittest.TestCase):
 
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         row = state.db.execute("SELECT * FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
         self.assertEqual(row["summary"], "fake work")
@@ -399,7 +399,7 @@ class MainLoopTest(unittest.TestCase):
 
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         row = state.db.execute("SELECT * FROM tasks").fetchone()
         self.assertEqual(row["status"], "blocked")
         self.assertEqual(row["question"], "which currency?")
@@ -418,13 +418,13 @@ class MainLoopTest(unittest.TestCase):
         # Deliberately not marked `- [!]`: an environment fault is not a task
         # verdict, and marking it would burn through the whole list.
         self.assertEqual(self.tasks.read_text(), "- [ ] first thing\n- [ ] second thing\n")
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         row = state.db.execute("SELECT * FROM tasks").fetchone()
         # 'error', not 'failed': a source with a re-run backstop keyed on
         # terminal statuses (JiraSource, via State.terminal_ids()) must be
         # able to offer this task again after an environment crash.
         self.assertEqual(row["status"], "error")
-        self.assertNotIn(row["id"], State(self.cfg.home / "state.db").terminal_ids())
+        self.assertNotIn(row["id"], State(self.cfg.home / "state.db", str(self.cfg.repo)).terminal_ids())
         self.assertIn("ClaudeLoop crashed", row["summary"])
 
 
@@ -687,7 +687,7 @@ class PromptSelectionTest(unittest.TestCase):
     def test_first_attempt_gets_the_task_then_a_wait_says_continue_then_a_nudge_names_the_problem(
         self,
     ):
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         source = FileSource(self.tasks)
         task = source.pending()[0]
 
@@ -864,7 +864,7 @@ class SourceLifecycleTest(unittest.TestCase):
         os.environ["PATH"] = self.old_path
 
     def test_start_comes_first_and_mark_carries_the_cost(self):
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         source = RecordingSource()
         task = Task("abcd1234abcd1234", "OPS-1: do it", "jira", "OPS-1")
         asyncio.run(loop.run_task(self.cfg, state, source, task))
@@ -898,7 +898,7 @@ class ResumeWithAnswerTest(unittest.TestCase):
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
         self.args_out = self.tmp / "args.txt"
         os.environ["FAKE_ARGS_OUT"] = str(self.args_out)
-        self.state = State(self.cfg.home / "state.db")
+        self.state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         self.source = FileSource(self.tasks)
         self.task = self.source.pending()[0]
 
@@ -1027,10 +1027,10 @@ class ResumeWithAnswerTest(unittest.TestCase):
             with self.assertLogs("claudeloop", level="ERROR"):
                 asyncio.run(loop.main_loop(self.cfg, once=True))
 
-        row = State(self.cfg.home / "state.db").db.execute(
+        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
             "SELECT * FROM tasks WHERE id=?", (self.task.id,)).fetchone()
         self.assertEqual(row["status"], "error")
-        self.assertNotIn(self.task.id, State(self.cfg.home / "state.db").terminal_ids())
+        self.assertNotIn(self.task.id, State(self.cfg.home / "state.db", str(self.cfg.repo)).terminal_ids())
         self.assertEqual(self.tasks.read_text(), "- [ ] first thing\n",
                          "an environment fault must not mark the task in its source")
         # The dashboard has to see it too: the failure path this replaced
@@ -1134,7 +1134,7 @@ class FindAnsweredTest(unittest.TestCase):
         )
         self.cfg.tasks_file.write_text("- [ ] alpha\n")
         (self.cfg.repo / ".git").mkdir(parents=True)
-        self.state = State(self.cfg.home / "state.db")
+        self.state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         self.source = FileSource(self.cfg.tasks_file)
         self.task = self.source.pending()[0]
         self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
@@ -1216,7 +1216,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
 
         self.assertEqual(self.tasks.read_text(),
                          "- [!] ambiguous thing\n- [!] second thing\n")
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         rows = state.db.execute("SELECT status FROM tasks").fetchall()
         self.assertEqual([row["status"] for row in rows], ["blocked", "blocked"])
 
@@ -1227,7 +1227,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.assertEqual(self.tasks.read_text(), "- [!] ambiguous thing\n")
 
         # A human answers, exactly as the dashboard's POST route will.
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         parked = state.blocked()[0]
         run_dir = self.cfg.home / "runs" / parked["id"]
         (run_dir / "answer.json").write_text(json.dumps({"answer": "use EUR"}))
@@ -1239,7 +1239,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
         self.assertEqual(self.tasks.read_text(), "- [x] ambiguous thing\n")
-        row = State(self.cfg.home / "state.db").db.execute(
+        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
             "SELECT status FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
         self.assertFalse((run_dir / "answer.json").exists(),
@@ -1249,7 +1249,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.blocking_cli()
         self.tasks.write_text("- [ ] ambiguous thing\n")
         asyncio.run(loop.main_loop(self.cfg, once=True))
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         parked = state.blocked()[0]
         (self.cfg.home / "runs" / parked["id"] / "answer.json").write_text(
             json.dumps({"answer": "use EUR"}))
@@ -1263,7 +1263,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.assertTrue(
             any("could not reopen" in line for line in logs.output), logs.output
         )
-        row = State(self.cfg.home / "state.db").db.execute(
+        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
             "SELECT status FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
 
@@ -1310,7 +1310,7 @@ class AnsweredMainLoopTest(unittest.TestCase):
 
         self.assertEqual(self.tasks.read_text(),
                          "- [!] ambiguous thing\n- [x] second thing\n")
-        state = State(self.cfg.home / "state.db")
+        state = State(self.cfg.home / "state.db", str(self.cfg.repo))
         parked = state.blocked()[0]
         others = [row["id"] for row in
                   state.db.execute("SELECT id FROM tasks WHERE status='done'").fetchall()]

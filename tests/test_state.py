@@ -117,6 +117,51 @@ class StateTest(unittest.TestCase):
         reopened = State(self.tmp / "nested" / "state.db")
         self.assertEqual(reopened.task("abc")["text"], "do it")
 
+    def test_the_pre_migration_database_also_gains_the_repo_column(self):
+        path = self.tmp / "pre-repo.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id          TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                source_ref  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                started_at  REAL,
+                finished_at REAL,
+                summary     TEXT,
+                cost_usd    REAL,
+                question    TEXT
+            );
+            INSERT INTO tasks (id, source, source_ref, text, status, created_at)
+            VALUES ('old', 'file', '- [ ] old', 'old', 'done', 1.0);
+            """
+        )
+        conn.close()
+
+        state = State(path, "/repo")
+        columns = {row[1] for row in state.db.execute("PRAGMA table_info(tasks)")}
+        self.assertIn("repo", columns)
+        # A row from before the column existed carries NULL and belongs to no
+        # repository, so it is nobody's history rather than everybody's.
+        self.assertEqual(state.terminal_ids(), set())
+
+    def test_records_the_repository_it_was_opened_for(self):
+        state = State(self.tmp / "scoped.db", "/repo/one")
+        state.start_task("abc", "file", "- [ ] do it", "do it")
+        self.assertEqual(state.task("abc")["repo"], "/repo/one")
+
+    def test_another_repositorys_running_row_is_left_alone_on_startup(self):
+        # Two loops over two repositories share one state.db. One starting up
+        # must not rewrite the other's live row to 'interrupted'.
+        path = self.tmp / "shared.db"
+        one = State(path, "/repo/one")
+        one.start_task("abc", "file", "- [ ] do it", "do it")
+        State(path, "/repo/two")
+        self.assertEqual(one.task("abc")["status"], "running")
+
 
 class TerminalIdsTest(unittest.TestCase):
     def setUp(self):
@@ -140,6 +185,14 @@ class TerminalIdsTest(unittest.TestCase):
         self.assertEqual(self.state.terminal_ids(), set())
 
     def test_is_empty_on_a_fresh_database(self):
+        self.assertEqual(self.state.terminal_ids(), set())
+
+    def test_another_repositorys_finished_work_is_not_a_backstop(self):
+        # One state.db, two repositories: a ticket finished elsewhere must not
+        # suppress this loop's copy of it.
+        other = State(self.tmp / "state.db", "/repo/other")
+        other.start_task("aaaa", "jira", "OPS-1", "text")
+        other.finish_task("aaaa", "done", "summary", 0.0)
         self.assertEqual(self.state.terminal_ids(), set())
 
     def test_terminal_ids_works_from_a_different_thread(self):
@@ -178,6 +231,15 @@ class BlockedTest(unittest.TestCase):
             self.state.start_task(f"id{index}", "file", "- [ ] x", "x")
             if status != "running":
                 self.state.finish_task(f"id{index}", status, "", 0.0)
+
+        self.assertEqual(self.state.blocked(), [])
+
+    def test_blocked_ignores_another_repositorys_parked_task(self):
+        # Otherwise this loop resumes a task parked against a different
+        # repository, in a worktree cut from its own.
+        other = State(self.tmp / "state.db", "/repo/other")
+        other.start_task("aaaa", "jira", "OPS-1", "OPS-1: do a thing")
+        other.finish_task("aaaa", "blocked", "stuck", 0.0, "which currency?")
 
         self.assertEqual(self.state.blocked(), [])
 

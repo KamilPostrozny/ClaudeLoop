@@ -525,7 +525,7 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
     `once` drains the tasks pending right now -- including any that have been
     answered -- and returns, for tests.
     """
-    state = State(cfg.home / "state.db")
+    state = State(cfg.home / "state.db", str(cfg.repo))
     source = build_source(cfg, state)
     heartbeat = asyncio.create_task(_heartbeat())
     try:

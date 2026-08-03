@@ -495,6 +495,16 @@ it. The work is mostly in the landmines below rather than in the packaging.
 
 Real, deliberately deferred, tracked here so they are not lost.
 
+- **`state.db` is one database per machine, scoped by a repository path
+  string.** `home` is `~/.claudeloop` for every config, so `tasks` now carries
+  a `repo` column and the three reads that mean "this loop's work" —
+  `terminal_ids()`, `blocked()`, and the dashboard's completed list — filter on
+  it. Two consequences left standing: moving or renaming a repository orphans
+  its history, since the scope is the configured path verbatim; and `tasks.id`
+  is still the primary key on its own, so two repositories whose file sources
+  hold identical task text share an id and `start_task`'s `INSERT OR REPLACE`
+  overwrites the other's row. A composite `(id, repo)` key would fix the
+  second and needs a table rebuild.
 - `state.db` is created at the default umask and holds task text, summaries and
   blocked questions. Run directories are 0700 and event logs 0600, but
   `~/.claudeloop` and `runs/` are not.

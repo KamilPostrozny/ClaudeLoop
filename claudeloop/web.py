@@ -145,10 +145,17 @@ def api_state(cfg: Config) -> dict:
                 for row in db.execute(
                     "SELECT id, text, status, summary, question, cost_usd,"
                     " started_at, finished_at FROM tasks WHERE status != 'running'"
+                    " AND repo IS ?"
                     " ORDER BY (status='blocked') DESC, COALESCE(finished_at, started_at) DESC LIMIT ?",
-                    (RECENT_TASKS,),
+                    (str(cfg.repo), RECENT_TASKS),
                 )
             ]
+        except sqlite3.OperationalError:
+            # The dashboard is served before main_loop opens State, so a
+            # database written by a version without `repo` is queryable here
+            # before the migration has run. An empty list for that window
+            # beats a 500.
+            completed = []
         finally:
             db.close()
     return {
