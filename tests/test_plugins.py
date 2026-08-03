@@ -217,6 +217,22 @@ class ReconcileTest(unittest.TestCase):
         bad.chmod(0o755)
         self.assertIsNone(reconcile(("caveman",)))
 
+    def test_a_user_scope_row_wins_over_a_later_non_user_row_for_the_same_id(self):
+        # The real CLI emits one row per scope a plugin is installed in --
+        # the same id repeated. A project-scope row landing after the
+        # user-scope row for the same id must not make _installed forget
+        # the user-scope one just because the CLI happened to emit it last.
+        bad = self.tmp / "bin" / "claude"
+        bad.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_PLUGIN_CALLS\"\n"
+            "echo '[{\"id\":\"caveman@caveman\",\"scope\":\"user\",\"enabled\":true},"
+            "{\"id\":\"caveman@caveman\",\"scope\":\"project\",\"enabled\":true}]'\n"
+        )
+        bad.chmod(0o755)
+        self.assertIsNone(reconcile(("caveman",)))
+        self.assertNotIn("install", " ".join(self.calls_made()))
+
     def test_a_plugin_installed_only_in_another_scope_is_installed_at_user(self):
         # Project and local scope are per-repository and cannot be used here,
         # so a project-scope row is not evidence this box has it.

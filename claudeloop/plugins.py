@@ -180,7 +180,14 @@ def _claude(*args: str) -> str:
 def _installed() -> dict[str, tuple[str, bool]]:
     """Every installed plugin id, mapped to its scope and whether it is
     enabled. A local read: no network, which is why an already-reconciled
-    box cannot be stopped by a marketplace being unreachable."""
+    box cannot be stopped by a marketplace being unreachable.
+
+    The real CLI emits one row per scope a plugin is installed in, id
+    repeated -- a plugin installed at both `project` and `user` scope is two
+    rows. reconcile only ever cares about `user`, so a user-scope row always
+    wins regardless of which row the CLI happens to emit last; a non-user
+    row only fills in when no user-scope row has been seen yet.
+    """
     raw = _claude("plugin", "list", "--json")
     try:
         data = json.loads(raw)
@@ -196,10 +203,13 @@ def _installed() -> dict[str, tuple[str, bool]]:
         if not isinstance(row, dict):
             continue
         plugin_id = row.get("id") or row.get("pluginId")
-        if plugin_id:
-            found[str(plugin_id)] = (
-                str(row.get("scope", "")), bool(row.get("enabled"))
-            )
+        if not plugin_id:
+            continue
+        plugin_id = str(plugin_id)
+        scope = str(row.get("scope", ""))
+        if found.get(plugin_id, ("", False))[0] == "user" and scope != "user":
+            continue  # keep the user-scope row already recorded
+        found[plugin_id] = (scope, bool(row.get("enabled")))
     return found
 
 
@@ -209,8 +219,9 @@ def reconcile(names: Sequence[str]) -> str | None:
     A message written for a human, or None. Called once at startup beside
     worktree.probe, and fatal for the same reason: a loop that runs on
     without the plugins the operator chose spends days in a shape they did
-    not ask for, one paid session at a time. Nothing here runs when the
-    selection is empty or already satisfied.
+    not ask for, one paid session at a time. An empty selection runs no
+    subprocess at all; an already-satisfied non-empty selection touches the
+    network not at all -- one local read and nothing else.
 
     User scope, never project or local: those write into the target
     repository's .claude/, which nothing ClaudeLoop writes may do, and would
