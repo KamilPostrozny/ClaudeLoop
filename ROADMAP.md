@@ -17,7 +17,8 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S3** | Jira task source | merged |
 | **S2b** | Question and answer channel | merged |
 | **S6** | A git worktree per task | merged |
-| **S5** | Setup wizard and config schema | not started |
+| **S5** | Setup wizard and config schema | in progress |
+| **S7** | Proposed plugin set | not started |
 | **S4** | Home Assistant OS addon | not started |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
@@ -213,28 +214,105 @@ a task that parks and is answered reports only the cost of its resume.
 
 Spec: `docs/superpowers/specs/2026-08-02-claudeloop-worktree-per-task-design.md`
 
+### S5 — Setup wizard and config schema
+
+`config.py` gained a frozen `Field` dataclass and a `SCHEMA` tuple describing
+all 23 keys — 15 top-level, 8 under `[jira]` — each carrying its type,
+default, wizard screen (`step`), label, help text, and the `required_if`/
+`check` callables that used to be hand-written `if` statements. `validate(data)
+-> (values, errors)` walks the table once and returns coerced values plus
+**every** error found, not just the first; `load_config` calls the same
+function and raises on `errors[0]`, appending a clause naming how many more
+problems there are, so its behaviour from the command line is unchanged. The
+hand-written `_jql`, `_jira`, `_optional_path`, `REQUIRED_KEYS` and `JIRA_KEYS`
+are gone. **`SCHEMA`'s declaration order is load-bearing**: `tasks_file`'s
+check reads `repo`, `web_token`'s condition reads `web_host`, `jira.project`'s
+reads `jira.jql` — a field's `required_if` and `check` see only the coerced
+values of fields declared earlier in the tuple.
+
+`setup.py` (new) is the wizard: a schema-driven TOML emitter (`dump_toml`), a
+loopback-only HTTP server subclassing `web.Handler` — inheriting the `Host`
+check, the token check, and the request-smuggling fix `do_POST`'s
+`close_connection = True` gives it for free rather than a hand-rolled second
+handler losing it — and the three live checks (`repo`, Jira, `claude auth
+status`). `python -m claudeloop` with no config, or `--setup` with one, calls
+`setup.run_setup()` and blocks until a valid file is written, then falls
+through into the ordinary `load_config` → `worktree.probe` → loop startup
+path unchanged: the config that runs is the one the ordinary loader reads back
+off disk, never the wizard's own in-memory parse, so a file the wizard could
+write but the loader would reject is impossible to actually run on.
+
+**Setup mode's two barriers are independent on purpose.** It binds `127.0.0.1`
+unconditionally, ignoring whatever an existing config's `web_host` says, and
+requires a `secrets.token_urlsafe(32)` printed to the console on every
+request, page load included. With no config there is no `web_token` to
+authenticate against, so the network barrier can't be the only one.
+
+Five things surfaced across the build and a real-browser pass that the design
+had not anticipated:
+
+- `json.dumps`'s default `ensure_ascii=True` encodes a non-BMP character as a
+  UTF-16 surrogate pair, which TOML rejects outright as not a Unicode scalar
+  value — one emoji in a `[session_env]` value made `tomllib` fail on the
+  *whole file* the wizard had just written. `ensure_ascii=False` alone then
+  opens the other end: it emits `U+007F` raw, which a TOML basic string
+  forbids. The fix needed both, plus quoting for a `[session_env]` name that
+  isn't a bare TOML key — a name containing a dot silently parses as a nested
+  table otherwise.
+- `write_config` narrows the open fd's mode with `os.fchmod` before writing,
+  because `O_CREAT`'s mode only applies when the call creates the file —
+  rewriting an existing `0644 config.toml`, which is exactly the `--setup`
+  path, would otherwise put a Jira token on disk world-readable for the length
+  of the write.
+- The file is written from `validate()`'s coerced values, not the browser's
+  own strings (`_typed()` exists for exactly this): a form posts every field
+  as a string, so the submission verbatim would have written
+  `web_port = "9999"` and `strict_mcp = "false"` as quoted TOML — survivable by
+  `load_config`'s lenient coercion, but then handed back to the browser on the
+  next `--setup` as the JS-truthy string `"false"` for what is really `False`.
+- `merge_secrets` treats an absent section as unchanged, not cleared, so an
+  operator on `source = "file"` doesn't silently lose a stored Jira token by
+  saving.
+- Driving the actual page in a real browser — not just asserting on its text,
+  which is all three earlier review rounds had done — found the worst of the
+  five: the page's `get()` did not fall back to a field's default, so on a
+  genuine first run it believed `source` was `""` while the server defaulted
+  it to `"file"`. The `<select>` displayed "file" anyway, because its own
+  render branch falls back separately, and the `Next` gate — itself a correct
+  fix for an earlier defect, filtering errors to only the fields actually
+  rendered on screen — therefore had nothing on this screen to block on. The
+  result: **a first run could not be completed at all.** Save reported
+  `tasks_file` was required, on a screen where that field had never rendered,
+  with no way out short of knowing to toggle the source dropdown to `jira` and
+  back. No fixture and no headless DOM shim caught it; only an actual Chrome
+  session did.
+
+Verified in that same browser session, against a scratch repository: the full
+six-screen first run completes end to end; the saved `config.toml` is `0600`,
+carries only the keys actually supplied (no pinned defaults), and is annotated
+with the schema's own help text as `#` comments; `load_config` reads it back
+with correct types; `run_setup`'s blocking wait returns, handing off to the
+loop in the same process; the repo check returns real `worktree.probe` output.
+**The two-task live smoke test this slice's spec calls for — driving the
+wizard from nothing and letting the loop it hands off to actually run two
+tasks — has not been run yet.**
+
+Spec: `docs/superpowers/specs/2026-08-03-claudeloop-setup-wizard-design.md`
+
 ---
 
 ## Next
 
-### S5 — Setup wizard and config schema
+### S7 — Proposed plugin set
 
-An in-browser first-run wizard for operators who should not have to hand-edit
-TOML. `Config` carries 16 keys today and will be around 25 after S3, with
-non-obvious interactions between them.
+Split out of S5 during brainstorming: a curated set of plugins and the fourth
+prompt layer their usage files would add is a change to the composed system
+prompt, and prompt strings are the product here — it deserves its own spec,
+its own covering tests, and its own live smoke test rather than riding along
+behind a config refactor.
 
-**Decided:**
+**Decided, carried over verbatim from S5's original entry:**
 
-- **One schema that both validates and renders the wizard**, replacing
-  `config.py`'s hand-written validation. A wizard needs a human explanation per
-  key; a schema is where those live.
-- **It is the first slice to write anything from the browser**, deliberately
-  breaking S2a's global read-only rule, and it writes a file containing tokens.
-- **Setup mode binds loopback unconditionally and additionally requires a
-  one-time token printed to the console.** Two independent barriers: with no
-  config there is no `web_token` to authenticate with, and an unauthenticated
-  setup endpoint would let anyone reaching it configure an agent that runs with
-  bypassed permissions against real credentials.
 - **A curated "proposed plugin set"**, each plugin carrying optional usage
   instructions in **its own file, separate from `instructions.md`** — different
   authors, different lifetimes. That adds a fourth prompt layer, slotting below
@@ -371,6 +449,29 @@ Real, deliberately deferred, tracked here so they are not lost.
   own orderly exit. An operator who kills the orchestrator with SIGKILL must
   also kill the session themselves. Observed during the Jira source's live
   smoke test.
+- **With no config file and no `--setup`, `main()` now blocks on the setup
+  wizard instead of exiting.** Deliberate — S5's whole point is that a
+  first-run operator has something to open instead of a README to read — but
+  it means a `systemd` unit with `Restart=on-failure`, or the S4 addon, whose
+  `config.toml` goes missing hangs holding the loopback socket rather than
+  crash-looping visibly where a supervisor would notice.
+- `write_config`'s fix for `O_CREAT`'s mode only applying to a file it
+  creates — `os.fchmod` on the open fd before writing — has no test that
+  fails without it. The existing test only reads the file's mode after the
+  write finishes, which lands on `0600` either way; a test that would actually
+  fail needs to catch the mode mid-write, e.g. mocking `os.fdopen` to assert
+  `os.fstat(fd)` before any byte is written. Not added: this repo's
+  convention is real files on disk, not mocks. Flagged during S5's review for
+  triage rather than fixed, so it isn't rediscovered as a silent gap later.
+- No automated test executes `static/index.html`'s or `static/setup.html`'s
+  JavaScript. `tests/test_setup.py`'s `WizardPageTest` only asserts on the
+  file's text. Every real client-side defect S5 found — a `[session_env]` row
+  corrupting its siblings on removal, a failed save's errors never reaching
+  the screen, an error on a hidden field wedging `Next` with no visible fix,
+  and the `get()`/default gap that made a first run uncompletable outright —
+  was caught only by a hand-built Node DOM shim or an actual browser session,
+  neither of which runs as part of the test suite. No third-party package may
+  be added to close this; the stdlib has no DOM.
 
 ## Working notes
 
