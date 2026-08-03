@@ -1412,6 +1412,8 @@ class MainReconcilesPluginsTest(unittest.TestCase):
              unittest.mock.patch("claudeloop.worktree.probe", return_value=None), \
              unittest.mock.patch("claudeloop.plugins.reconcile", return_value=None), \
              unittest.mock.patch("claudeloop.loop._serve_dashboard") as serve, \
+             unittest.mock.patch("claudeloop.loop.main_loop",
+                                 new_callable=unittest.mock.MagicMock), \
              unittest.mock.patch("claudeloop.loop.asyncio.run") as run, \
              unittest.mock.patch("claudeloop.loop.DEFAULT_CONFIG") as config_path:
             config_path.exists.return_value = True
