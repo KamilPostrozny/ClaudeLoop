@@ -157,6 +157,11 @@ def _ascii_token(value, values) -> str | None:
 
 
 def _https_site(value, values) -> str | None:
+    if values.get("source") != "jira":
+        # An unused [jira] table -- source = "file", or a value left over
+        # from switching away from source = "jira" -- must not block a
+        # config that never reads it.
+        return None
     if not str(value).startswith("https://"):
         return (
             f"[jira] site {str(value)!r} must start with https:// -- urllib"

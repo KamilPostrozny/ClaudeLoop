@@ -672,3 +672,37 @@ class WizardPageTest(SetupServerBase):
         # it from its own URL.
         page = self.get("/")[1].decode()
         self.assertIn("location.search", page)
+
+    def test_the_logo_and_favicon_are_never_requested_without_the_token(self):
+        # A bare src/href attribute fires before any script runs, and every
+        # route -- including /logo.png -- is token-gated in setup mode. A
+        # static attribute pointing at the plain path 403s on every load.
+        page = self.get("/")[1].decode()
+        self.assertNotIn('src="/logo.png"', page)
+        self.assertNotIn('href="/logo.png"', page)
+        self.assertIn('url("/logo.png")', page)
+
+    def test_the_review_step_can_render_errors_it_is_given(self):
+        # A failed save answers with every error at once, and the Review
+        # screen is the only one left to show them on -- renderReview must
+        # accept and use them, not silently drop them like a no-arg
+        # function would.
+        page = self.get("/")[1].decode()
+        self.assertIn("function renderReview(errors", page)
+        self.assertIn("renderReview(errors)", page)
+
+    def test_next_is_blocked_only_by_currently_rendered_fields(self):
+        # A field's declared step is not the same as being on screen right
+        # now: the [jira] block and tasks_file are also gated on `source`.
+        # Judging Next's block on the declared step alone can wedge the
+        # wizard on a field nothing renders.
+        page = self.get("/")[1].decode()
+        self.assertIn("visibleFields", page)
+        self.assertNotIn("field.step === schema.steps[step].id", page)
+
+    def test_a_save_error_with_no_field_is_shown_verbatim(self):
+        # write_config failing (disk, permissions) answers {"error": ...},
+        # not {"errors": {...}} -- there is no field to blame, so that
+        # message must reach the operator rather than the generic line.
+        page = self.get("/")[1].decode()
+        self.assertIn("answer.error", page)

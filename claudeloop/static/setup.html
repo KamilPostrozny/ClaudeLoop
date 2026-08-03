@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>ClaudeLoop setup</title>
-<link rel="icon" href="/logo.png">
+<link rel="icon" id="favicon">
 <style>
 /* ---------------------------------------------------------------- tokens */
 /* Copied verbatim from static/index.html -- same product, same look. */
@@ -176,7 +176,7 @@ dl.review dd { margin: 0; overflow-wrap: anywhere; }
 <body>
 <main>
   <header class="page">
-    <span class="chip"><img src="/logo.png" alt=""></span>
+    <span class="chip"><img id="logo" alt=""></span>
     <h1>Claude<b>Loop</b><small>Setup</small></h1>
   </header>
 
@@ -196,6 +196,12 @@ dl.review dd { margin: 0; overflow-wrap: anywhere; }
 <script type="module">
 const token = new URLSearchParams(location.search).get("token") || "";
 const url = (route) => route + "?token=" + encodeURIComponent(token);
+
+// Static markup left these bare: an href/src attribute fires before this
+// script runs and would 403, since setup mode always sets a non-empty
+// web_token and every route -- including /logo.png -- is token-gated.
+document.getElementById("favicon").href = url("/logo.png");
+document.getElementById("logo").src = url("/logo.png");
 
 const api = async (route, body) => {
   const response = await fetch(url(route), {
@@ -225,15 +231,23 @@ const get = (key) => {
 
 const payload = () => ({ ...draft, session_env: env });
 
+// The keys actually rendered on the current screen -- recomputed by every
+// render(). A field's declared `step` alone is not enough to know whether
+// it is on screen right now: the [jira] block and tasks_file are also
+// gated on `source`, so an error on a hidden field must not be judged
+// against this set, or it can block Next with no visible way to fix it.
+let visibleFields = new Set();
+
 function render(errors = {}) {
   renderNav();
 
   const current = schema.steps[step].id;
   const form = document.getElementById("form");
   form.replaceChildren();
+  visibleFields = new Set();
 
   if (current === "review") {
-    form.append(renderReview());
+    form.append(renderReview(errors));
   } else {
     const card = document.createElement("div");
     card.className = "card";
@@ -243,6 +257,7 @@ function render(errors = {}) {
       // tasks-file field only under source = "file".
       if (field.section === "jira" && get("source") !== "jira") continue;
       if (field.name === "tasks_file" && get("source") !== "file") continue;
+      visibleFields.add(field.key);
       card.append(renderField(field, errors[field.key]));
     }
     if (current === "advanced") card.append(renderEnvRows());
@@ -290,7 +305,11 @@ function renderField(field, error) {
   } else if (field.type === "bool") {
     input = document.createElement("input");
     input.type = "checkbox";
-    input.checked = Boolean(get(field.key));
+    // get() only falls back to "" when the draft truly has nothing for this
+    // key (?? only substitutes on null/undefined) -- a real `false` passes
+    // through unchanged, so this still tells "unset" apart from "set false".
+    const current = get(field.key);
+    input.checked = current === "" ? Boolean(field.default) : Boolean(current);
   } else {
     input = document.createElement("input");
     input.type = field.secret ? "password" : "text";
@@ -358,7 +377,6 @@ function testButton(what, label) {
 function renderEnvRows() {
   const box = document.createElement("div");
   const label = document.createElement("p");
-  label.innerHTML = "";
   label.textContent = "Extra environment variables for every session";
   label.style.fontWeight = "600";
   box.append(label);
@@ -400,32 +418,57 @@ function envRow(name, value) {
   valueInput.value = value;
   valueInput.setAttribute("aria-label", "Environment variable value");
 
-  const sync = () => {
+  // Takes the container explicitly rather than reading row.parentElement
+  // itself: on removal the row is detached *before* syncing, so by then
+  // row.parentElement is already null and there would be nothing left to
+  // rebuild from but the removed row.
+  const sync = (container) => {
     // Rebuild the whole table from the rows currently on screen: simplest
     // way to keep a rename from silently duplicating the old key.
-    const current = row.parentElement ? [...row.parentElement.children] : [row];
     for (const key of Object.keys(env)) delete env[key];
-    for (const r of current) {
+    for (const r of container.children) {
       const [n, v] = r.querySelectorAll("input");
       if (n.value.trim()) env[n.value.trim()] = v.value;
     }
   };
-  nameInput.oninput = sync;
-  valueInput.oninput = sync;
+  nameInput.oninput = () => sync(row.parentElement);
+  valueInput.oninput = () => sync(row.parentElement);
 
   const remove = document.createElement("button");
   remove.type = "button";
   remove.textContent = "Remove";
   remove.setAttribute("aria-label", "Remove this variable");
-  remove.onclick = () => { row.remove(); sync(); };
+  remove.onclick = () => { const list = row.parentElement; row.remove(); sync(list); };
 
   row.append(nameInput, valueInput, remove);
   return row;
 }
 
-function renderReview() {
+function renderReview(errors = {}) {
   const wrap = document.createElement("div");
   wrap.className = "card";
+
+  // A failed save answers with every error at once -- unlike the per-step
+  // Next flow, there is no single screen left to walk back to, so every
+  // one has to surface here, named by field and by which step holds it.
+  const problems = Object.entries(errors);
+  if (problems.length) {
+    const box = document.createElement("div");
+    for (const [key, message] of problems) {
+      const field = schema.fields.find((f) => f.key === key);
+      const stepTitle = field
+        ? (schema.steps.find((s) => s.id === field.step) || {}).title || field.step
+        : "";
+      const line = document.createElement("p");
+      line.className = "error";
+      line.textContent = field
+        ? `${field.label} (${stepTitle}): ${message}`
+        : `${key}: ${message}`;
+      box.append(line);
+    }
+    wrap.append(box);
+  }
+
   const list = document.createElement("dl");
   list.className = "review";
   for (const field of schema.fields) {
@@ -482,6 +525,14 @@ document.getElementById("next").onclick = async () => {
       document.body.append(done);
       return;
     }
+    if (answer.error) {
+      // A 500 (e.g. the config could not be written) carries "error", not
+      // "errors" -- there is no field to blame, so show it verbatim rather
+      // than the generic "fix the errors above" when nothing is rendered.
+      message.className = "bad";
+      message.textContent = answer.error;
+      return;
+    }
     render(answer.errors || {});
     message.className = "bad";
     message.textContent = "Fix the errors above before saving.";
@@ -489,10 +540,13 @@ document.getElementById("next").onclick = async () => {
   }
   const answer = await api("/api/setup/validate", { values: payload() });
   const errors = answer.errors || {};
-  const mine = Object.fromEntries(Object.entries(errors).filter(([key]) => {
-    const field = schema.fields.find((f) => f.key === key);
-    return field && field.step === schema.steps[step].id;
-  }));
+  // Judged against what this screen actually rendered, not just its
+  // declared step: the [jira] block and tasks_file are also gated on
+  // `source`, so an error on a field this screen hid must not block Next --
+  // it would have nowhere visible to be fixed. It still surfaces on Review.
+  const mine = Object.fromEntries(
+    Object.entries(errors).filter(([key]) => visibleFields.has(key))
+  );
   // Only this screen's errors block advancing: a later screen's unfilled
   // requirement must never trap the operator on an earlier one.
   if (Object.keys(mine).length) {

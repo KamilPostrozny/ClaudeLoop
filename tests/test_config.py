@@ -443,6 +443,24 @@ class JiraConfigTest(unittest.TestCase):
             ), home=self.home)
         self.assertIn("https://", str(caught.exception))
 
+    def test_an_unused_jira_table_does_not_block_a_file_source_config(self):
+        # A [jira] table left behind after switching source back to "file"
+        # -- or typed and abandoned while trying "jira" -- must not block a
+        # config that never reads it. Same site, still refused under
+        # source = "jira".
+        tasks = self.tmp / "tasks.md"
+        tasks.write_text("")
+        cfg = load_config(self.write(
+            f'source = "file"\ntasks_file = "{tasks}"\n'
+            '[jira]\nsite = "http://x"\n'
+        ), home=self.home)
+        self.assertEqual(cfg.source, "file")
+        with self.assertRaises(ValueError):
+            load_config(self.write(
+                'source = "jira"\n[jira]\n'
+                'site = "http://x"\nemail = "a@b.c"\ntoken = "t"\nproject = "OPS"\n'
+            ), home=self.home)
+
     def test_each_missing_jira_key_is_named(self):
         for key in ("site", "email", "token", "jql"):
             with self.subTest(key=key):
