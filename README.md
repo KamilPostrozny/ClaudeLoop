@@ -263,8 +263,16 @@ exits immediately; a repository declaring none runs no subprocess at all. A
 marketplace that cannot be added stops startup with a message rather than
 running days of sessions without the plugins the repository asked for.
 
-This means a fresh machine needs **no** human running `/plugins`: clone,
-point ClaudeLoop at it, and the repository's plugins come up on their own.
+This means a fresh machine needs **no** human running `/plugins`: run the
+setup wizard, and the repository's plugins come up on their own — the
+registration happens at startup, before the dashboard binds and before the
+first session, and every task's worktree gets them.
+
+One condition: **`.claude/settings.json` has to be committed.** Sessions run
+in a worktree cut from the default branch, so an uncommitted or ignored
+settings file exists for the marketplace registration (which reads your
+checkout) but not for the session that would use it — the marketplace lands,
+the plugin never does.
 
 Plugins for your own machine rather than for the repository stay yours to
 install (`claude plugin install <name> --scope user`); ClaudeLoop never
