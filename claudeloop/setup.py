@@ -254,6 +254,11 @@ def check_claude(values: dict) -> tuple[bool, str]:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
         return False, (result.stderr or result.stdout or "claude said nothing").strip()[:400]
+    if not isinstance(payload, dict):
+        # json.loads is happy with null, a list or a bare string, and none of
+        # them have .get -- the same hazard jira.py's _once already guards.
+        # Reachable from a `claude` that is really a wrapper or an alias.
+        return False, f"claude answered with {type(payload).__name__}, not an object"
     if not payload.get("loggedIn"):
         return False, "claude is installed but not signed in. Run: claude setup-token"
     method = payload.get("authMethod", "unknown")
@@ -403,6 +408,13 @@ def merge_secrets(submitted: dict, existing: dict) -> dict:
         # same reason a blank field is, so a stored jira.token survives a
         # save the operator never mentioned Jira in.
         table = merged.setdefault(field.section, {}) if field.section else merged
+        if not isinstance(table, dict):
+            # A submitted section that is not a table at all -- "jira": "oops".
+            # setdefault does not replace an existing non-dict value, so this
+            # would otherwise reach .get() and take down the request thread
+            # with no response at all. validate() reports it properly a moment
+            # later; this only has to not crash first.
+            continue
         old = existing.get(field.section, {}) if field.section else existing
         if not isinstance(old, dict):
             continue

@@ -1,3 +1,4 @@
+import base64
 import http.client
 import json
 import os
@@ -577,3 +578,72 @@ class CheckRouteTest(SetupServerBase):
         }})
         self.assertFalse(payload["ok"])
         self.assertIn("401", payload["message"])
+
+    def test_a_malformed_jira_table_does_not_crash_the_repo_check(self):
+        # merge_secrets runs for every check, not just "jira" -- a submitted
+        # "jira": "oops" must not take the request thread down before
+        # check_repo ever runs. Pre-fix this drops the connection: no status,
+        # no body, and even assertEqual(code, 200) never returns.
+        repo = make_repo(self.tmp / "real2")
+        code, payload = self.post("/api/setup/test", {"what": "repo", "values": {
+            "repo": str(repo), "jira": "oops",
+        }})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"], payload["message"])
+
+    def test_a_malformed_jira_table_is_reported_by_validate_not_silently_accepted(self):
+        # The crash guard in merge_secrets must not turn into silent
+        # acceptance. With source = "jira" the malformed table is equivalent
+        # to an empty one, and every required jira.* key is then missing --
+        # validate() still catches that, it just does not crash getting there.
+        code, payload = self.post("/api/setup/validate", {"values": {
+            "repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md",
+            "source": "jira", "jira": "oops",
+        }})
+        self.assertEqual(code, 200)
+        self.assertIn("jira.site", payload["errors"])
+
+    def test_the_claude_check_reports_a_non_object_json_answer_without_crashing(self):
+        # json.loads accepts null, a list, a bare string -- none of them have
+        # .get. A `claude` that is really a broken wrapper or a shell alias
+        # can print any of these, and this check exists to catch exactly
+        # that kind of misconfiguration, not crash on it.
+        fake = self.tmp / "bin3"
+        fake.mkdir()
+        script = fake / "claude"
+        script.write_text("#!/bin/sh\necho 'null'\n")
+        script.chmod(0o755)
+        old = os.environ["PATH"]
+        os.environ["PATH"] = f"{fake}:{old}"
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", old))
+        code, payload = self.post("/api/setup/test", {"what": "claude", "values": {}})
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["message"])
+
+
+class CheckRouteSecretTest(SetupServerBase):
+    """The stored Jira token, not the blank one just submitted, is what a
+    live check actually authenticates with -- pinned separately from
+    CheckRouteTest, whose fixture never has a stored secret to merge."""
+
+    def existing_config(self) -> str:
+        return (
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            "[jira]\n"
+            'token = "stored-secret-token"\n'
+        )
+
+    def test_a_blank_submitted_token_checks_with_the_stored_one(self):
+        jira = FakeJira({"POST /search/jql": (200, {"issues": []})})
+        self.addCleanup(jira.close)
+        code, payload = self.post("/api/setup/test", {"what": "jira", "values": {
+            "source": "jira",
+            "jira": {"site": jira.url, "email": "a@b.c", "token": "",
+                     "project": "OPS"},
+        }})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"], payload["message"])
+        expected = "Basic " + base64.b64encode(b"a@b.c:stored-secret-token").decode()
+        self.assertEqual(jira.authorizations[-1], expected)

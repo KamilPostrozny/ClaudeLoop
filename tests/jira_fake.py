@@ -24,6 +24,9 @@ class FakeJira:
         self.routes = {key: list(value) if isinstance(value, list) else [value]
                        for key, value in routes.items()}
         self.requests: list[tuple[str, str, dict | None]] = []
+        # Kept separate from .requests rather than widening that tuple: two
+        # existing tests unpack it as exactly (method, path, payload).
+        self.authorizations: list[str | None] = []
         server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.server = server
         self.url = f"http://127.0.0.1:{server.server_port}"
@@ -48,6 +51,7 @@ class FakeJira:
                 payload = json.loads(raw) if raw else None
                 path = self.path.split("?")[0].replace("/rest/api/2", "")
                 fake.requests.append((self.command, path, payload))
+                fake.authorizations.append(self.headers.get("Authorization"))
                 queue = fake.routes.get(f"{self.command} {path}")
                 if not queue:
                     status, body = 404, {"errorMessages": ["no such route"]}
