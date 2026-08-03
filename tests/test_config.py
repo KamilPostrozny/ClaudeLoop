@@ -134,6 +134,61 @@ class ConfigTest(unittest.TestCase):
         cfg = load_config(path, home=self.tmp / "home")
         self.assertIsInstance(cfg.session_timeout_s, float)
 
+    def test_plugins_defaults_to_nothing_selected(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.plugins, ())
+
+    def test_plugins_reads_a_list(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            'plugins = ["superpowers", "caveman"]\n'
+        )
+        cfg = load_config(path, home=self.tmp / "home")
+        self.assertEqual(cfg.plugins, ("superpowers", "caveman"))
+
+    def test_plugins_accepts_a_comma_separated_string(self):
+        # A hand-edited `plugins = "superpowers"` must not become a list of
+        # eleven characters.
+        values, errors = validate({"repo": str(self.repo),
+                                   "tasks_file": str(self.tmp / "tasks.md"),
+                                   "plugins": "superpowers, caveman"})
+        self.assertEqual(errors, [])
+        self.assertEqual(values["plugins"], ("superpowers", "caveman"))
+
+    def test_plugins_drops_blank_entries(self):
+        values, _ = validate({"repo": str(self.repo),
+                              "tasks_file": str(self.tmp / "tasks.md"),
+                              "plugins": ["superpowers", "", "  "]})
+        self.assertEqual(values["plugins"], ("superpowers",))
+
+    def test_plugins_rejects_a_name_outside_the_proposed_set(self):
+        # Caught here rather than at startup hours later: the wizard can show
+        # this while the operator is still looking at the screen.
+        _, errors = validate({"repo": str(self.repo),
+                              "tasks_file": str(self.tmp / "tasks.md"),
+                              "plugins": ["superpowers", "nonesuch"]})
+        self.assertEqual([key for key, _ in errors], ["plugins"])
+        self.assertIn("nonesuch", errors[0][1])
+        self.assertIn("plugin@marketplace", errors[0][1])
+
+    def test_plugins_accepts_an_explicit_plugin_at_marketplace(self):
+        values, errors = validate({"repo": str(self.repo),
+                                   "tasks_file": str(self.tmp / "tasks.md"),
+                                   "plugins": ["mine@market"]})
+        self.assertEqual(errors, [])
+        self.assertEqual(values["plugins"], ("mine@market",))
+
+    def test_plugins_rejects_a_table(self):
+        _, errors = validate({"repo": str(self.repo),
+                              "tasks_file": str(self.tmp / "tasks.md"),
+                              "plugins": {"superpowers": True}})
+        self.assertEqual([key for key, _ in errors], ["plugins"])
+
 
 class WebConfigTest(unittest.TestCase):
     def setUp(self):

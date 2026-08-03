@@ -33,6 +33,7 @@ STEPS = (
     {"id": "source", "title": "Task source"},
     {"id": "dashboard", "title": "Dashboard"},
     {"id": "instructions", "title": "Instructions"},
+    {"id": "plugins", "title": "Plugins"},
     {"id": "advanced", "title": "Advanced"},
     {"id": "review", "title": "Review and save"},
 )
