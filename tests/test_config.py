@@ -183,6 +183,18 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(values["plugins"], ("mine@market",))
 
+    def test_plugins_accepts_a_proposed_plugin_spelled_fully_qualified(self):
+        # plugins = ["superpowers@claude-plugins-official"] is exactly the
+        # form `claude plugin list` prints and README.md invites for
+        # anything outside the built-in three -- it must validate clean
+        # rather than only the bare "superpowers" spelling.
+        values, errors = validate(
+            {"repo": str(self.repo),
+             "tasks_file": str(self.tmp / "tasks.md"),
+             "plugins": ["superpowers@claude-plugins-official"]})
+        self.assertEqual(errors, [])
+        self.assertEqual(values["plugins"], ("superpowers@claude-plugins-official",))
+
     def test_plugins_rejects_a_table(self):
         _, errors = validate({"repo": str(self.repo),
                               "tasks_file": str(self.tmp / "tasks.md"),

@@ -93,8 +93,14 @@ and gives one to a plugin outside the proposed set."""
 
 
 def by_name(name: str) -> Plugin | None:
+    """Resolve a `plugins` entry to a proposed plugin by either spelling:
+    its short name, or its full `plugin_id` (`name@marketplace`) -- the form
+    `claude plugin list` prints and README.md tells operators to use for
+    anything outside the built-in three. Both must resolve, or a fully
+    qualified proposed plugin installs correctly but silently composes no
+    prompt layer at all."""
     for plugin in PROPOSED:
-        if plugin.name == name:
+        if name in (plugin.name, plugin.plugin_id):
             return plugin
     return None
 
@@ -115,16 +121,20 @@ def usage_section(
     say.
 
     Blocks follow `proposed` order rather than the operator's, so the prompt
-    reads the same whatever order config.toml lists.
+    reads the same whatever order config.toml lists. A selection entry
+    matches a proposed plugin by either its short name or its full
+    `plugin_id` -- the same two spellings `by_name` accepts -- so a fully
+    qualified `plugin@marketplace` entry still gets its block, under the
+    plugin's short name.
     """
     selected = list(names)
     blocks = []
     for plugin in proposed:
-        if plugin.name in selected:
+        if plugin.name in selected or plugin.plugin_id in selected:
             text = _override(plugin.name, home) or plugin.usage
             if text:
                 blocks.append(f"### {plugin.name}\n\n{text}")
-    known = {plugin.name for plugin in proposed}
+    known = {name for plugin in proposed for name in (plugin.name, plugin.plugin_id)}
     for name in selected:
         if name not in known:
             text = _override(name, home)
@@ -245,8 +255,15 @@ def reconcile(names: Sequence[str]) -> str | None:
             if plugin.marketplace:
                 log.info("adding marketplace %s", plugin.marketplace)
                 # Idempotent when it is already configured -- confirmed
-                # against the real CLI, which exits 0 saying so.
-                _claude("plugin", "marketplace", "add", plugin.marketplace)
+                # against the real CLI, which exits 0 saying so. --scope
+                # user is explicit, matching enable and install below: the
+                # CLI's default for `marketplace add` is user scope today,
+                # but nothing pins it, and _claude never sets cwd, so an
+                # auto-detecting default would otherwise write into whatever
+                # directory ClaudeLoop was launched from -- plausibly the
+                # target repository.
+                _claude("plugin", "marketplace", "add", plugin.marketplace,
+                        "--scope", "user")
             log.info("installing %s", plugin.plugin_id)
             _claude("plugin", "install", plugin.plugin_id, "--scope", "user")
         if not changed:

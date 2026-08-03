@@ -44,6 +44,13 @@ class TableTest(unittest.TestCase):
         self.assertIsNone(by_name("nonesuch"))
         self.assertIsNone(by_name(""))
 
+    def test_by_name_also_resolves_the_fully_qualified_plugin_id(self):
+        # `claude plugin list` prints ids in this form, and README.md tells
+        # operators to spell anything outside the built-in three this way --
+        # it must resolve to the same proposed plugin as the short name.
+        self.assertIs(by_name("superpowers@claude-plugins-official"),
+                      by_name("superpowers"))
+
 
 class SuperpowersUsageTest(unittest.TestCase):
     """Prompt text is the product here: these pin the two rules the text
@@ -79,6 +86,15 @@ class UsageSectionTest(unittest.TestCase):
 
     def test_a_plugin_with_text_renders_a_header_and_its_block(self):
         text = usage_section(("superpowers",), self.home)
+        self.assertTrue(text.startswith("## Plugin usage\n\n### superpowers\n\n"))
+        self.assertIn(SUPERPOWERS_USAGE, text)
+
+    def test_a_fully_qualified_selection_still_composes_its_block(self):
+        # plugins = ["superpowers@claude-plugins-official"] is the exact
+        # spelling `claude plugin list` prints and README.md invites for
+        # anything outside the built-in three -- it must not silently lose
+        # the fourth prompt layer.
+        text = usage_section(("superpowers@claude-plugins-official",), self.home)
         self.assertTrue(text.startswith("## Plugin usage\n\n### superpowers\n\n"))
         self.assertIn(SUPERPOWERS_USAGE, text)
 
