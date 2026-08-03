@@ -377,15 +377,25 @@ class PluginLayerTest(unittest.TestCase):
 
     def test_precedence_names_the_layer_only_when_it_is_present(self):
         self.assertNotIn("plugin usage", precedence(has_operator=True).lower())
-        with_layer = precedence(has_operator=True, has_plugins=True)
-        self.assertIn("plugin usage instructions", with_layer)
-        self.assertIn("below the operator instructions", with_layer)
+        # Pin the whole sentence when plugins are present with an operator layer.
+        with_operator = precedence(has_operator=True, has_plugins=True)
+        self.assertIn(
+            "The plugin usage instructions are ClaudeLoop's own advice about "
+            "the tools it installed for you. They rank below the operator "
+            "instructions and above the definition of done.",
+            with_operator
+        )
 
     def test_precedence_does_not_name_an_absent_operator_layer(self):
         # Same rule the operator clause already follows: never send a session
-        # to reconcile against a layer that is not there.
+        # to reconcile against a layer that is not there. Pin the whole sentence
+        # when plugins are present but no operator layer.
         text = precedence(has_operator=False, has_plugins=True)
-        self.assertIn("plugin usage instructions", text)
+        self.assertIn(
+            "The plugin usage instructions are ClaudeLoop's own advice about "
+            "the tools it installed for you. They rank above the definition of done.",
+            text
+        )
         self.assertNotIn("below the operator instructions", text)
 
     def test_the_layer_is_composed_from_the_operators_override_file(self):

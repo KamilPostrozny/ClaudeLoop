@@ -144,13 +144,18 @@ def precedence(has_operator: bool, has_plugins: bool = False) -> str:
             "The operator instructions outrank the definition of done below."
         )
     if has_plugins:
-        clause = (
-            "The plugin usage instructions are ClaudeLoop's own advice about "
-            "the tools it installed for you"
-        )
         if has_operator:
-            clause += ", and rank below the operator instructions"
-        parts.append(clause + " and above the definition of done.")
+            clause = (
+                "The plugin usage instructions are ClaudeLoop's own advice about "
+                "the tools it installed for you. They rank below the operator "
+                "instructions and above the definition of done."
+            )
+        else:
+            clause = (
+                "The plugin usage instructions are ClaudeLoop's own advice about "
+                "the tools it installed for you. They rank above the definition of done."
+            )
+        parts.append(clause)
     parts.append(
         "The definition of done is the base. Where layers conflict, follow "
         "the higher one and say so in your summary."
