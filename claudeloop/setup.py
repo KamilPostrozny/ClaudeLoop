@@ -147,7 +147,12 @@ def field_payload(field) -> dict:
         "help": field.help,
         "secret": field.secret,
         "choices": list(field.choices),
-        "required": field.required or field.required_if is not None,
+        # Unconditional only. A required_if field (tasks_file, web_token,
+        # every jira.* key) is only required in some states -- web_token at
+        # the loopback default is not one of them -- and the page has no way
+        # to re-evaluate the condition itself, so folding it in here marked
+        # "Dashboard token *" as required even when it plainly is not.
+        "required": field.required,
     }
 
 

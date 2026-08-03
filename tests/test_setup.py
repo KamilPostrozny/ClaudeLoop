@@ -224,6 +224,20 @@ class FirstRunTest(SetupServerBase):
             self.assertTrue(field["help"])
             self.assertIn(field["step"], [step["id"] for step in payload["steps"]])
 
+    def test_required_is_true_only_for_unconditionally_required_fields(self):
+        # web_token, tasks_file and every jira.* key are only required in
+        # some states (web_token: not loopback; tasks_file: source = "file";
+        # jira.*: source = "jira") -- folding required_if into "required"
+        # marked "Dashboard token *" as required even at the loopback
+        # default, where it plainly is not. repo is the one field that is
+        # unconditionally required.
+        payload = json.loads(self.get("/api/setup/schema")[1])
+        by_key = {field["key"]: field for field in payload["fields"]}
+        self.assertTrue(by_key["repo"]["required"])
+        self.assertFalse(by_key["web_token"]["required"])
+        self.assertFalse(by_key["tasks_file"]["required"])
+        self.assertFalse(by_key["jira.site"]["required"])
+
     def test_the_schema_route_says_this_is_a_first_run(self):
         payload = json.loads(self.get("/api/setup/schema")[1])
         self.assertFalse(payload["editing"])
