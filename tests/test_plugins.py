@@ -7,7 +7,6 @@ from pathlib import Path
 
 from claudeloop.plugins import (
     PROPOSED,
-    SUPERPOWERS_USAGE,
     Plugin,
     by_name,
     reconcile,
@@ -16,10 +15,10 @@ from claudeloop.plugins import (
 
 
 class TableTest(unittest.TestCase):
-    def test_the_proposed_set_is_three_plugins_in_a_fixed_order(self):
+    def test_the_proposed_set_is_two_plugins_in_a_fixed_order(self):
         self.assertEqual(
             [plugin.name for plugin in PROPOSED],
-            ["superpowers", "caveman", "ponytail"],
+            ["caveman", "ponytail"],
         )
 
     def test_every_proposed_plugin_carries_an_id_marketplace_and_reason(self):
@@ -30,14 +29,11 @@ class TableTest(unittest.TestCase):
             # checkbox with no argument for ticking it.
             self.assertTrue(plugin.reason, plugin.name)
 
-    def test_only_superpowers_carries_usage_text(self):
-        # caveman and ponytail were selected for the set but contribute
-        # nothing to the prompt: both already state their own rules, and a
-        # second copy here would drift out of step with the plugin.
-        self.assertEqual(
-            [plugin.name for plugin in PROPOSED if plugin.usage],
-            ["superpowers"],
-        )
+    def test_no_proposed_plugin_carries_usage_text(self):
+        # caveman and ponytail contribute nothing to the prompt: both already
+        # state their own rules, and a second copy here would drift out of
+        # step with the plugin. The layer is the operator's to fill.
+        self.assertEqual([plugin.name for plugin in PROPOSED if plugin.usage], [])
 
     def test_by_name_finds_a_proposed_plugin_and_nothing_else(self):
         self.assertEqual(by_name("caveman").plugin_id, "caveman@caveman")
@@ -48,29 +44,7 @@ class TableTest(unittest.TestCase):
         # `claude plugin list` prints ids in this form, and README.md tells
         # operators to spell anything outside the built-in three this way --
         # it must resolve to the same proposed plugin as the short name.
-        self.assertIs(by_name("superpowers@claude-plugins-official"),
-                      by_name("superpowers"))
-
-
-class SuperpowersUsageTest(unittest.TestCase):
-    """Prompt text is the product here: these pin the two rules the text
-    exists to carry, so a rewrite that drops one fails rather than passing
-    quietly."""
-
-    def test_it_states_the_question_discipline(self):
-        self.assertIn("go and read it, and never ask", SUPERPOWERS_USAGE)
-        self.assertIn("solely in the operator's head", SUPERPOWERS_USAGE)
-
-    def test_it_refuses_a_subagent_as_a_way_to_dodge_a_question(self):
-        self.assertIn("for breadth, not for dodging a question", SUPERPOWERS_USAGE)
-
-    def test_it_resolves_the_approval_gate(self):
-        self.assertIn("approved this work when they queued it", SUPERPOWERS_USAGE)
-
-    def test_the_approval_licence_is_bounded(self):
-        # A literal-minded agent told "approval already happened" will
-        # generalise it to every gate it meets unless this sentence is here.
-        self.assertIn("licenses nothing about tests, verification", SUPERPOWERS_USAGE)
+        self.assertIs(by_name("caveman@caveman"), by_name("caveman"))
 
 
 class UsageSectionTest(unittest.TestCase):
@@ -85,18 +59,19 @@ class UsageSectionTest(unittest.TestCase):
         self.assertEqual(usage_section(("caveman", "ponytail"), self.home), "")
 
     def test_a_plugin_with_text_renders_a_header_and_its_block(self):
-        text = usage_section(("superpowers",), self.home)
-        self.assertTrue(text.startswith("## Plugin usage\n\n### superpowers\n\n"))
-        self.assertIn(SUPERPOWERS_USAGE, text)
+        one = Plugin("aaa", "aaa@m", "m", reason="r", usage="A text")
+        text = usage_section(("aaa",), self.home, proposed=(one,))
+        self.assertTrue(text.startswith("## Plugin usage\n\n### aaa\n\n"))
+        self.assertIn("A text", text)
 
     def test_a_fully_qualified_selection_still_composes_its_block(self):
-        # plugins = ["superpowers@claude-plugins-official"] is the exact
-        # spelling `claude plugin list` prints and README.md invites for
-        # anything outside the built-in three -- it must not silently lose
-        # the fourth prompt layer.
-        text = usage_section(("superpowers@claude-plugins-official",), self.home)
-        self.assertTrue(text.startswith("## Plugin usage\n\n### superpowers\n\n"))
-        self.assertIn(SUPERPOWERS_USAGE, text)
+        # plugins = ["aaa@m"] is the exact spelling `claude plugin list`
+        # prints and README.md invites for anything outside the built-in
+        # set -- it must not silently lose the fourth prompt layer.
+        one = Plugin("aaa", "aaa@m", "m", reason="r", usage="A text")
+        text = usage_section(("aaa@m",), self.home, proposed=(one,))
+        self.assertTrue(text.startswith("## Plugin usage\n\n### aaa\n\n"))
+        self.assertIn("A text", text)
 
     def test_blocks_follow_proposed_order_not_selection_order(self):
         one = Plugin("aaa", "aaa@m", "m", reason="r", usage="A text")
@@ -105,12 +80,22 @@ class UsageSectionTest(unittest.TestCase):
         self.assertLess(text.index("### aaa"), text.index("### zzz"))
 
     def test_a_plugin_usage_file_replaces_the_built_in_text(self):
+        one = Plugin("aaa", "aaa@m", "m", reason="r", usage="A text")
         directory = self.home / "plugin-usage"
         directory.mkdir()
-        (directory / "superpowers.md").write_text("operator's own wording\n")
-        text = usage_section(("superpowers",), self.home)
+        (directory / "aaa.md").write_text("operator's own wording\n")
+        text = usage_section(("aaa",), self.home, proposed=(one,))
         self.assertIn("operator's own wording", text)
-        self.assertNotIn(SUPERPOWERS_USAGE, text)
+        self.assertNotIn("A text", text)
+
+    def test_a_usage_file_gives_a_proposed_plugin_its_only_block(self):
+        # No proposed plugin ships usage text now, so this file is the whole
+        # fourth layer for one of them.
+        directory = self.home / "plugin-usage"
+        directory.mkdir()
+        (directory / "caveman.md").write_text("keep it terse\n")
+        text = usage_section(("caveman", "ponytail"), self.home)
+        self.assertEqual(text, "## Plugin usage\n\n### caveman\n\nkeep it terse")
 
     def test_a_usage_file_gives_a_plugin_outside_the_set_a_block(self):
         directory = self.home / "plugin-usage"
@@ -122,13 +107,14 @@ class UsageSectionTest(unittest.TestCase):
     def test_an_unreadable_usage_file_falls_back_to_the_built_in(self):
         # Same rule prompt._read already follows: a layer is optional, and a
         # session must not fail to start over a permissions mistake.
+        one = Plugin("aaa", "aaa@m", "m", reason="r", usage="A text")
         directory = self.home / "plugin-usage"
         directory.mkdir()
-        path = directory / "superpowers.md"
+        path = directory / "aaa.md"
         path.write_text("unreadable")
         path.chmod(0o000)
         self.addCleanup(path.chmod, 0o600)
-        self.assertIn(SUPERPOWERS_USAGE, usage_section(("superpowers",), self.home))
+        self.assertIn("A text", usage_section(("aaa",), self.home, proposed=(one,)))
 
 
 class ReconcileTest(unittest.TestCase):
@@ -163,8 +149,8 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.calls_made(), [])
 
     def test_an_already_installed_and_enabled_plugin_touches_nothing(self):
-        self.state.write_text("superpowers@claude-plugins-official\n")
-        self.assertIsNone(reconcile(("superpowers",)))
+        self.state.write_text("ponytail@ponytail\n")
+        self.assertIsNone(reconcile(("ponytail",)))
         # One read, and no network: this is the steady state on every start,
         # so a marketplace outage must not be able to stop the loop.
         self.assertEqual(self.calls_made(), ["plugin list --json"])
@@ -186,19 +172,16 @@ class ReconcileTest(unittest.TestCase):
             calls.index("plugin install ponytail@ponytail --scope user"))
 
     def test_a_fully_qualified_proposed_plugin_installs_exactly_once(self):
-        # plugins = ["superpowers@claude-plugins-official"]: by_name must
-        # resolve this to the real proposed plugin (with its marketplace),
-        # not fall through to reconcile's unknown-plugin fallback, which
-        # would install the same id a second time under a fake Plugin with
-        # no marketplace.
-        self.assertIsNone(reconcile(("superpowers@claude-plugins-official",)))
+        # plugins = ["caveman@caveman"]: by_name must resolve this to the
+        # real proposed plugin (with its marketplace), not fall through to
+        # reconcile's unknown-plugin fallback, which would install the same
+        # id a second time under a fake Plugin with no marketplace.
+        self.assertIsNone(reconcile(("caveman@caveman",)))
         calls = self.calls_made()
-        self.assertIn(
-            "plugin marketplace add anthropics/claude-plugins-official --scope user",
-            calls)
+        self.assertIn("plugin marketplace add JuliusBrussee/caveman --scope user",
+                      calls)
         self.assertEqual(
-            calls.count("plugin install superpowers@claude-plugins-official --scope user"),
-            1)
+            calls.count("plugin install caveman@caveman --scope user"), 1)
 
     def test_a_plugin_outside_the_set_installs_without_a_marketplace_add(self):
         self.assertIsNone(reconcile(("mine@market",)))

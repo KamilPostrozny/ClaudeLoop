@@ -146,32 +146,32 @@ class ConfigTest(unittest.TestCase):
         path = self.write(
             f'repo = "{self.repo}"\n'
             f'tasks_file = "{self.tmp}/tasks.md"\n'
-            'plugins = ["superpowers", "caveman"]\n'
+            'plugins = ["caveman", "ponytail"]\n'
         )
         cfg = load_config(path, home=self.tmp / "home")
-        self.assertEqual(cfg.plugins, ("superpowers", "caveman"))
+        self.assertEqual(cfg.plugins, ("caveman", "ponytail"))
 
     def test_plugins_accepts_a_comma_separated_string(self):
-        # A hand-edited `plugins = "superpowers"` must not become a list of
-        # eleven characters.
+        # A hand-edited `plugins = "caveman"` must not become a list of
+        # seven characters.
         values, errors = validate({"repo": str(self.repo),
                                    "tasks_file": str(self.tmp / "tasks.md"),
-                                   "plugins": "superpowers, caveman"})
+                                   "plugins": "caveman, ponytail"})
         self.assertEqual(errors, [])
-        self.assertEqual(values["plugins"], ("superpowers", "caveman"))
+        self.assertEqual(values["plugins"], ("caveman", "ponytail"))
 
     def test_plugins_drops_blank_entries(self):
         values, _ = validate({"repo": str(self.repo),
                               "tasks_file": str(self.tmp / "tasks.md"),
-                              "plugins": ["superpowers", "", "  "]})
-        self.assertEqual(values["plugins"], ("superpowers",))
+                              "plugins": ["caveman", "", "  "]})
+        self.assertEqual(values["plugins"], ("caveman",))
 
     def test_plugins_rejects_a_name_outside_the_proposed_set(self):
         # Caught here rather than at startup hours later: the wizard can show
         # this while the operator is still looking at the screen.
         _, errors = validate({"repo": str(self.repo),
                               "tasks_file": str(self.tmp / "tasks.md"),
-                              "plugins": ["superpowers", "nonesuch"]})
+                              "plugins": ["caveman", "nonesuch"]})
         self.assertEqual([key for key, _ in errors], ["plugins"])
         self.assertIn("nonesuch", errors[0][1])
         self.assertIn("plugin@marketplace", errors[0][1])
@@ -184,21 +184,21 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(values["plugins"], ("mine@market",))
 
     def test_plugins_accepts_a_proposed_plugin_spelled_fully_qualified(self):
-        # plugins = ["superpowers@claude-plugins-official"] is exactly the
-        # form `claude plugin list` prints and README.md invites for
-        # anything outside the built-in three -- it must validate clean
-        # rather than only the bare "superpowers" spelling.
+        # plugins = ["caveman@caveman"] is exactly the form `claude plugin
+        # list` prints and README.md invites for anything outside the
+        # built-in set -- it must validate clean rather than only the bare
+        # "caveman" spelling.
         values, errors = validate(
             {"repo": str(self.repo),
              "tasks_file": str(self.tmp / "tasks.md"),
-             "plugins": ["superpowers@claude-plugins-official"]})
+             "plugins": ["caveman@caveman"]})
         self.assertEqual(errors, [])
-        self.assertEqual(values["plugins"], ("superpowers@claude-plugins-official",))
+        self.assertEqual(values["plugins"], ("caveman@caveman",))
 
     def test_plugins_rejects_a_table(self):
         _, errors = validate({"repo": str(self.repo),
                               "tasks_file": str(self.tmp / "tasks.md"),
-                              "plugins": {"superpowers": True}})
+                              "plugins": {"caveman": True}})
         self.assertEqual([key for key, _ in errors], ["plugins"])
 
 

@@ -340,17 +340,16 @@ Spec: `docs/superpowers/specs/2026-08-03-claudeloop-setup-wizard-design.md`
 is a frozen dataclass — `name`, `plugin_id` (`name@marketplace`),
 `marketplace`, `reason` (the wizard's one-line checkbox caption) and `usage`
 (the fourth prompt layer's text, empty on the ordinary plugin). `PROPOSED` is
-superpowers, caveman and ponytail, in that order; `by_name` looks one up by
-its `config.toml` shorthand. Only `superpowers` carries `usage` —
-its brainstorming skill asks a human one question at a time and refuses to
-implement without approval, both wrong under an orchestrator, so
-`SUPERPOWERS_USAGE` tells the session to read the repository instead of
-asking, and that queuing the task *was* the approval. `caveman` and
-`ponytail` ship none, by design: both already state their own rules.
+caveman and ponytail, in that order; `by_name` looks one up by its
+`config.toml` shorthand. Neither carries `usage`, by design: both already
+state their own rules, so the fourth layer is the operator's to fill through
+`~/.claudeloop/plugin-usage/<name>.md`. The set shipped with a third entry
+whose `usage` text worked around its human-in-the-loop habits; it was dropped
+afterwards, along with that text.
 
 `config.py` gained `plugins: tuple[str, ...]` — `Field("plugins", "list",
 step="plugins", default=())`, a `"list"` branch in `_coerce`, and a
-`_known_plugins` check: a bare name must be one of the three proposed, and
+`_known_plugins` check: a bare name must be one of the proposed set, and
 anything else must carry its own `@marketplace`, because `reconcile` has
 nowhere else to learn one.
 
@@ -389,7 +388,7 @@ PROPOSED)` builds one `### <name>` block per selected plugin that has
 something to say, in `PROPOSED` order rather than the operator's config
 order, so the prompt reads the same regardless of how `plugins` is written.
 `~/.claudeloop/plugin-usage/<name>.md`, if present, replaces a built-in
-plugin's text and gives a plugin outside the proposed three a block of its
+plugin's text and gives a plugin outside the proposed set a block of its
 own; unreadable counts as absent, so a permissions mistake can't stop a
 session starting. `prompt.precedence()` gained `has_plugins`, stating the
 layer only when it is non-empty, and positions it below the operator layer
@@ -399,7 +398,7 @@ slots the block in between the operator instructions and the definition of
 done.
 
 `setup.py` and `static/setup.html` gained a Plugins wizard step: the
-proposed three render as checkboxes with their `reason` as the caption
+proposed set renders as checkboxes with their `reason` as the caption
 (never their `usage` text, which stays server-side), plus a free-text
 `plugin@marketplace, comma separated` row for anything else. `dump_toml`
 writes `plugins` as a TOML array through the same `SCHEMA`-driven path as
@@ -407,7 +406,7 @@ every other key, and an empty selection writes no key at all, exactly like
 every other optional field.
 
 **The live smoke test ran twice**, on `haiku`, against a fresh scratch
-repository each time, `plugins = ["superpowers", "caveman", "ponytail"]`, two
+repository each time, with all three plugins the set then proposed, two
 tasks per run, $0.30 total ($0.148 + $0.154).
 
 **Run 1** deliberately started with `ponytail@ponytail` uninstalled at user
@@ -426,10 +425,10 @@ scope, so the install path ran for real rather than being skipped. Confirmed:
   running session's own `--append-system-prompt` argv in `/proc`, not a
   fixture and not the stored transcript, since Claude Code's transcript does
   not record the appended system prompt.
-- Task 1 was phrased as a feature to design and build, exactly the shape that
-  trips `superpowers`' brainstorming approval gate. It implemented the work
-  and wrote a result file rather than ending its turn waiting for a human to
-  approve a design — the defect `SUPERPOWERS_USAGE` exists to prevent.
+- Task 1 was phrased as a feature to design and build, the shape that trips
+  a workflow plugin's approval gate. It implemented the work and wrote a
+  result file rather than ending its turn waiting for a human to approve a
+  design — the defect that plugin's `usage` text existed to prevent.
 - Neither task blocked, so neither asked a question. Both were marked
   `- [x]`, each committed on its own `claudeloop/<task-id>` branch, and the
   scratch repository never left `main` and was never dirtied.

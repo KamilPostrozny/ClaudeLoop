@@ -226,15 +226,14 @@ and each breaks something different:
 session:
 
 ```toml
-plugins = ["superpowers", "caveman", "ponytail"]
+plugins = ["caveman", "ponytail"]
 ```
 
-Three names are built in, and each carries its marketplace so you don't have
+Two names are built in, and each carries its marketplace so you don't have
 to:
 
 | Name | What it is |
 |---|---|
-| `superpowers` | Brainstorm, plan, test-drive and review, as explicit workflows |
 | `caveman` | Terse output; code, commits and reports stay written normally |
 | `ponytail` | Prefers the smallest solution that works over the general one |
 
@@ -248,16 +247,14 @@ something is genuinely missing, so a marketplace outage cannot stop a loop
 that is already reconciled. A plugin it cannot install stops startup with a
 message rather than running days of sessions without it.
 
-`superpowers` ships usage instructions, because two of its habits are wrong
-under an orchestrator: its brainstorming skill asks a human one question at a
-time, and it refuses to implement until a human approves the design. The
-shipped text tells the session to read the repository instead of asking, and
-that queuing the task *was* the approval. `caveman` and `ponytail` ship none —
-both already state their own rules.
+Neither built-in ships usage instructions of its own — both already state
+their own rules, and a second copy here would drift out of step with the
+plugin.
 
-To replace what a plugin's block says, drop your own
-`~/.claudeloop/plugin-usage/<name>.md`. The same file gives a plugin outside
-the built-in three a block of its own.
+To give a plugin a block in the session's prompt — telling it how to use that
+plugin under an orchestrator — drop your own
+`~/.claudeloop/plugin-usage/<name>.md`. That works for a built-in and for
+anything outside the built-in set alike.
 
 Omitting `plugins` entirely installs nothing and adds no prompt layer.
 

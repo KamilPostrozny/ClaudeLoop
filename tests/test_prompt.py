@@ -12,7 +12,6 @@ from claudeloop.prompt import (
     precedence,
     repo_claude_md,
 )
-from claudeloop.plugins import SUPERPOWERS_USAGE
 
 
 class PromptTest(unittest.TestCase):
@@ -351,15 +350,23 @@ class PluginLayerTest(unittest.TestCase):
         }
         return Config(**{**base, **overrides})
 
+    def usage_file(self, name: str, text: str) -> None:
+        """No proposed plugin ships usage text, so the operator's own file
+        under `home` is what puts the fourth layer in the prompt at all."""
+        directory = self.tmp / "home" / "plugin-usage"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{name}.md").write_text(text)
+
     def test_no_plugins_means_no_layer_and_no_precedence_clause(self):
         text = compose(self.cfg())
         self.assertNotIn("## Plugin usage", text)
         self.assertNotIn("plugin usage instructions", text.lower())
 
     def test_a_selected_plugin_with_text_adds_the_layer(self):
-        text = compose(self.cfg(plugins=("superpowers",)))
+        self.usage_file("caveman", "keep it terse")
+        text = compose(self.cfg(plugins=("caveman",)))
         self.assertIn("## Plugin usage", text)
-        self.assertIn(SUPERPOWERS_USAGE, text)
+        self.assertIn("keep it terse", text)
 
     def test_a_selected_plugin_without_text_adds_nothing(self):
         text = compose(self.cfg(plugins=("caveman",)))
@@ -368,7 +375,8 @@ class PluginLayerTest(unittest.TestCase):
     def test_the_layer_sits_below_the_operator_and_above_done(self):
         instructions = self.tmp / "instructions.md"
         instructions.write_text("operator says hello")
-        text = compose(self.cfg(plugins=("superpowers",),
+        self.usage_file("caveman", "keep it terse")
+        text = compose(self.cfg(plugins=("caveman",),
                                 instructions_file=instructions))
         self.assertLess(text.index("## Operator instructions"),
                         text.index("## Plugin usage"))
@@ -399,12 +407,9 @@ class PluginLayerTest(unittest.TestCase):
         self.assertNotIn("below the operator instructions", text)
 
     def test_the_layer_is_composed_from_the_operators_override_file(self):
-        home = self.tmp / "home"
-        (home / "plugin-usage").mkdir(parents=True)
-        (home / "plugin-usage" / "superpowers.md").write_text("my rules")
-        text = compose(self.cfg(plugins=("superpowers",)))
-        self.assertIn("my rules", text)
-        self.assertNotIn(SUPERPOWERS_USAGE, text)
+        self.usage_file("ponytail", "my rules")
+        text = compose(self.cfg(plugins=("ponytail",)))
+        self.assertIn("### ponytail\n\nmy rules", text)
 
 
 if __name__ == "__main__":

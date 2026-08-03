@@ -9,8 +9,11 @@ session behaves needs instructions the same way the rest of the prompt does.
 
 Each plugin's id, marketplace and prompt text live in one record on purpose,
 so adding one is a single entry rather than a table here and a constant in
-prompt.py. The usage strings are product prompt text: change them like code,
-with a covering test pinning the wording and a live run afterwards.
+prompt.py. No proposed plugin carries `usage` today -- every one of them
+states its own rules -- so the fourth prompt layer comes from an operator's
+own file under `plugin-usage/`. A `usage` string is product prompt text:
+change one like code, with a covering test pinning the wording and a live
+run afterwards.
 """
 
 from __future__ import annotations
@@ -23,32 +26,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger("claudeloop")
-
-SUPERPOWERS_USAGE = (
-    "The superpowers plugin is installed here and its skills apply, with two "
-    "adjustments for running unattended.\n\n"
-    "**Questions.** Its brainstorming skill asks a human one question at a "
-    "time. That is right at a keyboard and wrong here. If the answer is in "
-    "this repository -- its code, its documentation, its roadmap, its git "
-    "history -- go and read it, and never ask. Ask only when the answer "
-    "exists solely in the operator's head: priorities, money, who is "
-    "watching, what \"good\" means here. Dispatching a subagent is for "
-    "breadth, not for dodging a question: a fresh agent starts cold, costs "
-    "real money re-deriving context you already have, and cannot answer a "
-    "preference question anyway.\n\n"
-    "**Approval.** Where a skill gates implementation on a human approving "
-    "your design or plan first, that approval has already happened: the "
-    "operator approved this work when they queued it as a task. Write the "
-    "design document if the skill calls for one, record in your summary that "
-    "you approved it yourself, and carry on. This covers only a gate waiting "
-    "on sign-off for a plan of your own. It licenses nothing about tests, "
-    "verification, or anything the definition of done requires."
-)
-"""Both rules are live failure modes, not style. Brainstorming S2b in this
-repository asked five questions and two were answerable from CLAUDE.md and
-ROADMAP.md alone; and a skill that refuses to implement until a human
-approves ends an unattended turn with no result file, which costs a nudge,
-every remaining resume, and then the task."""
 
 
 @dataclass(frozen=True)
@@ -66,13 +43,6 @@ class Plugin:
 
 
 PROPOSED = (
-    Plugin(
-        "superpowers",
-        "superpowers@claude-plugins-official",
-        "anthropics/claude-plugins-official",
-        reason="Brainstorm, plan, test-drive and review, as explicit workflows.",
-        usage=SUPERPOWERS_USAGE,
-    ),
     Plugin(
         "caveman",
         "caveman@caveman",
@@ -96,7 +66,7 @@ def by_name(name: str) -> Plugin | None:
     """Resolve a `plugins` entry to a proposed plugin by either spelling:
     its short name, or its full `plugin_id` (`name@marketplace`) -- the form
     `claude plugin list` prints and README.md tells operators to use for
-    anything outside the built-in three. Both must resolve, or a fully
+    anything outside the built-in set. Both must resolve, or a fully
     qualified proposed plugin installs correctly but silently composes no
     prompt layer at all."""
     for plugin in PROPOSED:

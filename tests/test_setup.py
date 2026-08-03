@@ -136,14 +136,14 @@ class PluginsStepTest(unittest.TestCase):
     def test_the_schema_payload_carries_the_proposed_set(self):
         payload = schema_payload({})
         names = [entry["name"] for entry in payload["proposed"]]
-        self.assertEqual(names, ["superpowers", "caveman", "ponytail"])
+        self.assertEqual(names, ["caveman", "ponytail"])
         for entry in payload["proposed"]:
             self.assertTrue(entry["reason"])
 
     def test_dump_toml_writes_a_plugins_array_that_reads_back(self):
-        text = dump_toml({"repo": "/tmp/r", "plugins": ["superpowers", "caveman"]})
-        self.assertIn('plugins = ["superpowers", "caveman"]', text)
-        self.assertEqual(tomllib.loads(text)["plugins"], ["superpowers", "caveman"])
+        text = dump_toml({"repo": "/tmp/r", "plugins": ["caveman", "ponytail"]})
+        self.assertIn('plugins = ["caveman", "ponytail"]', text)
+        self.assertEqual(tomllib.loads(text)["plugins"], ["caveman", "ponytail"])
 
     def test_dump_toml_omits_an_empty_selection(self):
         # `plugins = []` would be a key that says nothing, and every other

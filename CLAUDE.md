@@ -148,7 +148,7 @@ failure. Do not simplify them.
 ## The prompt strings are the product
 
 `PROTOCOL`, `precedence()` and `BUILTIN_DEFINITION_OF_DONE` in `prompt.py`,
-and the `usage` text on every `Plugin` in `plugins.py`, are
+and any `usage` text a `Plugin` in `plugins.py` carries, are
 not documentation. They are instructions a capable but **literal-minded** agent
 executes unsupervised for hours with bypassed permissions. Ambiguity in them is
 a defect exactly the way a bug in `decide()` is. Every live failure this project
@@ -159,18 +159,20 @@ and a live run afterwards.
 
 ## How work is done here
 
-The `superpowers` workflow — the plugin ships in the
-`anthropics/claude-plugins-official` marketplace — one slice at a time:
+One slice at a time:
 
-1. **`superpowers:brainstorming`** — settle the design through questions, then
-   write a spec to `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`.
-2. **`superpowers:writing-plans`** — a TDD plan to
-   `docs/superpowers/plans/YYYY-MM-DD-<topic>.md`, with real code in every step.
-3. **`superpowers:subagent-driven-development`** — a fresh subagent per task, a
-   review after each, then one whole-branch review at the end.
+1. **Settle the design**, then write a spec to
+   `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md`.
+2. **Write a TDD plan** to `docs/superpowers/plans/YYYY-MM-DD-<topic>.md`,
+   with real code in every step.
+3. **Implement it test-first**, reviewing as you go and once over the whole
+   branch at the end.
 4. **The live smoke test** — see below. Not optional.
-5. **`superpowers:finishing-a-development-branch`** — merge.
+5. **Merge.**
 6. **Update `ROADMAP.md`.**
+
+The `docs/superpowers/` path is where the existing specs and plans live; it
+is a directory name, not a workflow this repository imposes.
 
 Specs record what was decided *at the time* and are not rewritten as things
 change; `ROADMAP.md` records what is true *now*. When a later slice reverses an
