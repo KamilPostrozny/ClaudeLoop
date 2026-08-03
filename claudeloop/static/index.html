@@ -91,7 +91,28 @@ body {
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---------------------------------------------------------------- shell */
-.wrap { max-width: 760px; margin: 0 auto; padding: 0 14px 56px; }
+.wrap { max-width: 1340px; margin: 0 auto; padding: 0 14px 56px; }
+
+/* Wide screens: the live stream is the tall element, so it gets its own
+   column and the three short cards stack beside it. One breakpoint, no
+   JS -- below it everything falls back to the single flow column. */
+@media (min-width: 1000px) {
+  .wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    grid-template-areas: "status stream" "pending stream" "completed stream";
+    grid-template-rows: auto auto auto;
+    column-gap: 14px;
+    /* The stream spans all three rows, and a taller stream would otherwise
+       stretch the three short cards to fill it -- padding voids inside a card
+       rather than space between them. */
+    align-items: start;
+  }
+  #status         { grid-area: status; }
+  #stream-card    { grid-area: stream; align-self: start; }
+  #pending-card   { grid-area: pending; }
+  #completed-card { grid-area: completed; }
+}
 
 header {
   position: sticky; top: 0; z-index: 5;
@@ -101,7 +122,7 @@ header {
 }
 header .inner {
   display: flex; align-items: center; gap: 11px;
-  width: 100%; max-width: 760px; margin: 0 auto;
+  width: 100%; max-width: 1340px; margin: 0 auto;
 }
 .chip {
   width: 38px; height: 38px; flex: none;
@@ -159,9 +180,11 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
    spelled out beside it. */
 #status {
   position: relative; overflow: hidden;
-  padding: 16px 16px 16px 19px;
+  padding: 14px 16px 16px 19px;
   --state: var(--idle);
 }
+/* The card carries its own padding, so the shared eyebrow's would double up. */
+#status .eyebrow { padding: 0 0 11px; }
 #status::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
   background: var(--state);
@@ -200,11 +223,32 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   text-transform: uppercase; color: var(--muted);
 }
 .task-text {
-  margin: 11px 0 0;
   font-size: 16px; line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .task-text.none { color: var(--muted); font-style: italic; }
+
+/* A long task description is two lines until asked otherwise. <details> does
+   the toggling, so the same text node is clamped when shut and whole when
+   open -- no duplicate copy, no JS, keyboard-operable for free. */
+.clamp > summary {
+  display: flex; gap: 8px; align-items: baseline;
+  list-style: none; cursor: pointer;
+}
+.clamp > summary::-webkit-details-marker { display: none; }
+.clamp > summary::before {
+  content: "+"; flex: none;
+  color: var(--accent); font: 600 12px/1.6 var(--mono);
+}
+.clamp[open] > summary::before { content: "\2212"; }
+.clamp:not([open]) > summary > * {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+#task-box { margin-top: 11px; }
+/* "No task in flight" has nothing to expand, so it gets no affordance. */
+.clamp:has(.none) > summary { cursor: default; }
+.clamp:has(.none) > summary::before { content: "\00b7"; color: var(--muted); }
 .detail {
   margin: 9px 0 0;
   font: 400 12.5px/1.5 var(--mono); color: var(--bad);
@@ -265,6 +309,10 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   max-height: 46vh; min-height: 108px; overflow-y: auto;
   overscroll-behavior: contain;
 }
+/* In the two-column layout the stream owns a whole column, so it may run the
+   height of the window. Stated here rather than in the grid block above: the
+   46vh above it would otherwise win on source order. */
+@media (min-width: 1000px) { #stream { max-height: calc(100vh - 190px); } }
 #stream .empty {
   color: var(--muted); font: 400 12.5px/1.5 var(--mono); padding: 8px 0;
 }
@@ -325,6 +373,7 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   font-size: 14px; overflow-wrap: anywhere;
 }
 .list li:first-child { border-top: none; }
+.list li .clamp { flex: 1; min-width: 0; }
 /* Numbering earns its place: pending really is a queue, and the number says
    how many sessions away a task is. */
 .list .n {
@@ -365,7 +414,13 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
   border: 1px solid var(--line); border-radius: 6px; padding: .35rem .8rem;
 }
 .answer button[disabled] { opacity: .5; cursor: default; }
-.done-title { flex: 1; font-size: 14px; overflow-wrap: anywhere; }
+.done-title { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+/* Same two-line rule as the queue: the row already opens, so the shut state
+   never needs to carry the whole description. */
+.done-item:not([open]) .done-title {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
 .done-cost {
   flex: none; font: 400 12px/1.5 var(--mono);
   font-variant-numeric: tabular-nums; color: var(--muted);
@@ -417,12 +472,15 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
 <div class="wrap">
 
   <section class="card" id="status" data-state="idle">
+    <h2 class="eyebrow">Current session</h2>
     <div class="beacon">
       <span class="dot"></span>
       <span class="state-label" id="state-label" aria-live="polite">Connecting</span>
       <span class="attempt" id="attempt" hidden></span>
     </div>
-    <p class="task-text none" id="task-text">No task in flight</p>
+    <details class="clamp" id="task-box">
+      <summary><span class="task-text none" id="task-text">No task in flight</span></summary>
+    </details>
     <p class="detail" id="detail" hidden></p>
     <div class="figures" id="figures" hidden>
       <div>
@@ -446,17 +504,17 @@ button.ghost:hover { color: var(--text); border-color: var(--muted); }
     </div>
   </section>
 
-  <section class="card">
+  <section class="card" id="stream-card">
     <h2 class="eyebrow">Live output</h2>
     <div id="stream"><p class="empty">Waiting for the next session…</p></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="pending-card">
     <h2 class="eyebrow">Pending <span class="count" id="pending-count">0</span></h2>
     <ol class="list" id="pending"></ol>
   </section>
 
-  <section class="card">
+  <section class="card" id="completed-card">
     <h2 class="eyebrow">Completed <span class="count" id="completed-count">0</span></h2>
     <div id="completed"></div>
   </section>
@@ -762,7 +820,13 @@ function renderPending(items) {
   items.forEach((task, i) => {
     const row = el("li");
     row.appendChild(el("span", "n", String(i + 1).padStart(2, "0")));
-    row.appendChild(el("span", null, task.text));
+    // Same two-line clamp as the current task: a queue of ten long
+    // descriptions is otherwise a page of prose.
+    const box = el("details", "clamp");
+    const head = el("summary");
+    head.appendChild(el("span", null, task.text));
+    box.appendChild(head);
+    row.appendChild(box);
     list.appendChild(row);
   });
 }
