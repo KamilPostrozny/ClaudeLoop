@@ -179,10 +179,26 @@ class ReconcileTest(unittest.TestCase):
     def test_a_missing_plugin_adds_its_marketplace_then_installs_it(self):
         self.assertIsNone(reconcile(("ponytail",)))
         calls = self.calls_made()
-        self.assertIn("plugin marketplace add DietrichGebert/ponytail", calls)
+        self.assertIn("plugin marketplace add DietrichGebert/ponytail --scope user", calls)
         self.assertIn("plugin install ponytail@ponytail --scope user", calls)
-        self.assertLess(calls.index("plugin marketplace add DietrichGebert/ponytail"),
-                        calls.index("plugin install ponytail@ponytail --scope user"))
+        self.assertLess(
+            calls.index("plugin marketplace add DietrichGebert/ponytail --scope user"),
+            calls.index("plugin install ponytail@ponytail --scope user"))
+
+    def test_a_fully_qualified_proposed_plugin_installs_exactly_once(self):
+        # plugins = ["superpowers@claude-plugins-official"]: by_name must
+        # resolve this to the real proposed plugin (with its marketplace),
+        # not fall through to reconcile's unknown-plugin fallback, which
+        # would install the same id a second time under a fake Plugin with
+        # no marketplace.
+        self.assertIsNone(reconcile(("superpowers@claude-plugins-official",)))
+        calls = self.calls_made()
+        self.assertIn(
+            "plugin marketplace add anthropics/claude-plugins-official --scope user",
+            calls)
+        self.assertEqual(
+            calls.count("plugin install superpowers@claude-plugins-official --scope user"),
+            1)
 
     def test_a_plugin_outside_the_set_installs_without_a_marketplace_add(self):
         self.assertIsNone(reconcile(("mine@market",)))
