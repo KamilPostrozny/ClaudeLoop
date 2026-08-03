@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import json
@@ -12,10 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import session
+from . import setup
 from . import status as status_module
 from . import web
 from . import worktree
-from .config import DEFAULT_CONFIG, Config, load_config
+from .config import DEFAULT_CONFIG, HOME, Config, load_config
 from .jira import JiraClient, JiraSource
 from .source import FileSource, Task, TaskSource
 from .state import State
@@ -628,14 +630,24 @@ def _serve_dashboard(cfg: Config) -> None:
         )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    parser = argparse.ArgumentParser(prog="python -m claudeloop")
+    parser.add_argument(
+        "--setup", action="store_true",
+        help="open the setup wizard against the existing config",
+    )
+    args = parser.parse_args(argv)
+    # No config is not an error any more -- it is a first run. The wizard
+    # blocks until it has written one, then this falls through into the
+    # ordinary startup path, so the config the loop runs is the one the
+    # ordinary loader reads back off disk rather than the wizard's own parse.
+    if args.setup or not DEFAULT_CONFIG.exists():
+        setup.run_setup(DEFAULT_CONFIG, HOME)
     try:
-        cfg = load_config()
+        cfg = load_config(DEFAULT_CONFIG, HOME)
     except FileNotFoundError:
-        raise SystemExit(
-            f"no config file at {DEFAULT_CONFIG} -- see README.md to set one up"
-        )
+        raise SystemExit(f"no config file at {DEFAULT_CONFIG}")
     except ValueError as error:
         # load_config's own validation (the permissions guard, a bad
         # settings_file/mcp_config path, strict_mcp without mcp_config, ...)

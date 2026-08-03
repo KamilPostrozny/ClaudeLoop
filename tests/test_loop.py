@@ -596,13 +596,24 @@ class MainConfigErrorTest(unittest.TestCase):
     main() only caught FileNotFoundError, so every current operator's next
     start died with a raw traceback instead of the guard's own message."""
 
+    def setUp(self):
+        # main() now checks DEFAULT_CONFIG.exists() before load_config runs,
+        # to decide whether to enter the setup wizard. These tests are about
+        # load_config's own error paths, not the wizard, so DEFAULT_CONFIG
+        # must point at a path that exists -- otherwise, on a machine with no
+        # real ~/.claudeloop/config.toml, main() would launch the real
+        # wizard server and block waiting for a browser.
+        real_default = loop.DEFAULT_CONFIG
+        self.addCleanup(lambda: setattr(loop, "DEFAULT_CONFIG", real_default))
+        loop.DEFAULT_CONFIG = Path(__file__)
+
     def test_a_value_error_from_load_config_exits_cleanly_with_its_message(self):
         with mock.patch(
             "claudeloop.loop.load_config",
             side_effect=ValueError("config.toml: ... Run: chmod 600 ..."),
         ):
             with self.assertRaises(SystemExit) as caught:
-                loop.main()
+                loop.main([])
         self.assertIn("chmod 600", str(caught.exception))
 
     def test_a_repo_that_cannot_do_worktrees_exits_with_the_probe_message(self):
@@ -613,7 +624,7 @@ class MainConfigErrorTest(unittest.TestCase):
                                return_value="cannot use git worktrees in /nope"), \
              mock.patch.object(loop, "_serve_dashboard") as serve:
             with self.assertRaises(SystemExit) as raised:
-                loop.main()
+                loop.main([])
 
         self.assertIn("cannot use git worktrees", str(raised.exception))
         serve.assert_not_called()
@@ -1321,6 +1332,54 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.assertIn(f"{parked['id']}.txt", files)
         self.assertNotIn(f"{others[0]}.txt", files,
                          "the resumed task must not carry the intervening task's work")
+
+
+class MainSetupTest(unittest.TestCase):
+    """main() enters setup mode when there is no config, and on --setup.
+
+    Stubbed rather than mocked: run_setup is replaced with a function that
+    records the call and raises, which is enough to pin the ordering without
+    standing up a server or running the loop.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.calls = []
+        self.real_run_setup = loop.setup.run_setup
+        self.real_default = loop.DEFAULT_CONFIG
+        self.addCleanup(lambda: setattr(loop.setup, "run_setup", self.real_run_setup))
+        self.addCleanup(lambda: setattr(loop, "DEFAULT_CONFIG", self.real_default))
+
+        def stub(path, home, port=8765):
+            self.calls.append(path)
+            raise SystemExit("stub ran")
+
+        loop.setup.run_setup = stub
+        loop.DEFAULT_CONFIG = self.tmp / "config.toml"
+
+    def test_no_config_file_enters_setup(self):
+        with self.assertRaises(SystemExit) as caught:
+            loop.main([])
+        self.assertEqual(str(caught.exception), "stub ran")
+        self.assertEqual(self.calls, [self.tmp / "config.toml"])
+
+    def test_setup_flag_enters_setup_even_with_a_config(self):
+        loop.DEFAULT_CONFIG.write_text("repo = \"/nope\"\n")
+        loop.DEFAULT_CONFIG.chmod(0o600)
+        with self.assertRaises(SystemExit):
+            loop.main(["--setup"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_an_existing_config_does_not_enter_setup(self):
+        loop.DEFAULT_CONFIG.write_text("nonsense = [\n")
+        loop.DEFAULT_CONFIG.chmod(0o600)
+        # SystemExit, not Exception: it does not subclass Exception, and
+        # main()'s existing ValueError guard deliberately turns a bad
+        # config.toml into a friendly SystemExit message rather than a raw
+        # traceback -- see the comment on that clause in loop.py.
+        with self.assertRaises(SystemExit):
+            loop.main([])
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
