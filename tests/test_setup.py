@@ -395,3 +395,72 @@ class SaveSecretsTest(SetupServerBase):
         self.assertEqual(code, 200)
         cfg = load_config(self.path, home=self.tmp / "home")
         self.assertEqual(cfg.session_env, {})
+
+
+class TypedWriteTest(SetupServerBase):
+    """A browser form posts every field as a string. Saving the submission
+    verbatim -- rather than validate()'s coerced values -- would put
+    `web_port = "9999"` and `strict_mcp = "false"` in the file: quoted
+    strings load_config only survives because its own coercion is lenient,
+    and that come back to the wizard JS-truthy on the next --setup."""
+
+    def values(self, **extra) -> dict:
+        return {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md", **extra}
+
+    def test_browser_shaped_numbers_and_bools_are_written_unquoted(self):
+        code, payload = self.post("/api/setup/save", {"values": self.values(
+            web_port="9999", session_timeout_s="100", strict_mcp="false")})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        text = self.path.read_text()
+        self.assertIn("web_port = 9999", text)
+        self.assertIn("strict_mcp = false", text)
+        cfg = load_config(self.path, home=self.tmp / "home")
+        self.assertEqual(cfg.web_port, 9999)
+        self.assertIsInstance(cfg.web_port, int)
+        self.assertIs(cfg.strict_mcp, False)
+
+    def test_a_resaved_bool_prefills_as_a_real_bool_not_a_string(self):
+        # The Task 7 landmine: schema_payload feeds the wizard's next
+        # --setup run, and a JS-truthy "false" string would render a
+        # checkbox checked for a field that is actually False.
+        self.post("/api/setup/save", {"values": self.values(strict_mcp="false")})
+        existing = setup._read_existing(self.path)
+        payload = setup.schema_payload(existing)
+        self.assertIs(payload["values"]["strict_mcp"], False)
+
+
+class SaveOverExistingModeTest(SetupServerBase):
+    def existing_config(self) -> str:
+        return f'repo = "{self.repo}"\ntasks_file = "{self.tmp}/tasks.md"\n'
+
+    def test_a_preexisting_0644_config_is_narrowed_to_0600(self):
+        # os.open's mode argument only applies to a file it creates --
+        # rewriting an existing config sitting at a looser mode must not
+        # leave the secrets it is about to hold on disk world-readable, not
+        # even for the length of the write.
+        self.path.chmod(0o644)
+        code, _ = self.post("/api/setup/save", {"values": {
+            "repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md",
+            "model": "haiku"}})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+
+class JiraRetentionTest(SetupServerBase):
+    def existing_config(self) -> str:
+        return (
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            "[jira]\n"
+            'token = "jira-secret"\n'
+        )
+
+    def test_a_save_with_no_jira_key_keeps_the_stored_jira_token(self):
+        # source = "file" here, so an ordinary save's submission never
+        # mentions Jira at all -- that must not be read as "clear it".
+        code, _ = self.post("/api/setup/save", {"values": {
+            "repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md"}})
+        self.assertEqual(code, 200)
+        data = tomllib.loads(self.path.read_text())
+        self.assertEqual(data["jira"]["token"], "jira-secret")

@@ -240,15 +240,15 @@ class Handler(web.Handler):
         self._json(200, {"errors": dict(errors)})
 
     def _save(self) -> None:
-        values = self._submitted()
-        if values is None:
+        merged = self._submitted()
+        if merged is None:
             return
-        _, errors = validate(values)
+        values, errors = validate(merged)
         if errors:
             self._json(400, {"errors": dict(errors)})
             return
         try:
-            write_config(self.server.path, values)
+            write_config(self.server.path, _typed(merged, values))
         except OSError as error:
             self._json(500, {"error": f"could not write the config: {error}"})
             return
@@ -293,6 +293,10 @@ def merge_secrets(submitted: dict, existing: dict) -> dict:
     for field in SCHEMA:
         if not field.secret:
             continue
+        # setdefault, not .get: a submission with no [jira] table at all --
+        # the ordinary shape when source = "file" -- is "unchanged" for the
+        # same reason a blank field is, so a stored jira.token survives a
+        # save the operator never mentioned Jira in.
         table = merged.setdefault(field.section, {}) if field.section else merged
         old = existing.get(field.section, {}) if field.section else existing
         if not isinstance(old, dict):
@@ -308,24 +312,48 @@ def merge_secrets(submitted: dict, existing: dict) -> dict:
     return merged
 
 
+def _typed(submitted: dict, coerced: dict) -> dict:
+    """The submitted config, with every value replaced by validate()'s coerced one.
+
+    A browser form posts every field as a string, so writing the submission
+    verbatim puts `web_port = "9999"` and `strict_mcp = "false"` in the file --
+    quoted strings that load_config only survives because its coercion is
+    lenient, and that come back to the wizard as JS-truthy strings on the next
+    --setup. Only keys the operator actually gave are written: `coerced` also
+    carries every default, and writing those out would pin this version's
+    defaults into the operator's file forever.
+    """
+    out: dict = {}
+    for field in SCHEMA:
+        table = submitted.get(field.section) if field.section else submitted
+        if not isinstance(table, dict) or _blank(table.get(field.name)):
+            continue
+        target = out.setdefault(field.section, {}) if field.section else out
+        target[field.name] = coerced[field.key]
+    env = submitted.get("session_env")
+    if isinstance(env, dict) and env:
+        out["session_env"] = dict(env)
+    return out
+
+
 def write_config(path: Path, values: dict) -> None:
     """Write config.toml at 0600, whatever the umask is.
 
     load_config refuses a config readable beyond its owner, so a file written
     at the default 0644 would be one the loop starting seconds later cannot
-    read. os.open with the mode, not a chmod afterwards: the window between
-    creating a world-readable file holding an API token and narrowing it is
-    small, and does not need to exist.
+    read. fchmod on the open fd, not a chmod afterwards: O_CREAT's mode
+    applies only to a file this call creates. Rewriting an existing config --
+    which is the --setup path, and may well be sitting at the 0644 the
+    operator opened the wizard to escape -- would otherwise put a Jira API
+    token on disk world-readable for the length of the write. fchmod on the
+    open fd closes that window for both cases.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = dump_toml(values)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(text)
-    # O_CREAT's mode applies only to a file this call created; an existing
-    # one keeps whatever mode it had, which may be the 0644 the operator is
-    # here to escape.
-    os.chmod(path, 0o600)
 
 
 class _SetupServer(ThreadingHTTPServer):
