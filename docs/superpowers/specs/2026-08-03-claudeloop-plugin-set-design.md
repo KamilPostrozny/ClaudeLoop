@@ -1,7 +1,17 @@
 # S7 — Proposed plugin set
 
 **Date:** 2026-08-03
-**Status:** designed, not built
+**Status:** built, then reversed by S8 (2026-08-04)
+
+> **Reversed by S8.** This design assumed a session could not pick up the
+> target repository's own plugin settings, so ClaudeLoop had to choose and
+> install a curated set and describe it in the prompt. Measured against the
+> real CLI, a headless session *does* honour a repository's
+> `.claude/settings.json` (`enabledPlugins` included) and installs from it
+> itself — it only cannot register the marketplace. S8 deleted the curated
+> set, the reconciliation and the prompt layer, keeping just that one call.
+> See `ROADMAP.md` § S8. Everything below is the record of what was decided
+> at the time.
 
 ## The problem
 

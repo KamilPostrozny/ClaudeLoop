@@ -71,7 +71,6 @@ definition_of_done_file  = "~/.claudeloop/definition-of-done.md"  # optional, th
 settings_file            = ""     # optional, default unset -- passed to the CLI as --settings
 mcp_config               = ""     # optional, default unset -- passed to the CLI as --mcp-config
 strict_mcp               = false  # optional, default false -- requires mcp_config; passes --strict-mcp-config
-plugins                  = []     # optional, default [] -- see Plugins below
 
 [session_env]              # optional, default empty -- extra environment variables for the session
 # GH_TOKEN = "ghp_..."
@@ -177,7 +176,7 @@ never burns through tasks.
 
 ## The session's instructions
 
-Every session carries a system prompt assembled from four layers, in this
+Every session carries a system prompt assembled from three layers, in this
 order of precedence:
 
 1. **The ClaudeLoop protocol** — invariant, not configurable. It tells the
@@ -186,12 +185,7 @@ order of precedence:
 2. **Operator instructions** — `instructions_file`, read from the machine
    running ClaudeLoop. It outranks the repository because the operator, not
    the repository, controls this machine. Optional: absent when the file is.
-3. **Plugin usage instructions** — ClaudeLoop's own advice about the plugins
-   it installed, one block per selected plugin that has any. It ranks below
-   the operator instructions, because it is ClaudeLoop's advice and the
-   operator runs the machine. Optional: absent when nothing selected has
-   anything to say.
-4. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
+3. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
    or `AGENTS.md`, followed end to end when present (with the built-in as a
    fallback, in case that file doesn't say when the work is finished).
    A repository with none of those gets the built-in definition of done on
@@ -235,41 +229,46 @@ and each breaks something different:
 
 ## Plugins
 
-`plugins` names Claude Code plugins ClaudeLoop installs and enables for every
-session:
+ClaudeLoop has no plugin list of its own. The repository being worked on
+decides, in its own `.claude/settings.json`, exactly as it would for a human
+running `claude` in it:
 
-```toml
-plugins = ["caveman", "ponytail"]
+```json
+{
+  "extraKnownMarketplaces": {
+    "ponytail": {"source": {"source": "github", "repo": "DietrichGebert/ponytail"}}
+  },
+  "enabledPlugins": {"ponytail@ponytail": true}
+}
 ```
 
-Two names are built in, and each carries its marketplace so you don't have
-to:
+A headless session honours that file — `enabledPlugins` included — and
+installs a declared plugin at session start, writing nothing into the
+repository. It does that only for a marketplace **this machine already
+knows**, and a repository's own `extraKnownMarketplaces` does not make it
+known: the registry a session reads is
+`~/.claude/plugins/known_marketplaces.json`, which only
+`claude plugin marketplace add` fills in.
 
-| Name | What it is |
-|---|---|
-| `caveman` | Terse output; code, commits and reports stay written normally |
-| `ponytail` | Prefers the smallest solution that works over the general one |
+So ClaudeLoop does that one thing. At startup it reads
+`<repo>/.claude/settings.json` and runs, once per marketplace named there:
 
-Anything else is named as `plugin@marketplace` and its marketplace must
-already be configured on the machine (`claude plugin marketplace add ...`).
+```
+claude plugin marketplace add <source> --scope user
+```
 
-Installation happens once at startup, at **user scope** — never project or
-local scope, which would write into the repository being worked on.
-ClaudeLoop reads the installed set first and touches the network only when
-something is genuinely missing, so a marketplace outage cannot stop a loop
-that is already reconciled. A plugin it cannot install stops startup with a
-message rather than running days of sessions without it.
+User scope, never project or local — those write into the repository being
+worked on. The call is idempotent, so a box that already has the marketplace
+exits immediately; a repository declaring none runs no subprocess at all. A
+marketplace that cannot be added stops startup with a message rather than
+running days of sessions without the plugins the repository asked for.
 
-Neither built-in ships usage instructions of its own — both already state
-their own rules, and a second copy here would drift out of step with the
-plugin.
+This means a fresh machine needs **no** human running `/plugins`: clone,
+point ClaudeLoop at it, and the repository's plugins come up on their own.
 
-To give a plugin a block in the session's prompt — telling it how to use that
-plugin under an orchestrator — drop your own
-`~/.claudeloop/plugin-usage/<name>.md`. That works for a built-in and for
-anything outside the built-in set alike.
-
-Omitting `plugins` entirely installs nothing and adds no prompt layer.
+Plugins for your own machine rather than for the repository stay yours to
+install (`claude plugin install <name> --scope user`); ClaudeLoop never
+touches them, and `settings_file` is still passed through as `--settings`.
 
 ## Branches and worktrees
 

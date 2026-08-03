@@ -166,8 +166,6 @@ dl.review dd { margin: 0; overflow-wrap: anywhere; }
 }
 .env-row button { flex: none; padding: .4rem .7rem; }
 
-.check-row { display: flex; gap: .5rem; align-items: baseline; margin: .25rem 0; }
-
 .done-panel { text-align: center; padding: 3rem 1rem; }
 .done-panel code {
   font: 600 15px/1 var(--mono); background: var(--sunken);
@@ -334,43 +332,6 @@ function renderField(field, error) {
     // reads as unchecked, and a `true` default now reads as checked even
     // before the operator ever touches this field.
     input.checked = Boolean(get(field.key));
-  } else if (field.type === "list") {
-    input = document.createElement("div");
-    // `drafted`, not `get`: an untouched list is nothing selected, and the
-    // default is the empty tuple anyway.
-    const chosen = new Set(drafted(field.key) ?? []);
-    const proposed = new Set(schema.proposed.map((p) => p.name));
-    const commit = () => put(field.key, [...chosen]);
-    for (const plugin of schema.proposed) {
-      const row = document.createElement("label");
-      row.className = "check-row";
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = chosen.has(plugin.name);
-      box.onchange = () => {
-        box.checked ? chosen.add(plugin.name) : chosen.delete(plugin.name);
-        commit();
-      };
-      const text = document.createElement("span");
-      text.textContent = plugin.name + " — " + plugin.reason;
-      row.append(box, text);
-      input.append(row);
-    }
-    // Anything already selected that is not in the proposed set: an
-    // operator's own plugin@marketplace entries, kept editable as one line
-    // so saving the form cannot silently drop them.
-    const extras = document.createElement("input");
-    extras.type = "text";
-    extras.placeholder = "plugin@marketplace, comma separated";
-    extras.value = [...chosen].filter((name) => !proposed.has(name)).join(", ");
-    extras.oninput = () => {
-      for (const name of [...chosen]) if (!proposed.has(name)) chosen.delete(name);
-      for (const name of extras.value.split(",").map((s) => s.trim())) {
-        if (name) chosen.add(name);
-      }
-      commit();
-    };
-    input.append(extras);
   } else {
     input = document.createElement("input");
     input.type = field.secret ? "password" : "text";
@@ -387,12 +348,8 @@ function renderField(field, error) {
     }
   }
   input.id = field.key;
-  // The list branch above wires its own checkbox and extras-field handlers;
-  // this generic assignment would otherwise overwrite them.
-  if (field.type !== "list") {
-    input.oninput = () => put(field.key, field.type === "bool" ? input.checked : input.value);
-    input.onchange = input.oninput;
-  }
+  input.oninput = () => put(field.key, field.type === "bool" ? input.checked : input.value);
+  input.onchange = input.oninput;
   // source drives which fields exist at all, so redraw the whole screen.
   if (field.key === "source") {
     input.onchange = () => { put(field.key, input.value); render(); };

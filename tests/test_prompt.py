@@ -336,80 +336,25 @@ class BlockedWordingTest(unittest.TestCase):
         self.assertIn('Reserve "blocked" for the narrow case', PROTOCOL)
 
 
-class PluginLayerTest(unittest.TestCase):
+class NoPluginLayerTest(unittest.TestCase):
+    """S8 dropped the plugin usage layer: a repository's own
+    .claude/settings.json decides which plugins a session gets, and the
+    plugins state their own rules. Nothing in the prompt may claim
+    ClaudeLoop installed tools for the session."""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.repo = self.tmp / "repo"
         (self.repo / ".git").mkdir(parents=True)
 
-    def cfg(self, **overrides) -> Config:
-        base = {
-            "repo": self.repo,
-            "tasks_file": self.tmp / "tasks.md",
-            "home": self.tmp / "home",
-        }
-        return Config(**{**base, **overrides})
+    def test_no_prompt_mentions_plugins_at_all(self):
+        cfg = Config(repo=self.repo, tasks_file=self.tmp / "tasks.md",
+                     home=self.tmp / "home")
+        self.assertNotIn("plugin", compose(cfg).lower())
 
-    def usage_file(self, name: str, text: str) -> None:
-        """No proposed plugin ships usage text, so the operator's own file
-        under `home` is what puts the fourth layer in the prompt at all."""
-        directory = self.tmp / "home" / "plugin-usage"
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / f"{name}.md").write_text(text)
-
-    def test_no_plugins_means_no_layer_and_no_precedence_clause(self):
-        text = compose(self.cfg())
-        self.assertNotIn("## Plugin usage", text)
-        self.assertNotIn("plugin usage instructions", text.lower())
-
-    def test_a_selected_plugin_with_text_adds_the_layer(self):
-        self.usage_file("caveman", "keep it terse")
-        text = compose(self.cfg(plugins=("caveman",)))
-        self.assertIn("## Plugin usage", text)
-        self.assertIn("keep it terse", text)
-
-    def test_a_selected_plugin_without_text_adds_nothing(self):
-        text = compose(self.cfg(plugins=("caveman",)))
-        self.assertNotIn("## Plugin usage", text)
-
-    def test_the_layer_sits_below_the_operator_and_above_done(self):
-        instructions = self.tmp / "instructions.md"
-        instructions.write_text("operator says hello")
-        self.usage_file("caveman", "keep it terse")
-        text = compose(self.cfg(plugins=("caveman",),
-                                instructions_file=instructions))
-        self.assertLess(text.index("## Operator instructions"),
-                        text.index("## Plugin usage"))
-        self.assertLess(text.index("## Plugin usage"),
-                        text.index("## Definition of done"))
-
-    def test_precedence_names_the_layer_only_when_it_is_present(self):
-        self.assertNotIn("plugin usage", precedence(has_operator=True).lower())
-        # Pin the whole sentence when plugins are present with an operator layer.
-        with_operator = precedence(has_operator=True, has_plugins=True)
-        self.assertIn(
-            "The plugin usage instructions are ClaudeLoop's own advice about "
-            "the tools it installed for you. They rank below the operator "
-            "instructions and above the definition of done.",
-            with_operator
-        )
-
-    def test_precedence_does_not_name_an_absent_operator_layer(self):
-        # Same rule the operator clause already follows: never send a session
-        # to reconcile against a layer that is not there. Pin the whole sentence
-        # when plugins are present but no operator layer.
-        text = precedence(has_operator=False, has_plugins=True)
-        self.assertIn(
-            "The plugin usage instructions are ClaudeLoop's own advice about "
-            "the tools it installed for you. They rank above the definition of done.",
-            text
-        )
-        self.assertNotIn("below the operator instructions", text)
-
-    def test_the_layer_is_composed_from_the_operators_override_file(self):
-        self.usage_file("ponytail", "my rules")
-        text = compose(self.cfg(plugins=("ponytail",)))
-        self.assertIn("### ponytail\n\nmy rules", text)
+    def test_precedence_names_only_the_layers_that_exist(self):
+        self.assertNotIn("plugin", precedence(has_operator=True).lower())
+        self.assertNotIn("operator", precedence(has_operator=False).lower())
 
 
 if __name__ == "__main__":

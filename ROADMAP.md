@@ -18,7 +18,8 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S2b** | Question and answer channel | merged |
 | **S6** | A git worktree per task | merged |
 | **S5** | Setup wizard and config schema | merged |
-| **S7** | Proposed plugin set | merged |
+| **S7** | Proposed plugin set | merged, reversed by S8 |
+| **S8** | Repository-owned plugins | merged |
 | **S4** | Home Assistant OS addon | not started |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
@@ -336,6 +337,11 @@ Spec: `docs/superpowers/specs/2026-08-03-claudeloop-setup-wizard-design.md`
 
 ### S7 — Proposed plugin set
 
+**Reversed by S8 below.** The curated set, the install/enable
+reconciliation and the fourth prompt layer are all gone; what survives is
+the `--scope user` rule and the `claude` subprocess hardening. The rest of
+this section is kept as the record of what was decided at the time.
+
 `plugins.py` (new) is a single table plus the logic to install it. `Plugin`
 is a frozen dataclass — `name`, `plugin_id` (`name@marketplace`),
 `marketplace`, `reason` (the wizard's one-line checkbox caption) and `usage`
@@ -461,6 +467,65 @@ worktree behind, because the session's own `__pycache__/` made the tree dirty
 and `worktree.release` is never forced. That is S6 behaving as designed.
 
 Spec: `docs/superpowers/specs/2026-08-03-claudeloop-plugin-set-design.md`
+
+### S8 — Repository-owned plugins
+
+S7's premise was that ClaudeLoop had to choose plugins because the S4 addon
+operator has no terminal. Measured against the real CLI (2.1.220), most of
+that premise was false: a headless `claude -p` **does** honour the target
+repository's own `.claude/settings.json`, `enabledPlugins` included, and
+auto-installs a plugin declared there at session start, writing nothing into
+the repository. Exactly one link is missing, and it is the one thing the
+session cannot do for itself.
+
+Measured, on a scratch repository with a scratch `CLAUDE_CONFIG_DIR` and a
+throwaway local marketplace:
+
+- A repository declaring `extraKnownMarketplaces` + `enabledPlugins` on a box
+  that has never seen either: the plugin does **not** load, `claude plugin
+  list` is empty, and there is no prompt, no warning, and nothing in
+  `--debug`. Project-declared marketplaces are ignored outright — `claude
+  plugin marketplace list` says "No marketplaces configured", and setting
+  `hasTrustDialogAccepted` for the directory changes nothing.
+- Hand-writing the same `extraKnownMarketplaces` table into **user**
+  settings.json is not enough either. The registry that counts is
+  `~/.claude/plugins/known_marketplaces.json`, which only `claude plugin
+  marketplace add` fills in (it also clones the marketplace to disk).
+- After one `claude plugin marketplace add <source> --scope user`, the very
+  next headless session installs and enables the repository's declared
+  plugin by itself, and the repository's `.claude/settings.json` is
+  byte-identical afterwards. A second `marketplace add` exits 0 with
+  "already on disk".
+- Project `enabledPlugins: true` beats a user-scope `false` once the plugin
+  exists on the box, so a repository's choice really is the one that wins.
+- **Gotcha worth knowing:** one malformed value inside
+  `extraKnownMarketplaces` (`"source": "local"` where the CLI writes
+  `"directory"`) silently invalidated the *whole* project settings file —
+  hooks and `env` in it stopped applying too, with no error anywhere. Two
+  hours of the investigation above were spent on results that were really
+  this.
+
+So `plugins.py` is now `marketplace_sources(repo)` (pure: read
+`<repo>/.claude/settings.json`, map each `extraKnownMarketplaces` entry to
+the one argument the CLI takes — `repo` for github, `path` for directory,
+`url` for git) plus `register_marketplaces(repo)`, which runs `claude plugin
+marketplace add <source> --scope user` once per entry. `main()` calls it
+where `plugins.reconcile` used to sit, between `worktree.probe` and
+`_serve_dashboard`, and it is fatal for the same reason. A repository
+declaring nothing runs no subprocess at all. A missing, unreadable or
+malformed settings file counts as "declares nothing": it is the repository's
+file, and the CLI ignores a broken one too.
+
+Deleted with the curated set: `Plugin`/`PROPOSED`/`by_name`, `reconcile` and
+`_installed`, the `plugins` config key (with `_known_plugins` and `_coerce`'s
+`"list"` branch, which nothing else used), the Plugins wizard step and the
+checkbox rendering in `static/setup.html`, `usage_section` and the
+`~/.claudeloop/plugin-usage/` layer, and `precedence()`'s `has_plugins`
+clause. The system prompt is three layers again. `settings_file` passthrough
+is untouched, and so is the `--scope user` constraint.
+
+No spec of its own: the finding above *is* the design, and it is recorded
+here rather than in a document that would only repeat it.
 
 ---
 
