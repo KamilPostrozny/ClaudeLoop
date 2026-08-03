@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from . import plugins as plugins_module
 
 PROTOCOL = (
     "You are running unattended under ClaudeLoop. Nobody is watching in real "
@@ -123,12 +124,14 @@ def _read(path: Path | None) -> str:
         return ""
 
 
-def precedence(has_operator: bool) -> str:
+def precedence(has_operator: bool, has_plugins: bool = False) -> str:
     """Precedence text naming only the layers actually present.
 
     Asserting that the operator layer outranks the repository when there is
     no operator instructions file leaves an unattended session reconciling
-    a conflict against a document it cannot find.
+    a conflict against a document it cannot find. The plugin layer follows
+    the same rule, including the clause that positions it against the
+    operator layer -- which is itself only true when that layer exists.
     """
     parts = [
         "These instructions are layered. The ClaudeLoop protocol above is "
@@ -138,6 +141,14 @@ def precedence(has_operator: bool) -> str:
         parts.append(
             "The operator instructions outrank the definition of done below."
         )
+    if has_plugins:
+        clause = (
+            "The plugin usage instructions are ClaudeLoop's own advice about "
+            "the tools it installed for you"
+        )
+        if has_operator:
+            clause += ", and rank below the operator instructions"
+        parts.append(clause + " and above the definition of done.")
     parts.append(
         "The definition of done is the base. Where layers conflict, follow "
         "the higher one and say so in your summary."
@@ -151,7 +162,11 @@ def compose(cfg: Config, tree: Path | None = None) -> str:
     tree was cut from, and it is the copy of CLAUDE.md the session can
     actually edit."""
     operator = _read(cfg.instructions_file)
-    parts = [PROTOCOL, precedence(has_operator=bool(operator))]
+    plugin_usage = plugins_module.usage_section(cfg.plugins, cfg.home)
+    parts = [
+        PROTOCOL,
+        precedence(has_operator=bool(operator), has_plugins=bool(plugin_usage)),
+    ]
 
     task_source = task_source_section(cfg)
     if task_source:
@@ -159,6 +174,9 @@ def compose(cfg: Config, tree: Path | None = None) -> str:
 
     if operator:
         parts.append(f"## Operator instructions\n\n{operator}")
+
+    if plugin_usage:
+        parts.append(plugin_usage)
 
     claude_md = repo_claude_md(tree or cfg.repo)
     if claude_md is not None:

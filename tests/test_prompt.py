@@ -12,6 +12,7 @@ from claudeloop.prompt import (
     precedence,
     repo_claude_md,
 )
+from claudeloop.plugins import SUPERPOWERS_USAGE
 
 
 class PromptTest(unittest.TestCase):
@@ -334,6 +335,66 @@ class BlockedWordingTest(unittest.TestCase):
         from claudeloop.prompt import PROTOCOL
 
         self.assertIn('Reserve "blocked" for the narrow case', PROTOCOL)
+
+
+class PluginLayerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg(self, **overrides) -> Config:
+        base = {
+            "repo": self.repo,
+            "tasks_file": self.tmp / "tasks.md",
+            "home": self.tmp / "home",
+        }
+        return Config(**{**base, **overrides})
+
+    def test_no_plugins_means_no_layer_and_no_precedence_clause(self):
+        text = compose(self.cfg())
+        self.assertNotIn("## Plugin usage", text)
+        self.assertNotIn("plugin usage instructions", text.lower())
+
+    def test_a_selected_plugin_with_text_adds_the_layer(self):
+        text = compose(self.cfg(plugins=("superpowers",)))
+        self.assertIn("## Plugin usage", text)
+        self.assertIn(SUPERPOWERS_USAGE, text)
+
+    def test_a_selected_plugin_without_text_adds_nothing(self):
+        text = compose(self.cfg(plugins=("caveman",)))
+        self.assertNotIn("## Plugin usage", text)
+
+    def test_the_layer_sits_below_the_operator_and_above_done(self):
+        instructions = self.tmp / "instructions.md"
+        instructions.write_text("operator says hello")
+        text = compose(self.cfg(plugins=("superpowers",),
+                                instructions_file=instructions))
+        self.assertLess(text.index("## Operator instructions"),
+                        text.index("## Plugin usage"))
+        self.assertLess(text.index("## Plugin usage"),
+                        text.index("## Definition of done"))
+
+    def test_precedence_names_the_layer_only_when_it_is_present(self):
+        self.assertNotIn("plugin usage", precedence(has_operator=True).lower())
+        with_layer = precedence(has_operator=True, has_plugins=True)
+        self.assertIn("plugin usage instructions", with_layer)
+        self.assertIn("below the operator instructions", with_layer)
+
+    def test_precedence_does_not_name_an_absent_operator_layer(self):
+        # Same rule the operator clause already follows: never send a session
+        # to reconcile against a layer that is not there.
+        text = precedence(has_operator=False, has_plugins=True)
+        self.assertIn("plugin usage instructions", text)
+        self.assertNotIn("below the operator instructions", text)
+
+    def test_the_layer_is_composed_from_the_operators_override_file(self):
+        home = self.tmp / "home"
+        (home / "plugin-usage").mkdir(parents=True)
+        (home / "plugin-usage" / "superpowers.md").write_text("my rules")
+        text = compose(self.cfg(plugins=("superpowers",)))
+        self.assertIn("my rules", text)
+        self.assertNotIn(SUPERPOWERS_USAGE, text)
 
 
 if __name__ == "__main__":
