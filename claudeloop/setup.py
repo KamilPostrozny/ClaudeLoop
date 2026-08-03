@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -19,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import web
-from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config
+from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config, validate
 
 log = logging.getLogger("claudeloop.setup")
 
@@ -213,7 +214,48 @@ class Handler(web.Handler):
         if not self._authorized(parsed.query):
             self._json(403, {"error": "bad or missing token"})
             return
-        self._json(404, {"error": "not found"})
+        route = parsed.path
+        if route == "/api/setup/validate":
+            self._validate()
+        elif route == "/api/setup/save":
+            self._save()
+        else:
+            self._json(404, {"error": "not found"})
+
+    def _submitted(self) -> dict | None:
+        payload = self._read_json()
+        if payload is None:
+            return None
+        values = payload.get("values")
+        if not isinstance(values, dict):
+            self._json(400, {"error": 'expected a JSON object with a "values" table'})
+            return None
+        return merge_secrets(values, self.server.existing)
+
+    def _validate(self) -> None:
+        values = self._submitted()
+        if values is None:
+            return
+        _, errors = validate(values)
+        self._json(200, {"errors": dict(errors)})
+
+    def _save(self) -> None:
+        values = self._submitted()
+        if values is None:
+            return
+        _, errors = validate(values)
+        if errors:
+            self._json(400, {"errors": dict(errors)})
+            return
+        try:
+            write_config(self.server.path, values)
+        except OSError as error:
+            self._json(500, {"error": f"could not write the config: {error}"})
+            return
+        self._json(200, {"ok": True})
+        # Released after the response is written, so the operator's browser
+        # gets its answer before run_setup returns and the server shuts down.
+        self.server.saved.set()
 
     def _read_json(self) -> dict | None:
         """The request body, or None having already answered with an error."""
@@ -239,6 +281,53 @@ class Handler(web.Handler):
         return payload if isinstance(payload, dict) else None
 
 
+def merge_secrets(submitted: dict, existing: dict) -> dict:
+    """Put the stored value back wherever a secret came back blank.
+
+    The browser is never sent a secret, so a blank secret field means
+    "unchanged", not "clear it". A [session_env] name the operator deleted is
+    absent rather than blank, and is genuinely removed.
+    """
+    merged = {key: dict(value) if isinstance(value, dict) else value
+              for key, value in submitted.items()}
+    for field in SCHEMA:
+        if not field.secret:
+            continue
+        table = merged.setdefault(field.section, {}) if field.section else merged
+        old = existing.get(field.section, {}) if field.section else existing
+        if not isinstance(old, dict):
+            continue
+        if not str(table.get(field.name, "")).strip() and str(old.get(field.name, "")).strip():
+            table[field.name] = old[field.name]
+    env = merged.get("session_env")
+    old_env = existing.get("session_env")
+    if isinstance(env, dict) and isinstance(old_env, dict):
+        for name, value in env.items():
+            if not str(value).strip() and str(old_env.get(name, "")).strip():
+                env[name] = old_env[name]
+    return merged
+
+
+def write_config(path: Path, values: dict) -> None:
+    """Write config.toml at 0600, whatever the umask is.
+
+    load_config refuses a config readable beyond its owner, so a file written
+    at the default 0644 would be one the loop starting seconds later cannot
+    read. os.open with the mode, not a chmod afterwards: the window between
+    creating a world-readable file holding an API token and narrowing it is
+    small, and does not need to exist.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = dump_toml(values)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    # O_CREAT's mode applies only to a file this call created; an existing
+    # one keeps whatever mode it had, which may be the 0644 the operator is
+    # here to escape.
+    os.chmod(path, 0o600)
+
+
 class _SetupServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -247,7 +336,7 @@ class _SetupServer(ThreadingHTTPServer):
         # Setup mode binds loopback unconditionally, whatever an existing
         # config says: with no config there is no web_token to authenticate
         # against, so the network barrier cannot be the only one.
-        self.cfg = Config(repo=Path("."), web_host="127.0.0.1", web_token=token)
+        self.cfg = Config(repo=Path("."), web_host="127.0.0.1", web_token=token, home=home)
         self.path = path
         self.home = home
         self.saved = threading.Event()

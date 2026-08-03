@@ -260,3 +260,138 @@ class EditingTest(SetupServerBase):
         self.assertIn("web_token", payload["secrets_set"])
         self.assertIn("jira.token", payload["secrets_set"])
         self.assertEqual(payload["session_env"], {"GH_TOKEN": ""})
+
+
+class ValidateRouteTest(SetupServerBase):
+    def values(self, **extra) -> dict:
+        return {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md", **extra}
+
+    def test_a_good_config_validates_clean(self):
+        code, payload = self.post("/api/setup/validate", {"values": self.values()})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["errors"], {})
+
+    def test_errors_come_back_keyed_by_field(self):
+        code, payload = self.post("/api/setup/validate", {"values": {
+            "repo": str(self.tmp / "nope"), "web_host": "0.0.0.0"}})
+        self.assertEqual(code, 200)
+        self.assertIn("repo", payload["errors"])
+        self.assertIn("web_token", payload["errors"])
+        self.assertIn("tasks_file", payload["errors"])
+
+    def test_validate_writes_nothing(self):
+        self.post("/api/setup/validate", {"values": self.values()})
+        self.assertFalse(self.path.exists())
+
+    def test_a_post_without_the_json_content_type_is_refused(self):
+        code, _ = self.post("/api/setup/validate", {"values": self.values()},
+                            content_type="text/plain")
+        self.assertEqual(code, 415)
+
+    def test_a_rejected_post_cannot_smuggle_a_second_request(self):
+        # Inherited from web.Handler's do_POST, and pinned here because this
+        # server writes config.toml: a cross-origin page could otherwise send
+        # one CORS-safelisted text/plain POST whose body is a well-formed
+        # application/json POST, and the second pass would clear every guard.
+        inner_body = json.dumps({"values": self.values()})
+        smuggled = (
+            f"POST /api/setup/save?token={self.token} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(inner_body)}\r\n\r\n{inner_body}"
+        )
+        outer = (
+            f"POST /api/setup/validate?token={self.token} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+            "Content-Type: text/plain;charset=UTF-8\r\n"
+            f"Content-Length: {len(smuggled)}\r\n\r\n{smuggled}"
+        )
+        sock = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=5)
+        self.addCleanup(sock.close)
+        sock.sendall(outer.encode())
+        sock.settimeout(2)
+        received = b""
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                received += chunk
+        except (TimeoutError, OSError):
+            pass
+        self.assertNotIn(b"200 OK", received, received)
+        self.assertFalse(self.path.exists(), "the smuggled POST wrote a config")
+
+
+class SaveRouteTest(SetupServerBase):
+    def values(self, **extra) -> dict:
+        return {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md", **extra}
+
+    def test_saving_writes_a_config_load_config_accepts(self):
+        code, payload = self.post("/api/setup/save", {"values": self.values(model="haiku")})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ok"])
+        cfg = load_config(self.path, home=self.tmp / "home")
+        self.assertEqual(cfg.model, "haiku")
+
+    def test_the_file_is_written_0600(self):
+        # It holds web_token, the Jira API token and every [session_env]
+        # credential, and load_config refuses to read it at any other mode.
+        self.post("/api/setup/save", {"values": self.values()})
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_saving_releases_the_waiter(self):
+        self.assertFalse(self.server.saved.is_set())
+        self.post("/api/setup/save", {"values": self.values()})
+        self.assertTrue(self.server.saved.wait(timeout=5))
+
+    def test_an_invalid_config_is_not_written(self):
+        code, payload = self.post("/api/setup/save",
+                                  {"values": {"repo": str(self.tmp / "nope")}})
+        self.assertEqual(code, 400)
+        self.assertIn("repo", payload["errors"])
+        self.assertFalse(self.path.exists())
+        self.assertFalse(self.server.saved.is_set())
+
+
+class SaveSecretsTest(SetupServerBase):
+    def existing_config(self) -> str:
+        return (
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            'web_host = "0.0.0.0"\n'
+            'web_token = "hunter2"\n'
+            "[session_env]\n"
+            'GH_TOKEN = "ghp_secret"\n'
+        )
+
+    def values(self, **extra) -> dict:
+        return {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md",
+                "web_host": "0.0.0.0", **extra}
+
+    def test_a_blank_secret_keeps_the_stored_value(self):
+        # The browser was never told the token, so blank means "unchanged",
+        # not "clear it" -- and web_host is non-loopback here, so clearing it
+        # would fail validation outright.
+        code, _ = self.post("/api/setup/save",
+                            {"values": self.values(web_token="",
+                                                   session_env={"GH_TOKEN": ""})})
+        self.assertEqual(code, 200)
+        cfg = load_config(self.path, home=self.tmp / "home")
+        self.assertEqual(cfg.web_token, "hunter2")
+        self.assertEqual(cfg.session_env["GH_TOKEN"], "ghp_secret")
+
+    def test_a_new_secret_replaces_the_stored_one(self):
+        code, _ = self.post("/api/setup/save",
+                            {"values": self.values(web_token="rotated")})
+        self.assertEqual(code, 200)
+        cfg = load_config(self.path, home=self.tmp / "home")
+        self.assertEqual(cfg.web_token, "rotated")
+
+    def test_a_removed_session_env_name_is_dropped(self):
+        # Blank keeps a value; omitting the name entirely removes the entry.
+        code, _ = self.post("/api/setup/save",
+                            {"values": self.values(web_token="", session_env={})})
+        self.assertEqual(code, 200)
+        cfg = load_config(self.path, home=self.tmp / "home")
+        self.assertEqual(cfg.session_env, {})
