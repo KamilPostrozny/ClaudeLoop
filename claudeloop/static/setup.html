@@ -1,5 +1,513 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>ClaudeLoop setup</title></head>
-<body><p>The setup wizard lands in Task 7.</p></body>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ClaudeLoop setup</title>
+<link rel="icon" href="/logo.png">
+<style>
+/* ---------------------------------------------------------------- tokens */
+/* Copied verbatim from static/index.html -- same product, same look. */
+:root {
+  --bg: #FDF4EC;
+  --surface: #FFFFFF;
+  --sunken: #FBF2E9;
+  --line: rgba(36, 45, 55, .14);
+  --text: #242D37;
+  --muted: #6B7885;
+  --accent: #FD7C33;      /* fills, rules, the meter                        */
+  --accent-ink: #C4551A;  /* #FD7C33 is 2.6:1 on white and fails as type    */
+  --chip: #FBE3CD;        /* the logo's own peach: the PNG has no alpha     */
+  --ok: #17805A;
+  --warn: #9A6B00;
+  --bad: #C0203F;
+  --idle: #6B7885;
+  --shadow: 0 1px 2px rgba(36, 45, 55, .06), 0 8px 24px rgba(36, 45, 55, .05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1B222B;
+    --surface: #242D37;
+    --sunken: #1F2731;
+    --line: rgba(242, 232, 224, .12);
+    --text: #F2E8E0;
+    --muted: #9AA6B2;
+    --accent: #FD7C33;
+    --accent-ink: #FD7C33;  /* ~5.5:1 on #242D37, so the brand hue holds    */
+    --chip: #F7E2CE;
+    --ok: #4ECB8D;
+    --warn: #E8B44A;
+    --bad: #F2726B;
+    --idle: #9AA6B2;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1B222B;
+  --surface: #242D37;
+  --sunken: #1F2731;
+  --line: rgba(242, 232, 224, .12);
+  --text: #F2E8E0;
+  --muted: #9AA6B2;
+  --accent: #FD7C33;
+  --accent-ink: #FD7C33;
+  --chip: #F7E2CE;
+  --ok: #4ECB8D;
+  --warn: #E8B44A;
+  --bad: #F2726B;
+  --idle: #9AA6B2;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 10px 30px rgba(0, 0, 0, .22);
+}
+:root {
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  padding: 2rem 1rem 4rem;
+}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+main { max-width: 46rem; margin: 0 auto; }
+
+header.page {
+  display: flex; align-items: center; gap: 11px; margin-bottom: 1.5rem;
+}
+.chip {
+  width: 38px; height: 38px; flex: none;
+  border-radius: 11px; overflow: hidden;
+  background: var(--chip);
+  box-shadow: inset 0 0 0 1px rgba(36, 45, 55, .10);
+}
+.chip img { width: 100%; height: 100%; display: block; object-fit: cover; }
+h1 {
+  font: 600 18px/1 var(--mono);
+  letter-spacing: -.02em;
+  margin: 0;
+}
+h1 b { color: var(--accent-ink); font-weight: 600; }
+h1 small {
+  display: block; margin-top: 5px;
+  font: 400 9.5px/1 var(--mono);
+  letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
+}
+
+nav#steps { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; }
+nav#steps button {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+  padding: .3rem .9rem; color: var(--muted); cursor: pointer; font: inherit;
+}
+nav#steps button[aria-current="step"] {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+nav#steps button:disabled { cursor: default; opacity: .55; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 1.25rem 1.25rem .25rem;
+  margin-bottom: 1.25rem;
+}
+
+.field { margin-bottom: 1.25rem; }
+.field label { display: block; font-weight: 600; }
+.field .help { color: var(--muted); font-size: .875rem; margin: .15rem 0 .4rem; }
+.field input[type="text"], .field input[type="password"], .field select {
+  width: 100%; padding: .5rem; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--sunken);
+  color: var(--text); font: inherit;
+}
+.field input[type="checkbox"] { width: 1.1rem; height: 1.1rem; vertical-align: middle; }
+.field .error { color: var(--bad); font-size: .875rem; margin-top: .35rem; }
+.field.bad input, .field.bad select { border-color: var(--bad); }
+
+.check { display: flex; align-items: center; gap: .75rem; margin-top: .5rem; }
+.result { font-size: .875rem; margin: 0; }
+.result.ok { color: var(--ok); }
+.result.bad { color: var(--bad); }
+
+button {
+  font: inherit; cursor: pointer; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--text);
+  padding: .5rem 1rem;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+button:disabled { opacity: .5; cursor: default; }
+
+.actions { display: flex; gap: .75rem; align-items: center; margin: 1.5rem 0; }
+#message { color: var(--muted); font-size: .9rem; }
+#message.bad { color: var(--bad); }
+
+dl.review { margin: 0; padding: 0 0 1rem; }
+dl.review > div {
+  display: flex; gap: 1rem; padding: .5rem 0; border-top: 1px solid var(--line);
+}
+dl.review > div:first-child { border-top: none; }
+dl.review dt { flex: 0 0 14rem; color: var(--muted); overflow-wrap: anywhere; }
+dl.review dd { margin: 0; overflow-wrap: anywhere; }
+
+.env-row { display: flex; gap: .5rem; margin-bottom: .6rem; align-items: center; }
+.env-row input {
+  flex: 1; padding: .5rem; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--sunken); color: var(--text); font: inherit;
+}
+.env-row button { flex: none; padding: .4rem .7rem; }
+
+.done-panel { text-align: center; padding: 3rem 1rem; }
+.done-panel code {
+  font: 600 15px/1 var(--mono); background: var(--sunken);
+  border: 1px solid var(--line); border-radius: 6px; padding: .2rem .5rem;
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="page">
+    <span class="chip"><img src="/logo.png" alt=""></span>
+    <h1>Claude<b>Loop</b><small>Setup</small></h1>
+  </header>
+
+  <noscript>
+    <p>This wizard needs JavaScript. Its six steps are: Repository,
+    Task source, Dashboard, Instructions, Advanced, and Review and save.</p>
+  </noscript>
+
+  <nav id="steps" aria-label="Setup steps"></nav>
+  <form id="form" novalidate></form>
+  <p id="message" role="status"></p>
+  <div class="actions">
+    <button type="button" id="back">Back</button>
+    <button type="button" id="next" class="primary">Next</button>
+  </div>
+</main>
+<script type="module">
+const token = new URLSearchParams(location.search).get("token") || "";
+const url = (route) => route + "?token=" + encodeURIComponent(token);
+
+const api = async (route, body) => {
+  const response = await fetch(url(route), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.json();
+};
+
+const schema = await (await fetch(url("/api/setup/schema"))).json();
+const draft = structuredClone(schema.values);
+const env = structuredClone(schema.session_env);
+let step = 0;
+
+const put = (key, value) => {
+  const field = schema.fields.find((f) => f.key === key);
+  const table = field.section ? (draft[field.section] ||= {}) : draft;
+  table[field.name] = value;
+};
+
+const get = (key) => {
+  const field = schema.fields.find((f) => f.key === key);
+  const table = field.section ? draft[field.section] || {} : draft;
+  return table[field.name] ?? "";
+};
+
+const payload = () => ({ ...draft, session_env: env });
+
+function render(errors = {}) {
+  renderNav();
+
+  const current = schema.steps[step].id;
+  const form = document.getElementById("form");
+  form.replaceChildren();
+
+  if (current === "review") {
+    form.append(renderReview());
+  } else {
+    const card = document.createElement("div");
+    card.className = "card";
+    for (const field of schema.fields) {
+      if (field.step !== current) continue;
+      // The [jira] block only means anything once source = "jira"; the
+      // tasks-file field only under source = "file".
+      if (field.section === "jira" && get("source") !== "jira") continue;
+      if (field.name === "tasks_file" && get("source") !== "file") continue;
+      card.append(renderField(field, errors[field.key]));
+    }
+    if (current === "advanced") card.append(renderEnvRows());
+    form.append(card);
+  }
+
+  document.getElementById("back").disabled = step === 0;
+  const isLast = step === schema.steps.length - 1;
+  document.getElementById("next").textContent = isLast ? "Save" : "Next";
+}
+
+function renderNav() {
+  document.getElementById("steps").replaceChildren(...schema.steps.map((s, i) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = s.title;
+    if (i === step) button.setAttribute("aria-current", "step");
+    // Editing an existing config: jumping straight to the one key you came
+    // to change should not be a five-click walk. On a first run the
+    // operator walks forward one screen at a time.
+    button.disabled = !schema.editing && i > step;
+    button.onclick = () => { step = i; render(); };
+    return button;
+  }));
+}
+
+function renderField(field, error) {
+  const wrap = document.createElement("div");
+  wrap.className = "field" + (error ? " bad" : "");
+  const label = document.createElement("label");
+  label.textContent = field.label + (field.required ? " *" : "");
+  label.htmlFor = field.key;
+  const help = document.createElement("p");
+  help.className = "help";
+  const helpId = field.key + "-help";
+  help.id = helpId;
+  help.textContent = field.help;
+  const describedBy = [helpId];
+
+  let input;
+  if (field.type === "choice") {
+    input = document.createElement("select");
+    input.append(...field.choices.map((choice) => new Option(choice, choice)));
+    input.value = get(field.key) || field.default || "";
+  } else if (field.type === "bool") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(get(field.key));
+  } else {
+    input = document.createElement("input");
+    input.type = field.secret ? "password" : "text";
+    input.value = get(field.key);
+    if (field.secret && schema.secrets_set.includes(field.key)) {
+      input.placeholder = "set — leave blank to keep";
+    } else if (field.default !== null && field.default !== undefined) {
+      input.placeholder = String(field.default);
+    }
+  }
+  input.id = field.key;
+  input.oninput = () => put(field.key, field.type === "bool" ? input.checked : input.value);
+  input.onchange = input.oninput;
+  // source drives which fields exist at all, so redraw the whole screen.
+  if (field.key === "source") {
+    input.onchange = () => { put(field.key, input.value); render(); };
+  }
+
+  wrap.append(label, help, input);
+
+  if (error) {
+    const message = document.createElement("p");
+    message.className = "error";
+    const errorId = field.key + "-error";
+    message.id = errorId;
+    message.textContent = error;
+    describedBy.push(errorId);
+    wrap.append(message);
+  }
+  input.setAttribute("aria-describedby", describedBy.join(" "));
+  if (field.required) input.setAttribute("aria-required", "true");
+
+  if (field.key === "repo") wrap.append(testButton("repo", "Check this repository"));
+  if (field.key === "token" && field.section === "jira") {
+    wrap.append(testButton("jira", "Test the Jira connection"));
+  }
+  return wrap;
+}
+
+function testButton(what, label) {
+  const wrap = document.createElement("div");
+  wrap.className = "check";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  const result = document.createElement("p");
+  result.className = "result";
+  result.setAttribute("role", "status");
+  button.onclick = async () => {
+    result.textContent = "Checking…";
+    result.className = "result";
+    button.disabled = true;
+    try {
+      const answer = await api("/api/setup/test", { what, values: payload() });
+      result.textContent = answer.message;
+      result.className = "result " + (answer.ok ? "ok" : "bad");
+    } finally {
+      button.disabled = false;
+    }
+  };
+  wrap.append(button, result);
+  return wrap;
+}
+
+function renderEnvRows() {
+  const box = document.createElement("div");
+  const label = document.createElement("p");
+  label.innerHTML = "";
+  label.textContent = "Extra environment variables for every session";
+  label.style.fontWeight = "600";
+  box.append(label);
+  const help = document.createElement("p");
+  help.className = "help";
+  help.textContent = "Applied to every claude session this loop runs, for things like GH_TOKEN.";
+  box.append(help);
+
+  const rows = document.createElement("div");
+  const names = Object.keys(env);
+  if (!names.length) names.push("");
+
+  for (const name of names) {
+    rows.append(envRow(name, name ? env[name] : ""));
+  }
+  box.append(rows);
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "Add variable";
+  add.onclick = () => { rows.append(envRow("", "")); };
+  box.append(add);
+  return box;
+}
+
+function envRow(name, value) {
+  const row = document.createElement("div");
+  row.className = "env-row";
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.placeholder = "NAME";
+  nameInput.value = name;
+  nameInput.setAttribute("aria-label", "Environment variable name");
+
+  const valueInput = document.createElement("input");
+  valueInput.type = "text";
+  valueInput.placeholder = "value";
+  valueInput.value = value;
+  valueInput.setAttribute("aria-label", "Environment variable value");
+
+  const sync = () => {
+    // Rebuild the whole table from the rows currently on screen: simplest
+    // way to keep a rename from silently duplicating the old key.
+    const current = row.parentElement ? [...row.parentElement.children] : [row];
+    for (const key of Object.keys(env)) delete env[key];
+    for (const r of current) {
+      const [n, v] = r.querySelectorAll("input");
+      if (n.value.trim()) env[n.value.trim()] = v.value;
+    }
+  };
+  nameInput.oninput = sync;
+  valueInput.oninput = sync;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.setAttribute("aria-label", "Remove this variable");
+  remove.onclick = () => { row.remove(); sync(); };
+
+  row.append(nameInput, valueInput, remove);
+  return row;
+}
+
+function renderReview() {
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+  const list = document.createElement("dl");
+  list.className = "review";
+  for (const field of schema.fields) {
+    const value = get(field.key);
+    if (value === "" || value === null || value === undefined) continue;
+    if (field.section === "jira" && get("source") !== "jira") continue;
+    if (field.name === "tasks_file" && get("source") !== "file") continue;
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = field.label;
+    const definition = document.createElement("dd");
+    definition.textContent = field.secret ? "••••••" : String(value);
+    row.append(term, definition);
+    list.append(row);
+  }
+  wrap.append(list);
+  if (Object.keys(env).length) {
+    const envTerm = document.createElement("p");
+    envTerm.style.color = "var(--muted)";
+    envTerm.textContent = "session_env: " + Object.keys(env).join(", ");
+    wrap.append(envTerm);
+  }
+  wrap.append(testButton("claude", "Check the Claude CLI"));
+  return wrap;
+}
+
+document.getElementById("back").onclick = () => {
+  if (step > 0) { step -= 1; render(); }
+};
+
+document.getElementById("next").onclick = async () => {
+  const message = document.getElementById("message");
+  const last = step === schema.steps.length - 1;
+  if (last) {
+    const answer = await api("/api/setup/save", { values: payload() });
+    if (answer.ok) {
+      // No automatic redirect: the setup server shuts down as the dashboard
+      // binds, so a redirect races it -- and a redirect carrying a
+      // freshly-set web_token in its query string would write that token
+      // into browser history.
+      const host = get("web_host") || "127.0.0.1";
+      const port = get("web_port") || "8765";
+      document.body.replaceChildren();
+      const done = document.createElement("main");
+      done.className = "done-panel";
+      const h = document.createElement("h1");
+      h.textContent = "Saved";
+      const p = document.createElement("p");
+      p.append("ClaudeLoop is starting. The dashboard will be at ");
+      const code = document.createElement("code");
+      code.textContent = `http://${host}:${port}/`;
+      p.append(code, ".");
+      done.append(h, p);
+      document.body.append(done);
+      return;
+    }
+    render(answer.errors || {});
+    message.className = "bad";
+    message.textContent = "Fix the errors above before saving.";
+    return;
+  }
+  const answer = await api("/api/setup/validate", { values: payload() });
+  const errors = answer.errors || {};
+  const mine = Object.fromEntries(Object.entries(errors).filter(([key]) => {
+    const field = schema.fields.find((f) => f.key === key);
+    return field && field.step === schema.steps[step].id;
+  }));
+  // Only this screen's errors block advancing: a later screen's unfilled
+  // requirement must never trap the operator on an earlier one.
+  if (Object.keys(mine).length) {
+    render(mine);
+    message.className = "bad";
+    message.textContent = "Fix the errors on this screen before moving on.";
+    return;
+  }
+  step += 1;
+  message.className = "";
+  message.textContent = "";
+  render();
+};
+
+render();
+</script>
+</body>
 </html>

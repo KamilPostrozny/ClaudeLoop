@@ -647,3 +647,28 @@ class CheckRouteSecretTest(SetupServerBase):
         self.assertTrue(payload["ok"], payload["message"])
         expected = "Basic " + base64.b64encode(b"a@b.c:stored-secret-token").decode()
         self.assertEqual(jira.authorizations[-1], expected)
+
+
+class WizardPageTest(SetupServerBase):
+    def test_the_page_is_self_contained(self):
+        page = self.get("/")[1].decode()
+        self.assertNotIn("<script src=", page)
+        self.assertNotIn("<link rel=\"stylesheet\"", page)
+        self.assertNotIn("cdn.", page)
+        self.assertNotIn("http://fonts", page)
+        self.assertIn("#fd7c33", page.lower())  # the brand accent is used
+
+    def test_the_page_names_every_step_and_route(self):
+        page = self.get("/")[1].decode()
+        for step in ("Repository", "Task source", "Dashboard", "Instructions",
+                     "Advanced", "Review and save"):
+            self.assertIn(step, page)
+        for route in ("/api/setup/schema", "/api/setup/validate",
+                      "/api/setup/test", "/api/setup/save"):
+            self.assertIn(route, page)
+
+    def test_the_page_carries_the_token_on_its_own_requests(self):
+        # Every request needs the one-time token, and the page only ever has
+        # it from its own URL.
+        page = self.get("/")[1].decode()
+        self.assertIn("location.search", page)
