@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import web, worktree
-from .config import DEFAULT_CONFIG, HOME, SCHEMA, Config, _compose_jql, validate
+from .config import DEFAULT_CONFIG, HOME, LOOPBACK_HOSTS, SCHEMA, Config, _compose_jql, validate
 from .jira import JiraClient, JiraError, compose_jql
 
 log = logging.getLogger("claudeloop.setup")
@@ -203,6 +203,29 @@ def check_repo(values: dict) -> tuple[bool, str]:
     )
 
 
+def _unsafe_jira_site(site: str) -> str | None:
+    """None when it is safe to send Basic-auth credentials to `site`.
+
+    Same reasoning as config._https_site: urllib forwards the Authorization
+    header across a redirect, so a plain http:// site puts the Jira API
+    token on the wire in cleartext the first time Jira redirects it. The one
+    exception is a loopback address -- it cannot leave the machine, so no
+    credential reaches a wire -- which is what lets this check run at all
+    against tests/jira_fake.FakeJira, a plain-HTTP stand-in for Jira.
+    """
+    parsed = urlparse(site)
+    if parsed.scheme == "https":
+        return None
+    if parsed.scheme == "http" and parsed.hostname in LOOPBACK_HOSTS:
+        return None
+    return (
+        f"Jira site {site!r} must start with https:// -- urllib forwards the"
+        " Authorization header across a redirect, so an http:// site puts"
+        " the Basic-auth API token on the wire in cleartext the first time"
+        " Jira redirects it."
+    )
+
+
 def check_jira(values: dict) -> tuple[bool, str]:
     """One authenticated search with the composed query.
 
@@ -211,10 +234,17 @@ def check_jira(values: dict) -> tuple[bool, str]:
     -- the loop is built to idle rather than fail on all three. This is the
     only place that difference is ever visible.
     """
-    table = values.get("jira") or {}
+    table = values.get("jira")
+    if not isinstance(table, dict):
+        # "jira": "oops" -- validate() reports this properly a moment later
+        # (see merge_secrets); this only has to not crash getting here.
+        table = {}
     site = str(table.get("site", "")).strip()
     if not site:
         return False, "no Jira site set"
+    unsafe = _unsafe_jira_site(site)
+    if unsafe:
+        return False, unsafe
     jql = str(table.get("jql", "")).strip() or _compose_jql(
         str(table.get("project", "")).strip(), str(table.get("status", "")).strip()
     )
@@ -393,7 +423,10 @@ class Handler(web.Handler):
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._json(400, {"error": "expected a JSON object"})
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            self._json(400, {"error": "expected a JSON object"})
+            return None
+        return payload
 
 
 def merge_secrets(submitted: dict, existing: dict) -> dict:

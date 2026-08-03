@@ -307,6 +307,49 @@ class ValidateRouteTest(SetupServerBase):
                             content_type="text/plain")
         self.assertEqual(code, 415)
 
+    def test_a_json_array_body_is_answered_not_dropped(self):
+        # _read_json's docstring promises "or None having already answered
+        # with an error" -- the array branch used to return None without
+        # writing anything, so the connection closed with zero bytes and the
+        # browser's await response.json() rejected with nothing to show.
+        code, payload = self.post("/api/setup/validate", None, raw=b"[1, 2, 3]")
+        self.assertEqual(code, 400)
+        self.assertTrue(payload.get("error"))
+
+    def test_a_blank_required_repo_reports_required_not_remove(self):
+        # The blank branch used to fire before required/required_if were
+        # ever consulted, so a blank repo -- the one unconditionally
+        # required field -- only ever got "remove the key or give it a
+        # value". Removing repo is not a fix.
+        code, payload = self.post("/api/setup/validate", {"values": {
+            "repo": "   ", "tasks_file": f"{self.tmp}/tasks.md"}})
+        self.assertEqual(code, 200)
+        message = payload["errors"]["repo"]
+        self.assertNotIn("remove the key", message)
+        self.assertIn("required", message)
+
+    def test_a_blank_web_token_when_exposed_reports_the_security_message(self):
+        # web_host = "0.0.0.0" with a blank web_token used to get the same
+        # "remove the key" advice -- actively wrong, since removing the key
+        # still leaves the dashboard exposed. The message that matters is
+        # required_error's, about a real credential being exposed.
+        code, payload = self.post("/api/setup/validate", {"values": {
+            **self.values(), "web_host": "0.0.0.0", "web_token": "   "}})
+        self.assertEqual(code, 200)
+        message = payload["errors"]["web_token"]
+        self.assertNotIn("remove the key", message)
+        self.assertIn("dashboard watches an agent", message)
+
+    def test_a_blank_optional_field_still_reports_blank(self):
+        # A blank field that is not required at all -- settings_file, here --
+        # must keep today's message rather than picking up a required one.
+        code, payload = self.post("/api/setup/validate", {"values": {
+            **self.values(), "settings_file": "   "}})
+        self.assertEqual(code, 200)
+        message = payload["errors"]["settings_file"]
+        self.assertIn("blank", message)
+        self.assertIn("remove the key", message)
+
     def test_a_rejected_post_cannot_smuggle_a_second_request(self):
         # Inherited from web.Handler's do_POST, and pinned here because this
         # server writes config.toml: a cross-origin page could otherwise send
@@ -592,6 +635,37 @@ class CheckRouteTest(SetupServerBase):
         }})
         self.assertFalse(payload["ok"])
         self.assertIn("401", payload["message"])
+
+    def test_an_http_jira_site_is_refused_without_any_request(self):
+        # _test() deliberately skips validate() before check_jira runs (see
+        # check_jira's docstring), so config._https_site never gets a turn on
+        # this route -- the one place in the project that actually puts the
+        # Jira token on the wire. check_jira has to refuse http:// itself,
+        # and refuse it before a single byte reaches the network: the fake
+        # Jira below must see no request at all.
+        jira = FakeJira({"POST /search/jql": (200, {"issues": []})})
+        self.addCleanup(jira.close)
+        evil_url = jira.url.replace("127.0.0.1", "evil.example")
+        _, payload = self.post("/api/setup/test", {"what": "jira", "values": {
+            "source": "jira",
+            "jira": {"site": evil_url, "email": "a@b.c", "token": "SUPER-SECRET",
+                     "project": "OPS"},
+        }})
+        self.assertFalse(payload["ok"])
+        self.assertIn("https://", payload["message"])
+        self.assertEqual(jira.requests, [])
+
+    def test_a_malformed_jira_table_does_not_crash_the_jira_check(self):
+        # merge_secrets already leaves a truthy non-dict "jira" section in
+        # place rather than crashing (Task 6) -- but check_jira's own
+        # `values.get("jira") or {}` only catches a falsy non-dict, so a
+        # submitted "jira": "oops" still reached .get() on a str and killed
+        # the request thread with no response at all.
+        code, payload = self.post("/api/setup/test", {"what": "jira", "values": {
+            "jira": "oops",
+        }})
+        self.assertEqual(code, 200)
+        self.assertFalse(payload["ok"])
 
     def test_a_malformed_jira_table_does_not_crash_the_repo_check(self):
         # merge_secrets runs for every check, not just "jira" -- a submitted

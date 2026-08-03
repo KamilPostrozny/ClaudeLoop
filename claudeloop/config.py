@@ -332,9 +332,18 @@ def validate(data: dict) -> tuple[dict, list[tuple[str, str]]]:
         fallback = _coerce(field, field.default) if field.default is not None else None
         raw = _raw(data, field)
         if raw is _BLANK:
-            errors.append(
-                (field.key, f"{field.key} is blank -- remove the key or give it a value")
-            )
+            if field.required or (field.required_if and field.required_if(values)):
+                # A blank required field is not fixed by removing the key --
+                # that only turns this into the "missing" error below on the
+                # next validate(), which is why the message has to be the
+                # same one absence gets, not "remove the key".
+                errors.append(
+                    (field.key, field.required_error or f"{field.key} is required")
+                )
+            else:
+                errors.append(
+                    (field.key, f"{field.key} is blank -- remove the key or give it a value")
+                )
             values[field.key] = fallback
             continue
         if raw is None:
