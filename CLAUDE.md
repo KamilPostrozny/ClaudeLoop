@@ -179,8 +179,8 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Six slices have run one. Four of them surfaced defects the passing suite could
-not have caught — eight between them:
+Seven slices have run one. Five of them surfaced defects the passing suite
+could not have caught — nine between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
   parking the loop until the window reset. The fixtures had only ever shown
@@ -208,6 +208,12 @@ not have caught — eight between them:
   branch the **next** task had left checked out and committed onto it. Eleven
   scoped reviews and 421 passing tests had gone by without noticing, because
   nothing but a real session picks its own branch names.
+- S7's `precedence()` built the plugin-usage clause by unconditionally
+  appending "and above the definition of done." to a ranking fragment that
+  only existed when an operator layer was present, so with a plugin layer but
+  no operator instructions the sentence lost its verb and stated no
+  precedence at all. Seven tests covered the function and all passed, because
+  they asserted on substrings rather than the whole sentence.
 
 The two that found nothing wrong were still worth running. S1's is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that

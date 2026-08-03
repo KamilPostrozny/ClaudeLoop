@@ -406,9 +406,60 @@ writes `plugins` as a TOML array through the same `SCHEMA`-driven path as
 every other key, and an empty selection writes no key at all, exactly like
 every other optional field.
 
-**S7 is not yet merged.** The live smoke test — the step this repository
-treats as not optional for a whole slice — has not run yet; this entry will
-gain a paragraph recording what it found once it has.
+**The live smoke test ran twice**, on `haiku`, against a fresh scratch
+repository each time, `plugins = ["superpowers", "caveman", "ponytail"]`, two
+tasks per run, $0.30 total ($0.148 + $0.154).
+
+**Run 1** deliberately started with `ponytail@ponytail` uninstalled at user
+scope, so the install path ran for real rather than being skipped. Confirmed:
+
+- Startup logged `adding marketplace DietrichGebert/ponytail` then
+  `installing ponytail@ponytail`, both **before** `dashboard on
+  http://127.0.0.1:8765` — the reconcile gate really does sit ahead of
+  anything listening.
+- `claude plugin list --json` afterwards showed all three at user scope,
+  enabled.
+- A second start of the same config logged only the dashboard line: no
+  `marketplace add`, no `install`. An already-satisfied selection touching
+  the network not at all held.
+- The fourth prompt layer reached the session verbatim — read out of the
+  running session's own `--append-system-prompt` argv in `/proc`, not a
+  fixture and not the stored transcript, since Claude Code's transcript does
+  not record the appended system prompt.
+- Task 1 was phrased as a feature to design and build, exactly the shape that
+  trips `superpowers`' brainstorming approval gate. It implemented the work
+  and wrote a result file rather than ending its turn waiting for a human to
+  approve a design — the defect `SUPERPOWERS_USAGE` exists to prevent.
+- Neither task blocked, so neither asked a question. Both were marked
+  `- [x]`, each committed on its own `claudeloop/<task-id>` branch, and the
+  scratch repository never left `main` and was never dirtied.
+
+**The one defect it found.** With a plugin layer present but **no** operator
+instructions file, `precedence()` emitted:
+
+> "The plugin usage instructions are ClaudeLoop's own advice about the tools
+> it installed for you and above the definition of done."
+
+The ranking clause (", and rank below the operator instructions") was only
+appended when an operator layer existed, while " and above the definition of
+done." was appended unconditionally — so the two only read correctly
+together. Without an operator layer the sentence lost its verb and stated no
+precedence at all. Seven tests covered `precedence()` and all passed, because
+they asserted on substrings rather than the whole sentence. The fix (`ae69b95`)
+splits it into two sentences — "...installed for you. They rank above the
+definition of done." and, with an operator layer, "...They rank below the
+operator instructions and above the definition of done." — and the tests now
+pin both sentences whole.
+
+**Run 2**, after the fix, uninstalled `caveman@caveman` at user scope instead,
+so the install path ran again against a different marketplace. The corrected
+sentence was confirmed in a live session's argv. Both tasks completed, were
+marked, and landed on their own branches; the repository stayed clean on
+`main`. No further findings.
+
+One observation that is **not** an S7 defect: run 1's second task left its
+worktree behind, because the session's own `__pycache__/` made the tree dirty
+and `worktree.release` is never forced. That is S6 behaving as designed.
 
 Spec: `docs/superpowers/specs/2026-08-03-claudeloop-plugin-set-design.md`
 
