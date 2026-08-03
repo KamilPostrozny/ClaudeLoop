@@ -35,7 +35,7 @@ temptation to add workflow logic here.
 | `loop.py` | The decision state machine (`decide`), per-task orchestration, the polling loop, `main()` |
 | `session.py` | Spawns one `claude -p` invocation, streams and tees its output |
 | `worktree.py` | One git worktree per task: create, reuse, release, and the startup probe |
-| `prompt.py` | Composes the session's system prompt from three layers. Pure |
+| `prompt.py` | Composes the session's system prompt from four layers. Pure |
 | `source.py` | `Task`, the `TaskSource` protocol, `FileSource` over a markdown checklist |
 | `state.py` | SQLite record of what happened. Not the source of truth for what is pending |
 | `config.py` | Loads and validates `config.toml` |

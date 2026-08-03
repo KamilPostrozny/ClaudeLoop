@@ -1,10 +1,12 @@
 """Compose the system prompt a session carries.
 
-Three layers with a stated precedence: ClaudeLoop's own protocol, which is
+Four layers with a stated precedence: ClaudeLoop's own protocol, which is
 invariant; the operator's instructions, which outrank the repository because
-the operator runs the machine; and the definition of done, which is the
-repository's own CLAUDE.md when it has one. Pure, so every combination is
-testable without spawning anything.
+the operator runs the machine; the plugin usage instructions, ClaudeLoop's
+own advice about the plugins it installed, which rank below the operator's
+own; and the definition of done, which is the repository's own CLAUDE.md
+when it has one. Pure, so every combination is testable without spawning
+anything.
 
 PROTOCOL and BUILTIN_DEFINITION_OF_DONE are not documentation -- they are
 instructions a capable but literal-minded agent executes unattended for
