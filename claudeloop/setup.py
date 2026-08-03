@@ -9,8 +9,11 @@ forbid.
 from __future__ import annotations
 
 import json
+import re
 
 from .config import SCHEMA
+
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _scalar(value: object) -> str:
@@ -24,7 +27,25 @@ def _scalar(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value)
-    return json.dumps(str(value))
+    # JSON's escape set covers TOML's basic string for ", \ and U+0000..U+001F,
+    # but the two disagree at both ends of the range. ensure_ascii=True encodes
+    # a non-BMP character as a surrogate pair, which TOML rejects outright as
+    # not a Unicode scalar value -- and one emoji in a [session_env] value then
+    # makes tomllib fail on the whole file, so the config the wizard just wrote
+    # cannot be read back. ensure_ascii=False fixes that and opens the other
+    # end: it emits U+007F raw, which TOML forbids in a basic string. That one
+    # character is the entire remaining gap.
+    return json.dumps(str(value), ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def _key(name: str) -> str:
+    """A bare key where TOML allows one, a quoted key otherwise.
+
+    [session_env] names are operator input, not schema data: a space or a
+    quote in one would break the whole file, and a dot would silently parse
+    as a nested table instead of the name the operator typed.
+    """
+    return name if _BARE_KEY.match(name) else _scalar(name)
 
 
 def _blank(value: object) -> bool:
@@ -54,7 +75,10 @@ def dump_toml(data: dict) -> str:
     """`data` in the config.toml shape, as the text of that file.
 
     Key order and the comments both come from SCHEMA, so a key added to the
-    table is documented in every file written afterwards for free.
+    table is documented in every file written afterwards for free. Any key
+    in `data` not named in SCHEMA, and any section other than the top level,
+    "jira" and "session_env", is silently dropped -- SCHEMA is the single
+    source of truth for what gets written.
     """
     out: list[str] = ["# Written by ClaudeLoop's setup wizard.",
                       "# Re-run it with: python -m claudeloop --setup", ""]
@@ -78,6 +102,6 @@ def dump_toml(data: dict) -> str:
         out.append("# Extra environment variables for every session.")
         out.append("[session_env]")
         for name, value in env.items():
-            out.append(f"{name} = {_scalar(value)}")
+            out.append(f"{_key(name)} = {_scalar(value)}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"

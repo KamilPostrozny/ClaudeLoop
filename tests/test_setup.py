@@ -71,6 +71,36 @@ class DumpTomlTest(unittest.TestCase):
         self.assertIn("# ", text)
         self.assertIn("worktree", text)  # repo's help text
 
+    def test_a_non_bmp_character_survives_the_trip(self):
+        # json.dumps(ensure_ascii=True) encodes an emoji as a UTF-16 surrogate
+        # pair of \uXXXX escapes, which TOML rejects as not a Unicode scalar
+        # value -- and tomllib then fails on the whole file, not just this key.
+        data = {"repo": str(self.repo), "tasks_file": f"{self.tmp}/t.md",
+                "session_env": {"EMOJI": "hello \U0001F600 world"}}
+        self.assertEqual(
+            self.roundtrip(data)["session_env"]["EMOJI"], "hello \U0001F600 world"
+        )
+
+    def test_a_del_character_survives_the_trip(self):
+        # ensure_ascii=False alone emits U+007F raw, which TOML forbids in a
+        # basic string.
+        data = {"repo": str(self.repo), "tasks_file": f"{self.tmp}/t.md",
+                "session_env": {"DEL": "a\x7fb"}}
+        self.assertEqual(self.roundtrip(data)["session_env"]["DEL"], "a\x7fb")
+
+    def test_session_env_names_needing_quotes_round_trip_as_that_exact_key(self):
+        # These names are operator input, not schema data. A bare key with a
+        # space or a non-ASCII character breaks the whole file; a dot in a
+        # bare key silently parses as a nested table instead of the literal
+        # name the operator typed.
+        data = {"repo": str(self.repo), "tasks_file": f"{self.tmp}/t.md",
+                "session_env": {"a b": "1", "a.b": "2", "café": "3"}}
+        back = self.roundtrip(data)["session_env"]
+        self.assertEqual(back["a b"], "1")
+        self.assertEqual(back["a.b"], "2")
+        self.assertNotIn("a", back)  # not a nested {"a": {"b": "2"}}
+        self.assertEqual(back["café"], "3")
+
     def test_what_the_wizard_writes_is_what_load_config_reads(self):
         # The whole claim of this slice in one assertion.
         data = {"repo": str(self.repo), "tasks_file": f"{self.tmp}/tasks.md",
