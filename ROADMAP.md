@@ -23,6 +23,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S8** | Repository-owned plugins | merged |
 | **S9** | Resume an interrupted task | merged |
 | **S9.1** | Locale-proof Jira transitions | merged, live check outstanding |
+| **S10** | The repository's instructions come first | merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -739,6 +740,68 @@ rule exists for. Run one before trusting `done` in anger.
 
 ---
 
+### S10 — The repository's instructions come first
+
+A live task against a repository whose `CLAUDE.md` closes out with `git push
+origin main` committed its work, reported `done`, and shipped nothing.
+Reproduced in three lines:
+
+```
+$ git push origin main     # from a worktree checked out on claudeloop/<id>
+Everything up-to-date
+$ echo $?
+0
+```
+
+`git push origin main` pushes the *ref named main* — the repository's own
+untouched default branch — not `HEAD`. Git says success. A literal-minded
+session reads that as shipped.
+
+Three defects in the layering, all fixed here, plus one the fix would
+otherwise have created:
+
+- **Nothing told the session where it was.** No layer named the worktree, the
+  branch, the default branch, or how to publish from a worktree. `WORKING_TREE`
+  now states all of it as fact — composed for every task, before the task
+  source — with both push commands spelled out literally, because "name HEAD
+  rather than the branch" is exactly what a session satisfies by guessing.
+- **ClaudeLoop's guards were inside a layer that gets dropped.** `compose`
+  drops `BUILTIN_DEFINITION_OF_DONE` whenever the repository's own file says
+  when work is finished, and that block held the task-file guard and the
+  branch rules. The better a repository documented itself, the fewer of
+  ClaudeLoop's guards reached the session. The task-file guard moved to
+  `PROTOCOL`; the branch rules became facts in `WORKING_TREE`.
+- **`precedence()` ranked the wrong thing.** ClaudeLoop's definition of done
+  was the base, with the repository's file pointed at from inside it, so a
+  repository asking for a push to `main` was arguing with a layer above it.
+  It now says the repository's own instructions come first and the built-in
+  is only a fallback — a deliberate reversal of S1's framing, recorded in the
+  S10 spec rather than rewritten into S1's.
+- **Stale bases.** A session landing work on the remote's default branch never
+  moves the local ref, so `worktree.ensure` fetches and cuts new branches from
+  `origin/<default>`, degrading to the local branch on any failure (no remote,
+  no network, a locked credential agent). Reused trees are never refetched or
+  rebased: they hold uncommitted work, and moving that under an unattended
+  session is worse than a stale base.
+
+Where a session publishes is now the target repository's decision. A
+repository whose ship flow is direct-to-`main` gets exactly that, unattended,
+which is a real authorisation and was made deliberately — the alternative
+considered was ClaudeLoop always substituting a branch and a pull request,
+which is ClaudeLoop overriding the repository, the thing this slice exists to
+stop. A `publish = "branch" | "default-branch"` config key was rejected for
+the same reason: the repository is the layer that knows.
+
+**Live smoke test, two tasks, $0.12.** Scratch repository with a local bare
+remote and a `CLAUDE.md` demanding a push to `main`. Both sessions ran exactly
+`git push origin HEAD:main`; neither attempted `git checkout main`; no
+"Everything up-to-date" appeared in either event log; both wrote `done`; and
+task two's commit landed on top of task one's on the remote, which is the
+fetch working. Nothing new was found, which is the first time a prompt slice
+here has run clean.
+
+---
+
 ## Next
 
 Nothing is scheduled. The open issues below are the backlog.
@@ -748,6 +811,13 @@ Nothing is scheduled. The open issues below are the backlog.
 ## Open issues carried across slices
 
 Real, deliberately deferred, tracked here so they are not lost.
+
+- **A repository whose definition of done requires a live environment cannot
+  fully be met.** S10 made the deploy half reachable — work can land on the
+  default branch, so a CI that deploys from it runs — but a `CLAUDE.md` that
+  also demands a browser sweep needs an MCP server the session only has if
+  `mcp_config` supplies one. Left as the target repository's decision to
+  record in its own file; ClaudeLoop must not paper over it in a prompt.
 
 - **`state.db` is one database per machine, scoped by a repository path
   string.** `home` is `~/.claudeloop` for every config, so `tasks` now carries
@@ -908,6 +978,13 @@ Real, deliberately deferred, tracked here so they are not lost.
   inside scratch repositories created by tests — test fixtures disable signing
   locally for that reason.
 - **Nothing has ever been pushed.** `origin` exists but has no `main`.
+- **`home` is not a config key.** It is an argument to `load_config(path,
+  home)`, defaulting to `~/.claudeloop`, and `validate()` silently ignores a
+  `home =` line in a TOML file. S10's smoke test put one in a scratch config
+  and the run wrote its state, runs and worktrees into the *real*
+  `~/.claudeloop` — harmless, since `state.db` is scoped by repository path,
+  but the rows and directories had to be deleted by hand afterwards. A smoke
+  test that wants its own home has to pass one, not configure one.
 - **Any route on the web server that returns early must close its
   connection.** `do_POST` sets `self.close_connection = True` as its first
   statement, and that line is a security fix rather than tidiness. Every

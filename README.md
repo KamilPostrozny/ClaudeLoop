@@ -201,27 +201,42 @@ never burns through tasks.
 
 ## The session's instructions
 
-Every session carries a system prompt assembled from three layers, in this
+**The repository's own instructions come first.** Everything ClaudeLoop adds
+is one of three things: the handful of rules ClaudeLoop itself breaks without,
+facts about the machine the session couldn't otherwise know, and a fallback
+for what the repository doesn't say.
+
+Every session carries a system prompt assembled from four layers, in this
 order of precedence:
 
 1. **The ClaudeLoop protocol** — invariant, not configurable. It tells the
-   session it's unattended and defines how a task ends (writing the result
-   file named in `CLAUDELOOP_RESULT`).
-2. **Operator instructions** — `instructions_file`, read from the machine
+   session it's unattended, defines how a task ends (writing the result file
+   named in `CLAUDELOOP_RESULT`), and carries the one guard ClaudeLoop's own
+   bookkeeping can't survive: never stage, commit, stash or revert
+   ClaudeLoop's task file if one lives in the repository.
+2. **Your working tree** — fact, not policy, so nothing below can override
+   it. Names the worktree the session is in and the default branch it was cut
+   from, and gives the two publish commands. This matters because the default
+   branch is checked out *elsewhere*: `git checkout main` fails from a
+   worktree, and `git push origin main` pushes that branch's own ref, reports
+   "Everything up-to-date" and ships nothing. The section spells out
+   `git push origin HEAD:main` and `git push -u origin HEAD` instead.
+3. **Operator instructions** — `instructions_file`, read from the machine
    running ClaudeLoop. It outranks the repository because the operator, not
    the repository, controls this machine. Optional: absent when the file is.
-3. **Definition of done** — the repository's own `CLAUDE.md`, `.claude/CLAUDE.md`,
-   or `AGENTS.md`, followed end to end when present (with the built-in as a
-   fallback, in case that file doesn't say when the work is finished).
-   A repository with none of those gets the built-in definition of done on
-   its own instead: implement the change, run the repository's own tests and
-   checks if it has any, commit, open a pull request — or, if there's no
-   remote, or push credentials or a forge CLI are missing, stop after
-   committing and say exactly what was missing. It doesn't ask the session to
-   create a branch, because ClaudeLoop has already made one for it (see
-   below); it only forbids checking out the default branch and committing
-   there. `definition_of_done_file` overrides the built-in default; the
-   repository's own file, if it has one, always wins over both.
+4. **The repository's own instructions**, followed end to end — its
+   `CLAUDE.md`, `.claude/CLAUDE.md`, or `AGENTS.md`. They decide how work is
+   done here, including when it's finished and **where it lands**: a
+   repository whose close-out is a direct push to `main` gets exactly that,
+   and one that asks for a pull request gets that. ClaudeLoop's built-in
+   definition of done is only a fallback for what that file doesn't say —
+   implement the change, run the repository's own tests and checks if it has
+   any, commit, publish as the repository directs or open a pull request if
+   it doesn't say; or, if there's no remote, or push credentials or a forge
+   CLI are missing, stop after committing and say exactly what was missing.
+   It doesn't ask the session to create a branch, because ClaudeLoop has
+   already made one for it (see below). `definition_of_done_file` overrides
+   the built-in; the repository's own file wins over both.
 
 Where layers conflict, the higher one wins and the session says so in its
 summary.
@@ -312,6 +327,15 @@ branch. The session commits there; it may rename that branch to something
 descriptive. Your own working copy of `repo` is never checked out, reset or
 otherwise moved — ClaudeLoop only uses it to create the worktree and to cut
 the branch, and the finished commits land in it like any other local branch.
+
+If `repo` has an `origin`, the branch is cut from `origin/<default branch>`
+after a fetch, not from your local ref. That matters when the repository's own
+instructions tell sessions to land work on the default branch directly: such a
+push never moves your local ref, so without the fetch every later task would
+branch from the same stale point and silently drop the work in between. A
+fetch that fails — no network, no remote, a locked credential agent — falls
+back to the local branch rather than failing the task. A worktree that already
+exists is reused as it stands: never refetched, never rebased.
 
 A task's worktree is removed when the task finishes. It is kept when the task
 parks on a question, which is what its resumed session comes back to, and
