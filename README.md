@@ -118,6 +118,7 @@ project = "OPS"               # which project to take work from
 status  = "To Do"             # optional; the exact status name on your board
 transition_start = "In Progress"   # optional; skipped if unset or unavailable
 transition_done  = "Done"          # optional; same
+# not an English board? use "indeterminate" / "done" -- see below
 ```
 
 That composes `project = "OPS" AND status = "To Do" ORDER BY created ASC`. If
@@ -148,6 +149,30 @@ the status, the summary and the cost, then moves the issue to
 Jira doesn't offer from the issue's current status just logs a warning and
 is not a failure — Jira, not ClaudeLoop, decides whether a transition is
 permitted.
+
+**If your board is not in English, use a status category key.** Jira
+translates its own built-in statuses per account, and the transitions API
+reports the translated name — a Polish site offers `Do zrobienia`, `W toku`
+and `Gotowe`, so `transition_done = "Done"` matches nothing and the ticket
+never moves. (Confusingly, the *pickup* side is unaffected: JQL resolves the
+untranslated name, so `status = "To Do"` does find an issue displaying `Do
+zrobienia`.) Each transition key accepts four kinds of value, tried in that
+order:
+
+| Value | Example | Notes |
+|---|---|---|
+| Transition id | `31` | Stable across renames and locales |
+| Transition name | `Gotowe` | What the API reports, translated |
+| Destination status name | `Done` | For workflows like "Finish work" → "Done" |
+| Status category key | `done` | `new`, `indeterminate`, `done` — never translated |
+
+The category key is usually what you want on a localised board: it needs no
+transcribing and survives a rename. When one matches more than one
+transition — a bin often sits in the `done` category beside the real
+finished status — ClaudeLoop moves nothing and logs both candidates, rather
+than guessing and binning a finished ticket. Configure an id or a name in
+that case. The warning for a value that matches nothing lists every offered
+transition with the values that would reach it.
 
 **The label is how ClaudeLoop knows a ticket is finished, not the status:**
 it composes `(labels IS EMPTY OR labels NOT IN ("claudeloop-done",

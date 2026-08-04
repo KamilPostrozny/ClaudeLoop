@@ -363,10 +363,15 @@ SCHEMA: tuple[Field, ...] = (
     Field("transition_start", step="source", section="jira",
           label="Transition on start",
           help="Optional. Moved here when a task starts, if the workflow offers"
-               " that transition from where the issue sits."),
+               " that transition from where the issue sits. A transition name,"
+               " its id, its destination status name, or a status category key"
+               " -- new, indeterminate or done. Jira translates its built-in"
+               " status names, so on a board that is not in English the"
+               " category key is the one that keeps working."),
     Field("transition_done", step="source", section="jira",
           label="Transition on finish",
-          help="Optional. Moved here when a task ends, the same way."),
+          help="Optional. Moved here when a task ends, the same way. On a"
+               " localised board, done."),
     Field("web_host", step="dashboard", default="127.0.0.1",
           label="Dashboard host",
           help="127.0.0.1 keeps the dashboard on this machine. Anything else"

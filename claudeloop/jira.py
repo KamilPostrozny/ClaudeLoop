@@ -100,6 +100,69 @@ def task_text(key: str, summary: str | None, description: str | None) -> str:
     return f"{head}\n\n{body}" if body else head
 
 
+def _transition_keys(transition: dict) -> tuple[str, str, str, str]:
+    """What a configured value may be compared against, most specific first:
+    the transition id, its name, its destination status's name, and that
+    status's category key."""
+    to = transition.get("to") or {}
+    category = to.get("statusCategory") or {}
+    return (
+        str(transition.get("id", "")).strip().casefold(),
+        str(transition.get("name", "")).strip().casefold(),
+        str(to.get("name", "")).strip().casefold(),
+        str(category.get("key", "")).strip().casefold(),
+    )
+
+
+def match_transitions(offered: list, wanted: str) -> list[dict]:
+    """Every offered transition `wanted` could mean, from the most specific
+    tier that matches anything at all.
+
+    Matching on the transition's display name alone is what broke against a
+    real instance: Jira translates its built-in statuses per account, and
+    `/issue/{key}/transitions` reports the translated name, so a Polish site
+    offered `Do zrobienia, W toku, Gotowe` where the operator had configured
+    `In Progress`. The *pickup* half of the same config kept working, because
+    JQL resolves the untranslated canonical name and this comparison cannot.
+
+    So three more tiers. The id is stable across every rename and locale. The
+    destination status's name covers a workflow that names transitions for
+    the action and statuses for the state -- "Finish work" leading to "Done".
+    The category key (`new`, `indeterminate`, `done`) is Jira's own
+    vocabulary and is never translated, which makes it the one value an
+    operator on a localised board can configure without transcribing
+    anything.
+
+    A list rather than one transition, because the caller must be able to
+    tell "no match" from "several": a board's bin sits in the `done` category
+    beside the real finished status, and picking the first would bin a
+    finished ticket. Tiers are searched in order and the first that matches
+    anything wins outright, so a transition literally named `done` beats
+    every transition whose category is done rather than colliding with them.
+    """
+    wanted = wanted.strip().casefold()
+    if not wanted:
+        # Every tier reads "" out of a transition missing that key, so an
+        # empty value would otherwise match the first malformed entry.
+        return []
+    entries = [t for t in offered if isinstance(t, dict)]
+    for tier in range(4):
+        found = [t for t in entries if _transition_keys(t)[tier] == wanted]
+        if found:
+            return found
+    return []
+
+
+def _describe(transition: dict) -> str:
+    """One offered transition, as the warning shows it: every value an
+    operator could configure to reach it."""
+    id_, name, to_name, category = _transition_keys(transition)
+    shown = transition.get("name") or transition.get("id") or "?"
+    reachable = [v for v in (id_, (transition.get("to") or {}).get("name"), category)
+                 if v]
+    return f"{shown} ({'/'.join(str(v) for v in reachable)})" if reachable else str(shown)
+
+
 def closing_comment(status: str, summary: str, cost: float) -> str:
     """Posted by the orchestrator, not the session -- so it exists even when
     the session died mid-run and never said anything, which is exactly when a
@@ -426,8 +489,8 @@ class JiraSource:
         return None
 
     def _transition(self, key: str, name: str) -> None:
-        """Move an issue by transition name, if Jira offers that name for this
-        issue right now.
+        """Move an issue, if Jira offers a transition `name` identifies for
+        this issue right now -- see match_transitions for what it may name.
 
         Jira, not ClaudeLoop, decides whether a transition is permitted: the
         workflow may not allow it from the issue's current status, its screen
@@ -437,21 +500,30 @@ class JiraSource:
         """
         try:
             offered = self.client.transitions(key)
-            match = next(
-                (t for t in offered
-                 if isinstance(t, dict) and str(t.get("name", "")).casefold() == name.casefold()),
-                None,
-            )
-            if match is None:
+            matches = match_transitions(offered, name)
+            if not matches:
                 log.warning(
-                    "%s: Jira does not offer a %r transition from its current"
-                    " status (offered: %s) -- leaving the issue where it is",
+                    "%s: Jira offers no transition matching %r from its"
+                    " current status (offered: %s) -- leaving the issue where"
+                    " it is. Any value in the brackets reaches that"
+                    " transition; the category keys never translate.",
                     key, name,
-                    ", ".join(str(t.get("name")) for t in offered if isinstance(t, dict))
+                    ", ".join(_describe(t) for t in offered if isinstance(t, dict))
                     or "none",
                 )
                 return
-            transition_id = match.get("id")
+            if len(matches) > 1:
+                # Never guess: a board's bin sits in the `done` category
+                # beside the real finished status, so the arbitrary pick
+                # here is the one that bins a finished ticket.
+                log.warning(
+                    "%s: %r is ambiguous -- it matches %s -- leaving the"
+                    " issue where it is. Configure one of their ids or names"
+                    " instead.",
+                    key, name, ", ".join(_describe(t) for t in matches),
+                )
+                return
+            transition_id = matches[0].get("id")
             if transition_id is None:
                 log.warning(
                     "%s: Jira's %r transition has no id in its payload --"
