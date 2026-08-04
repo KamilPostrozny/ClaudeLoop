@@ -22,10 +22,10 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S4** | Home Assistant OS addon | merged |
 | **S8** | Repository-owned plugins | merged |
 | **S9** | Resume an interrupted task | merged |
-| **S9.1** | Locale-proof Jira transitions | merged, live check outstanding |
+| **S9.1** | Locale-proof Jira transitions | merged |
 | **S10** | The repository's instructions come first | merged |
-| **S11** | Backlog defects | merged, Jira live check outstanding |
-| **S12** | A stranded task can come back | implemented, **live smoke test not run** |
+| **S11** | Backlog defects | merged, pagination + comment read still unchecked live |
+| **S12** | A stranded task can come back | merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -735,16 +735,18 @@ caller has to tell "nothing" from "several".
 `README.md` gains the four-value table and the "not an English board" note;
 the wizard's help text for both keys says the same.
 
-**No live check yet.** It needs a real Jira, and the fixtures assert a
-`to.statusCategory.key` shape that only an instance can confirm is really in
-the offered payload — the precise kind of assumption this file's smoke-test
-rule exists for. Run one before trusting `done` in anger.
+**S11 tried to check it live and could not** — the configured instance had no
+projects left at all, so the very tickets the finding came from were gone.
 
-**S11 tried and could not.** The configured instance has no projects left at
-all: `/project/search` comes back empty and `project = "KAN"` matches nothing,
-so the very tickets this finding came from are gone. It needs a Jira with a
-real board again — the same run would then also cover S11's pagination and
-bounded comment read, which are in the same position for the same reason.
+**Confirmed live by S12's smoke run, 2026-08-05.** Project `SAM1` on
+`assimo.atlassian.net`, `transition_start = "W toku"` and `transition_done =
+"Gotowe"`: both tickets went Idea → W toku → Gotowe with **no warning
+logged**, where the same configuration against the `KAN` board hours earlier
+had warned `Jira does not offer a 'In Progress' transition` on two of four
+tickets. The `to.statusCategory.key` shape the fixtures assert is really in
+the offered payload — `/issue/*/transitions` on that instance returns
+`new`, `indeterminate` and `done` alongside translated Polish names, which is
+the whole premise of the four-tier matcher. `done` can be trusted in anger.
 
 ---
 
@@ -879,10 +881,6 @@ Spec: `docs/superpowers/specs/2026-08-04-claudeloop-backlog-defects-design.md`
 
 ### S12 — A stranded task can come back
 
-**Implemented and committed. The live smoke test has not been run** — see
-Next, which is where the blocker lives. Treat this slice as unfinished by
-this file's own rule until it has.
-
 Found by an operator, not by the suite. On the Home Assistant add-on, Jira
 project `KAN`:
 
@@ -958,6 +956,55 @@ panel, which is what made this incident read as "KAN-13 finished"
 transient, and in the one case where it is not — Jira says the issue is
 closed — hiding it entirely is worse than filing it under the wrong heading.
 
+**Live smoke test — the first one on a real Jira board, $0.15 on haiku.**
+Scratch repository, project `SAM1`, two tickets labelled for the run, JQL
+`status = "Idea"` and `transition_start = "W toku"` — so ClaudeLoop's own
+transition takes the ticket out of its own query, exactly as it did to
+KAN-13. Ten cents of it went on a nine-commit task chosen to be slow enough
+to kill.
+
+The strand reproduced on the first try. `SIGKILL` mid-task on SAM1-19, one
+commit in, and Jira agreed the loop had blinded itself:
+
+```
+backlog  project = SAM1 AND labels = … AND status = "Idea"   -> ['SAM1-20']
+recovery key IN (SAM1-19) AND statusCategory != Done AND …   -> ['SAM1-19']
+```
+
+The backlog offers the *next* ticket and no route back to the one in flight.
+That is the defect, seen from outside, and it confirms the recovery query is
+valid JQL against a real instance rather than only against the fake.
+
+Both cases behaved as designed, and **no defects were found** — the fifth
+such run out of twelve:
+
+- *Recovered and resumed.* On restart: `task 501e2b19c8971fdb resuming after
+  an interruption: SAM1-19`. Both runs carry session
+  `4a3289d2-6c5f-4579-87bc-65e81d1c69e7`, so `--resume` reattached across the
+  kill. The pre-kill commit `5748de5 Add circle module` is still the first of
+  the ten on the branch — not redone. Recovered work went first: SAM1-20 was
+  what the backlog offered, and it ran second.
+- *Closed by hand, not resumed.* SAM1-21 killed mid-task, then transitioned to
+  Gotowe by hand with no `claudeloop-done` label — the KAN-13 situation
+  exactly. On restart the row flipped to `interrupted`, the recovery query
+  returned nothing, and the loop went idle: **no new run row, no session, no
+  money.** `statusCategory != Done` is the whole reason recovery is a second
+  query instead of a rebuild from `state.db`, and this is it working.
+
+Two things confirmed in passing that had nothing to do with this slice.
+**S9.1's `transition_done` fires against a real instance** — SAM1-17 and
+SAM1-18 went Idea → W toku → Gotowe with zero warnings logged, where the
+`KAN` run four hours earlier had warned `Jira does not offer a 'In Progress'
+transition` on two of its four tickets. And SAM1-21's worktree is still on
+disk afterwards, which is correct: a task that never reached a verdict never
+reaches `worktree.release`.
+
+The one wrinkle was the harness, not the product: the first attempt failed
+both tasks in four seconds with `no_result` at $0.00, because overriding
+`HOME` to point at the scratch config also hid `~/.claude/.credentials.json`
+and every session died with `Not logged in · Please run /login`. Worth
+knowing for the next run — symlink the credentials into the scratch home.
+
 Spec: `docs/superpowers/specs/2026-08-04-claudeloop-stranded-task-recovery-design.md`
 Plan: `docs/superpowers/plans/2026-08-04-stranded-task-recovery.md`
 
@@ -965,52 +1012,40 @@ Plan: `docs/superpowers/plans/2026-08-04-stranded-task-recovery.md`
 
 ## Next
 
-**S12 is the scheduled slice and it is not finished.** One Jira live smoke
-test now covers S9.1, S11 and S12 at once — the same run, the same board.
+No slice is scheduled. Three things are outstanding:
 
-1. **The Jira live smoke test has never run against S9.1, S11 or S12.** S9.1
-   made `transition_done` match on transition id, status name and status
-   category as well as name, and its fixtures assert a `to.statusCategory.key`
-   shape that only a real instance can confirm is actually in the offered
-   payload. S11 added `nextPageToken` pagination to `pending()` and a bounded,
-   `orderBy=-created` comment read to `answer()`. S12 added a second query per
-   poll whose `key IN (...) AND statusCategory != Done` has never been sent to
-   a real Jira — and S12 is the one slice here that *cannot* be smoke-tested
-   on the file source at all, because the defect it fixes does not exist
-   there.
+1. **Two of S11's Jira changes are still unverified live.** S12's smoke run
+   used a real board (`assimo.atlassian.net`, project `SAM1`, a scratch
+   project also used by earlier runs) and closed most of what had been open
+   here — **S9.1's `transition_done` is confirmed**, firing with no warnings
+   where the same config had warned on the `KAN` board hours earlier, and S12's
+   own recovery query is confirmed valid JQL against a real instance.
 
-   **The instance came back.** The note that used to sit here — no projects
-   left, `project = "KAN"` matching nothing — is out of date:
-   `assimo.atlassian.net` has project `KAN` with eleven issues, and the
-   add-on has been running real tasks against it. So the blocker is no longer
-   "there is no board".
+   Two S11 items were not exercised, because that run had no occasion to:
 
-   What is needed now is a **scratch board**, not this one. Every KAN issue is
-   Done, and the run has to create tickets, transition them out of the backlog
-   status, kill the loop mid-task and close one by hand — none of which
-   belongs in a project someone is working from. It also needs a Jira API
-   token; the only copy lives in the add-on's `/data/.claudeloop/config.toml`,
-   which is not reachable from the SSH add-on under protection mode.
+   - **`nextPageToken` pagination past 50 issues.** `SAM1` holds about
+     twenty, so every query answered in one page. Needs a board with more
+     than fifty matching issues, which no real board here has.
+   - **`answer()`'s bounded, `orderBy=-created` comment read.** Needs a task
+     that parks on a question and is answered on the ticket; nothing parked.
 
-   Meanwhile the live run behind S12 confirmed two things a fixture cannot,
-   both from the add-on's own log and Jira's changelog: **`transition_start`
-   really does fire against a real instance** (KAN-12 and KAN-13 moved to In
-   Progress with no warning logged, where KAN-9 and KAN-11 warned that no
-   matching transition was offered), and the *whole* JQL round trip works
-   against a real board. `transition_done`, pagination past 50 issues, the
-   comment ordering and S12's recovery query all remain unverified against
-   reality — which is exactly the state this file's smoke-test rule exists to
-   make visible.
-
-   What an earlier probe confirmed live: `/search/jql` answers a final page
-   with `isLast` and no token, which is the shape the pagination reads, and
-   Jira still refuses an unbounded JQL outright.
+   An earlier probe confirmed live that `/search/jql` answers a final page
+   with `isLast` and no token — the shape the pagination reads — and that Jira
+   still refuses an unbounded JQL outright.
 
 2. **`main` is ahead of `origin/main`.** The remote sits at `73ca68e`
    (`chore: addon 0.1.3`); S10, S11 and S12 are local only. Pushing is a
    deliberate act nobody has asked for yet — and note that publishing the S4
    add-on image is a tag, not a branch push, so a `main` push alone changes
-   nothing an operator installs.
+   nothing an operator installs. S12 fixes a defect an operator is hitting on
+   the running add-on, so this is the first time a release has a reason
+   behind it rather than merely being possible.
+
+3. **Running a Jira smoke test needs the credentials handed over each time.**
+   The add-on's `config.toml` lives in its `/data` volume, which the SSH
+   add-on cannot read under protection mode, and there is no other copy on
+   the box. Every live Jira run therefore starts with the operator pasting a
+   token. Not a defect — worth knowing before planning one.
 
 
 The open issues below are the rest of the backlog. None is scheduled.
