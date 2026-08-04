@@ -438,6 +438,16 @@ async def run_task(
     tree = await asyncio.to_thread(
         worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
     )
+    # The prompt states the default branch as fact because the session cannot
+    # discover it safely: it is checked out in the repository rather than in
+    # this tree, so `git branch` there does not mark it, and a session that
+    # guesses runs `git push origin <guess>` -- which from a worktree pushes
+    # that branch's own ref, answers "Everything up-to-date", exits 0 and
+    # ships nothing. None when git cannot say, which drops the section rather
+    # than inventing a branch name. One cheap local git call, on the same
+    # thread hop as ensure() for the same reason: it must not block the event
+    # loop the heartbeat and the dashboard share.
+    default = await asyncio.to_thread(worktree.default_branch, cfg.repo)
     if resume_with is None and not interrupted:
         # source.start would re-fire transition_start against an issue
         # already in that status; reopen() covers the source-side state
@@ -484,6 +494,7 @@ async def run_task(
             prompt=prompt,
             resume=resume,
             cwd=tree,
+            default_branch=default,
         )
         # session.run returns only this invocation's events, so cost has to
         # accumulate here rather than being read once at the end.

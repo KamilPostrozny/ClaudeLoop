@@ -35,17 +35,57 @@ PROTOCOL = (
     "and could not finish, \"blocked\" means a human must decide something "
     "before you can), \"summary\" (one paragraph on what you did), and, when "
     "blocked, \"question\" (the one thing a human must answer). Writing that "
-    "file is what ends the task; do not stop without it."
+    "file is what ends the task; do not stop without it. One last thing is "
+    "ClaudeLoop's own bookkeeping rather than part of the work, and holds "
+    "whatever this repository's own instructions say: never git add, stage, "
+    "commit, stash or revert ClaudeLoop's task-tracking file if one lives in "
+    "this repository. ClaudeLoop rewrites that file itself once you finish, "
+    "and a broad `git add -A`, or a branch cleanup like `git checkout -- .` "
+    "or `git stash`, can silently make already-finished work look pending "
+    "again. Prefer staging files by name."
 )
+"""The task-file guard lives here, not in the definition of done, because
+`compose` drops the built-in definition of done whenever the repository's own
+CLAUDE.md says when work is finished -- so the better a repository documented
+itself, the fewer of ClaudeLoop's own guards reached the session at all. This
+is not a definition of done; it is the one rule ClaudeLoop's own bookkeeping
+cannot survive a session breaking."""
+
+WORKING_TREE = """## Your working tree
+
+You are in a git worktree at {tree}, on a branch ClaudeLoop cut for this task
+from {default}. Nothing else touches this tree while you have it, so its
+branch, its commits and any uncommitted changes are yours alone.
+
+{default} itself is checked out elsewhere, so two things that usually work
+do not work here. `git checkout {default}` fails with "already used by worktree".
+And `git push origin {default}` from this tree pushes that branch's own ref,
+which does not carry your commits: it reports "Everything up-to-date", exits 0,
+and ships nothing. Name HEAD explicitly instead:
+
+    git push origin HEAD:{default}   # to land your work on {default}
+    git push -u origin HEAD          # to publish this branch, for a pull request
+
+Which of the two is right is this repository's decision, not ClaudeLoop's. If
+its own instructions say work lands on {default}, use the first. If they say
+nothing about it, or ask for a pull request, use the second."""
+"""Fact about the machine, not policy, so it is composed for every task
+whatever the repository documents about itself.
+
+The literal command lines are deliberate. "Push HEAD rather than the branch
+name" is exactly the kind of instruction a literal-minded session satisfies by
+guessing, and the guess it already made -- `git push origin main`, which git
+answers with "Everything up-to-date" and a zero exit -- is what made a
+finished, committed task report success without shipping anything."""
 
 BUILTIN_DEFINITION_OF_DONE = (
     "Done means: the change is implemented; the repository's own tests and "
-    "checks, if it has any, pass; the work is committed; and a pull request "
-    "is open. You are already on a branch made for this task and cut from "
-    "the repository's default branch, so commit there -- you do not need to "
-    "create one, and you may rename it to something descriptive with `git "
-    "branch -m` if you like. Never check out the default branch and commit "
-    "onto it. If the repository has no remote configured, "
+    "checks, if it has any, pass; the work is committed on the branch you are "
+    "already on; and the work is published -- pushed as this repository's "
+    "instructions direct, or, if they do not say, pushed as this branch with "
+    "a pull request open. You do not need to create a branch, and you may "
+    "rename the one you are on with `git branch -m` if you like. If the "
+    "repository has no remote configured, "
     "or a remote is configured but push credentials or a forge CLI (gh, "
     "glab, or similar) to open a pull request with are not available, that "
     "is not blocked: supplying a remote or push credentials is not a "
@@ -54,22 +94,20 @@ BUILTIN_DEFINITION_OF_DONE = (
     "(not \"blocked\") and name in your summary exactly what was missing. "
     "Write that result file and stop there; do not instead end your turn by "
     "asking a human what to do next -- nobody reads your last message, and "
-    "the result file is what ends the task. Never git add, stage, commit, "
-    "stash, or revert ClaudeLoop's own task-tracking file if one lives in "
-    "this repository -- it is not part of the work, and ClaudeLoop rewrites "
-    "it itself once you finish; a broad `git add -A` or branch-cleanup "
-    "commands like `git checkout -- .` or `git stash` can silently make "
-    "already-finished work look pending again. Prefer staging files by name "
-    "over `git add -A`."
+    "the result file is what ends the task."
 )
 """Before S6 this told the session to create its own branch off the default
 one -- S1's live smoke test measured only ~50% compliance, and S2b's found
 the failure mode: a task that skipped it committed straight to the default
 branch, and a task parked meanwhile inherited the contamination once it
 resumed. ClaudeLoop now cuts the branch itself before the session ever runs,
-so the instruction is gone rather than reworded, and the definition of done
-only has to forbid checking out the default branch instead of prescribing
-how to avoid it."""
+so the instruction is gone rather than reworded.
+
+S10 took the rest of the branch mechanics out. "Never check out the default
+branch" is now stated by WORKING_TREE as the mechanical impossibility it is,
+and *where* work is published is deferred to the repository, which is the
+layer that knows -- the wording here only covers a repository that says
+nothing. The task-file guard moved to PROTOCOL, which is always present."""
 
 CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 
@@ -123,35 +161,72 @@ def _read(path: Path | None) -> str:
         return ""
 
 
+def working_tree_section(tree: Path | None, default_branch: str | None) -> str:
+    """WORKING_TREE filled in, or empty when either fact is unknown.
+
+    Both or neither: a section that guessed the default branch would hand a
+    literal-minded session a push command aimed at a branch that may not
+    exist, which is a worse failure than the section being absent.
+    """
+    if tree is None or not default_branch:
+        return ""
+    return WORKING_TREE.format(tree=tree, default=default_branch)
+
+
 def precedence(has_operator: bool) -> str:
     """Precedence text naming only the layers actually present.
 
     Asserting that the operator layer outranks the repository when there is
     no operator instructions file leaves an unattended session reconciling
     a conflict against a document it cannot find.
+
+    S10 reversed S1's ranking. ClaudeLoop's definition of done used to be the
+    base, with the repository's own file pointed at from inside it -- so a
+    repository whose CLAUDE.md said "push to main" was arguing with a layer
+    that outranked it, and the session had no stated way to resolve that. The
+    repository decides how work is done here; what is left above it is the
+    handful of rules ClaudeLoop itself breaks without, and facts about the
+    machine that no instruction can make untrue.
     """
     parts = [
-        "These instructions are layered. The ClaudeLoop protocol above is "
-        "invariant and overrides everything below it."
+        "These instructions are layered. The ClaudeLoop protocol above is a "
+        "small set of invariants that hold because ClaudeLoop itself breaks "
+        "without them, and it overrides everything below it. The working tree "
+        "section is fact about this machine rather than policy -- nothing "
+        "below can make it untrue."
     ]
     if has_operator:
         parts.append(
-            "The operator instructions outrank the definition of done below."
+            "The operator instructions outrank this repository's own "
+            "instructions."
         )
     parts.append(
-        "The definition of done is the base. Where layers conflict, follow "
-        "the higher one and say so in your summary."
+        "Below those, this repository's own instructions come first: they "
+        "decide how work is done here, including when it is finished and "
+        "where it lands. ClaudeLoop's definition of done is only a fallback "
+        "for what they do not say. Where layers conflict, follow the higher "
+        "one and say so in your summary."
     )
     return " ".join(parts)
 
 
-def compose(cfg: Config, tree: Path | None = None) -> str:
+def compose(
+    cfg: Config, tree: Path | None = None, default_branch: str | None = None
+) -> str:
     """`tree` is the working directory the session will run in -- its own
     worktree. It differs from cfg.repo, which is only the repository that
     tree was cut from, and it is the copy of CLAUDE.md the session can
-    actually edit."""
+    actually edit.
+
+    `default_branch` is the name of the branch that tree was cut from, which
+    the session cannot check out and must name explicitly to push to. Passed
+    in rather than looked up, so this stays pure."""
     operator = _read(cfg.instructions_file)
     parts = [PROTOCOL, precedence(has_operator=bool(operator))]
+
+    facts = working_tree_section(tree, default_branch)
+    if facts:
+        parts.append(facts)
 
     task_source = task_source_section(cfg)
     if task_source:
@@ -169,10 +244,10 @@ def compose(cfg: Config, tree: Path | None = None) -> str:
         # -- costless when the repository's file already covers it.
         parts.append(
             "## Definition of done\n\nThis repository has its own instructions "
-            f"at {claude_md}. Follow that file end to end — it defines what "
-            "\"done\" means here, including its testing and verification "
-            "requirements. If it does not say when the work is finished, use "
-            "this instead:\n\n"
+            f"at {claude_md}. They come first: follow that file end to end — "
+            "it defines what \"done\" means here, including its testing, "
+            "verification and publishing requirements. Use what follows only "
+            "for what that file does not say:\n\n"
             + (_read(cfg.definition_of_done_file) or BUILTIN_DEFINITION_OF_DONE)
         )
     else:

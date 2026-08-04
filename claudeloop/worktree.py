@@ -39,7 +39,9 @@ milliseconds; this exists only so a wedged one (a lock held by another
 process, anything unforeseen) can't hang an unattended loop forever."""
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(
+    repo: Path, *args: str, timeout: int = GIT_TIMEOUT_S
+) -> subprocess.CompletedProcess:
     """Run one git command, hardened for an unattended caller: no inherited
     stdin (a prompt for credentials or an editor would otherwise block
     forever reading from the loop's own terminal -- the same class of bug
@@ -52,17 +54,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
-        timeout=GIT_TIMEOUT_S,
+        timeout=timeout,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
 
 
-def _try_git(repo: Path, *args: str) -> subprocess.CompletedProcess | None:
+def _try_git(
+    repo: Path, *args: str, timeout: int = GIT_TIMEOUT_S
+) -> subprocess.CompletedProcess | None:
     """`_git`, or None with a warning already logged if git could not be run
     at all -- a missing binary, a timeout. Distinct from a clean invocation
     that simply exits non-zero, which callers handle themselves."""
     try:
-        return _git(repo, *args)
+        return _git(repo, *args, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as error:
         log.warning(
             "could not run `git %s` in %s (%s); running the next task from"
@@ -193,6 +197,41 @@ def probe(repo: Path) -> str | None:
     return None
 
 
+FETCH_TIMEOUT_S = 60
+"""A fetch crosses the network, so GIT_TIMEOUT_S -- written for local commands
+that finish in milliseconds -- would abort a healthy one. Still bounded: an
+unattended loop must not hang forever on a remote that accepts the connection
+and then stalls."""
+
+
+def base_ref(repo: Path, branch: str) -> str:
+    """The ref a new task branch is cut from: `origin/<branch>` when the
+    repository has a remote this can reach, `<branch>` otherwise.
+
+    Where a session publishes its work is the target repository's decision,
+    and some tell it to land on the default branch directly. That push never
+    moves the local ref, so without this every task after the first cuts from
+    the same stale point and silently drops the work in between.
+
+    Every failure degrades to the local branch rather than failing the task:
+    no remote, no network, a locked credential agent. A stale base still makes
+    progress, and the prompt names the branch the tree was cut from either
+    way. Deliberately not `git fetch` with no arguments: one branch is what is
+    needed, and a repository with a large remote should not pay for the rest.
+    """
+    result = _try_git(repo, "fetch", "--quiet", "origin", branch,
+                      timeout=FETCH_TIMEOUT_S)
+    if result is None or result.returncode != 0:
+        return branch
+    # The fetch can succeed against a remote that has no such branch, which
+    # leaves no remote-tracking ref to cut from.
+    check = _try_git(repo, "rev-parse", "-q", "--verify",
+                     f"refs/remotes/origin/{branch}")
+    if check is None or check.returncode != 0:
+        return branch
+    return f"origin/{branch}"
+
+
 def _branch_exists(repo: Path, branch: str) -> bool:
     result = _try_git(repo, "rev-parse", "-q", "--verify", f"refs/heads/{branch}")
     return result is not None and result.returncode == 0
@@ -217,8 +256,13 @@ def ensure(repo: Path, root: Path, task_id: str) -> Path:
     base = default_branch(repo)
     if base is None:
         raise RuntimeError(f"no default branch to cut {branch} from in {repo}")
+    # Creation only. A reused tree -- a parked task coming back with its
+    # answer, an interrupted one resuming -- is never refetched and never
+    # rebased: it holds uncommitted work, and moving it under an unattended
+    # session is worse than a stale base.
     try:
-        result = _git(repo, "worktree", "add", "-b", branch, str(path), base)
+        result = _git(repo, "worktree", "add", "-b", branch, str(path),
+                      base_ref(repo, base))
         if result.returncode != 0 and _branch_exists(repo, branch):
             result = _git(repo, "worktree", "add", str(path), branch)
     except (OSError, subprocess.SubprocessError) as error:

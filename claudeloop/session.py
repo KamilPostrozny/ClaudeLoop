@@ -34,14 +34,19 @@ log = logging.getLogger("claudeloop")
 
 
 def build_command(
-    cfg: Config, session_id: str, prompt: str, resume: bool, tree: Path | None = None
+    cfg: Config,
+    session_id: str,
+    prompt: str,
+    resume: bool,
+    tree: Path | None = None,
+    default_branch: str | None = None,
 ) -> list[str]:
     command = ["claude", "-p", prompt]
     # --resume and --session-id are alternative ways to name the session;
     # passing both is a conflict.
     command += ["--resume", session_id] if resume else ["--session-id", session_id]
     command += [
-        "--append-system-prompt", compose(cfg, tree),
+        "--append-system-prompt", compose(cfg, tree, default_branch),
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
@@ -159,6 +164,7 @@ async def run(
     prompt: str,
     resume: bool,
     cwd: Path | None = None,
+    default_branch: str | None = None,
 ) -> list[dict]:
     """Run one invocation to completion. Returns only this invocation's events.
 
@@ -177,7 +183,7 @@ async def run(
     run_dir.chmod(0o700)
     env = child_env(cfg, run_dir)
     process = await asyncio.create_subprocess_exec(
-        *build_command(cfg, session_id, prompt, resume, cwd),
+        *build_command(cfg, session_id, prompt, resume, cwd, default_branch),
         cwd=cwd or cfg.repo,
         env=env,
         stdin=asyncio.subprocess.DEVNULL,  # inherited stdin can block a CLI that reads it

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from claudeloop import worktree
 
-from .gitrepo import make_repo
+from .gitrepo import commit_to_remote, make_repo, make_repo_with_remote
 
 
 def branch_of(path: Path) -> str:
@@ -45,6 +45,57 @@ class WorktreeTest(unittest.TestCase):
 
         self.assertFalse((path / "stray.txt").exists(),
                          "the task's branch must come from main, not from HEAD")
+
+    def test_a_new_branch_is_cut_from_the_remote_default_branch(self):
+        # A session may push its work straight to the remote's default branch
+        # -- that is the repository's decision, and at least one live one asks
+        # for it -- which never moves the local ref. Without a fetch, every
+        # task after the first cuts from the same stale point and silently
+        # loses the work in between.
+        remote = self.tmp / "remote.git"
+        repo = make_repo_with_remote(self.tmp / "withremote", remote)
+        commit_to_remote(remote, "from-elsewhere.txt", self.tmp / "scratch")
+
+        path = worktree.ensure(repo, self.root, "abc123")
+
+        self.assertTrue((path / "from-elsewhere.txt").exists(),
+                        "the task's branch must come from the remote's default"
+                        " branch, not from a stale local ref")
+
+    def test_a_repository_with_no_remote_still_cuts_from_the_local_branch(self):
+        path = worktree.ensure(self.repo, self.root, "abc123")
+
+        self.assertEqual(branch_of(path), "claudeloop/abc123")
+        self.assertTrue((path / "README.md").exists())
+
+    def test_an_unreachable_remote_falls_back_to_the_local_branch(self):
+        # No network, a locked credential agent, a remote that has moved: an
+        # unattended loop makes progress on a stale base rather than failing
+        # the task.
+        repo = make_repo(self.tmp / "broken")
+        subprocess.run(["git", "remote", "add", "origin",
+                        str(self.tmp / "no-such-repo.git")],
+                       cwd=repo, check=True, capture_output=True,
+                       stdin=subprocess.DEVNULL)
+
+        path = worktree.ensure(repo, self.root, "abc123")  # must not raise
+
+        self.assertTrue((path / "README.md").exists())
+        self.assertEqual(branch_of(path), "claudeloop/abc123")
+
+    def test_a_reused_tree_is_never_refetched_or_rebased(self):
+        # Rebasing a parked task's tree, with uncommitted work in it and
+        # nobody watching, is a worse failure than a stale base.
+        remote = self.tmp / "remote.git"
+        repo = make_repo_with_remote(self.tmp / "withremote", remote)
+        path = worktree.ensure(repo, self.root, "abc123")
+        (path / "half-done.txt").write_text("work in progress\n")
+        commit_to_remote(remote, "landed-later.txt", self.tmp / "scratch")
+
+        again = worktree.ensure(repo, self.root, "abc123")
+
+        self.assertEqual((again / "half-done.txt").read_text(), "work in progress\n")
+        self.assertFalse((again / "landed-later.txt").exists())
 
     def test_two_tasks_get_independent_trees(self):
         first = worktree.ensure(self.repo, self.root, "aaa")

@@ -816,7 +816,8 @@ class PromptSelectionTest(unittest.TestCase):
         clean_no_result = [{"type": "result", "total_cost_usd": 0.0}]
         prompts = []
 
-        async def fake_run(cfg, run_dir, session_id, prompt, resume, cwd=None):
+        async def fake_run(cfg, run_dir, session_id, prompt, resume, cwd=None,
+                           default_branch=None):
             prompts.append(prompt)
             if len(prompts) == 1:
                 return rate_limited  # quota wait: next prompt must be "Continue."
@@ -1043,6 +1044,14 @@ class ResumeWithAnswerTest(unittest.TestCase):
             "echo '{\"type\":\"result\",\"total_cost_usd\":0.1}'\n"
         )
         fake.chmod(0o755)
+
+    def test_the_session_is_told_which_branch_is_the_default(self):
+        # The fix for a task that committed, ran `git push origin main` from
+        # its worktree, got "Everything up-to-date" and a zero exit, and
+        # reported done having shipped nothing. make_repo's default is main.
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertIn("git push origin HEAD:main", self.args())
 
     def test_a_resume_reuses_the_session_that_asked(self):
         session = self.park()

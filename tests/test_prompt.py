@@ -31,8 +31,32 @@ class PromptTest(unittest.TestCase):
     def test_protocol_and_base_precedence_are_always_present(self):
         text = compose(self.cfg())
         self.assertIn(PROTOCOL, text)
-        self.assertIn("ClaudeLoop protocol above is invariant", text)
-        self.assertIn("definition of done is the base", text)
+        self.assertIn("small set of invariants", text)
+        self.assertIn("this repository's own instructions come first", text)
+
+    def test_the_protocol_carries_the_task_file_guard(self):
+        # It used to live in BUILTIN_DEFINITION_OF_DONE, which compose() drops
+        # whenever the repository's own CLAUDE.md defines done -- so the better
+        # a repository documented itself, the fewer of ClaudeLoop's own guards
+        # survived. This is not a definition of done; it is ClaudeLoop's
+        # bookkeeping, and it holds whatever the repository says.
+        self.assertIn("task-tracking file", PROTOCOL)
+        self.assertIn("git add -A", PROTOCOL)
+
+    def test_the_guards_survive_a_repo_that_fully_defines_done(self):
+        (self.repo / "CLAUDE.md").write_text(
+            "# rules\n\nDone means: committed and pushed to main.\n"
+        )
+        self.assertIn("task-tracking file", compose(self.cfg()))
+
+    def test_the_builtin_no_longer_carries_the_guards(self):
+        self.assertNotIn("task-tracking file", BUILTIN_DEFINITION_OF_DONE)
+        self.assertNotIn("Never check out the default branch",
+                         BUILTIN_DEFINITION_OF_DONE)
+
+    def test_the_builtin_defers_to_the_repository_on_where_work_lands(self):
+        self.assertIn("as this repository's instructions direct",
+                      BUILTIN_DEFINITION_OF_DONE)
 
     def test_protocol_still_names_the_result_contract(self):
         for token in ("CLAUDELOOP_RESULT", "done", "failed", "blocked"):
@@ -136,10 +160,7 @@ class PromptTest(unittest.TestCase):
         # test measured at ~50% compliance is gone rather than reworded.
         self.assertNotIn("Create that branch before your first commit",
                          BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("already on a branch", BUILTIN_DEFINITION_OF_DONE)
-
-    def test_the_definition_of_done_still_forbids_the_default_branch(self):
-        self.assertIn("Never check out the default branch", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("branch you are already on", BUILTIN_DEFINITION_OF_DONE)
 
     def test_the_definition_of_done_allows_a_rename(self):
         self.assertIn("git branch -m", BUILTIN_DEFINITION_OF_DONE)
@@ -150,13 +171,14 @@ class PromptTest(unittest.TestCase):
         # session hunting indefinitely or writing speculative tests.
         self.assertIn("if it has any", BUILTIN_DEFINITION_OF_DONE)
 
-    def test_the_builtin_forbids_touching_the_task_list(self):
+    def test_the_protocol_forbids_touching_the_task_list(self):
         # Sequence this guards against: a `git add -A` sweeps ClaudeLoop's
         # own tasks file into a commit, then a later session's branch
         # cleanup (`git checkout -- .` / `git stash`) discards the `- [x]`
         # mark, and main_loop re-reads the file and repeats the task forever.
-        self.assertIn("task-tracking file", BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("git add -A", BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("task-tracking file", PROTOCOL)
+        self.assertIn("git checkout -- .", PROTOCOL)
+        self.assertIn("git stash", PROTOCOL)
 
     def test_a_definition_of_done_file_wins_over_the_builtin(self):
         dod = self.tmp / "dod.md"
@@ -220,6 +242,30 @@ class PromptTest(unittest.TestCase):
         self.assertIn("outrank", with_operator)
         self.assertNotIn("outrank", without_operator)
 
+    def test_precedence_puts_the_repository_above_claudeloops_fallback(self):
+        for text in (precedence(has_operator=True), precedence(has_operator=False)):
+            self.assertIn("this repository's own instructions come first", text)
+            self.assertIn("only a fallback", text)
+
+    def test_precedence_no_longer_calls_the_builtin_the_base(self):
+        # S1's framing, reversed by this slice: ClaudeLoop's definition of done
+        # was the base and the repository's file was pointed at from inside it.
+        # A repository that says "push to main" was then arguing with a layer
+        # that outranked it.
+        for text in (precedence(has_operator=True), precedence(has_operator=False)):
+            self.assertNotIn("definition of done is the base", text)
+
+    def test_precedence_states_the_facts_layer_cannot_be_overridden(self):
+        for text in (precedence(has_operator=True), precedence(has_operator=False)):
+            self.assertIn("fact about this machine", text)
+
+    def test_the_repo_pointer_says_the_repository_comes_first(self):
+        (self.repo / "CLAUDE.md").write_text("# rules")
+        text = compose(self.cfg())
+        self.assertIn("They come first", text)
+        self.assertIn("Use what follows only for what that file does not say",
+                      text)
+
     def test_precedence_never_misnames_the_base_layer(self):
         # The base is whichever of built-in / definition_of_done_file /
         # repo CLAUDE.md actually supplied it -- "the repository's own
@@ -240,6 +286,77 @@ class PromptTest(unittest.TestCase):
 
         self.assertIn(str(tree / "CLAUDE.md"), text)
         self.assertNotIn(str(self.repo / "CLAUDE.md"), text)
+
+
+class WorkingTreeSectionTest(unittest.TestCase):
+    """Fact about the machine, not policy. A session that has to infer any of
+    this infers it wrong: the defect that produced this slice was a session
+    running `git push origin main` from a worktree, where it pushes that
+    branch's own ref, says "Everything up-to-date", exits 0 and ships
+    nothing."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+        self.tree = self.tmp / "worktrees" / "abc123"
+        self.tree.mkdir(parents=True)
+
+    def cfg(self, **overrides) -> Config:
+        base = {
+            "repo": self.repo,
+            "tasks_file": self.tmp / "tasks.md",
+            "home": self.tmp / "home",
+        }
+        return Config(**{**base, **overrides})
+
+    def test_the_section_names_the_tree_and_the_default_branch(self):
+        text = compose(self.cfg(), self.tree, default_branch="trunk")
+        self.assertIn(str(self.tree), text)
+        self.assertIn("trunk", text)
+
+    def test_it_gives_both_publish_commands_naming_head(self):
+        text = compose(self.cfg(), self.tree, default_branch="main")
+        self.assertIn("git push origin HEAD:main", text)
+        self.assertIn("git push -u origin HEAD", text)
+
+    def test_it_warns_that_pushing_the_branch_name_ships_nothing(self):
+        text = compose(self.cfg(), self.tree, default_branch="main")
+        self.assertIn("git push origin main", text)
+        self.assertIn("Everything up-to-date", text)
+        self.assertIn("ships nothing", text)
+
+    def test_it_explains_the_default_branch_cannot_be_checked_out(self):
+        # Stated as the mechanical fact it is, with git's actual error, rather
+        # than as a rule -- a rule invites a session to try it once.
+        text = compose(self.cfg(), self.tree, default_branch="main")
+        self.assertIn("git checkout main", text)
+        self.assertIn("already used by worktree", text)
+
+    def test_it_leaves_the_choice_to_the_repository(self):
+        text = compose(self.cfg(), self.tree, default_branch="main")
+        self.assertIn("this repository's decision, not ClaudeLoop's", text)
+
+    def test_it_is_present_whether_or_not_the_repo_documents_itself(self):
+        (self.tree / "CLAUDE.md").write_text("# fully documented\n")
+        with_md = compose(self.cfg(), self.tree, default_branch="main")
+        without_md = compose(self.cfg(), self.tmp, default_branch="main")
+        for text in (with_md, without_md):
+            self.assertIn("## Your working tree", text)
+
+    def test_absent_when_either_fact_is_unknown(self):
+        # A guessed default branch would hand a literal-minded session a push
+        # command aimed at a branch that may not exist.
+        self.assertNotIn("## Your working tree", compose(self.cfg()))
+        self.assertNotIn("## Your working tree", compose(self.cfg(), self.tree))
+        self.assertNotIn(
+            "## Your working tree", compose(self.cfg(), None, default_branch="main")
+        )
+
+    def test_it_sits_above_the_definition_of_done(self):
+        text = compose(self.cfg(), self.tree, default_branch="main")
+        self.assertLess(text.index("## Your working tree"),
+                        text.index("## Definition of done"))
 
 
 class TaskSourceSectionTest(unittest.TestCase):

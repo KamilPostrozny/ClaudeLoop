@@ -52,6 +52,18 @@ class BuildCommandTest(unittest.TestCase):
             cmd[cmd.index("--append-system-prompt") + 1], compose(self.cfg)
         )
 
+    def test_the_default_branch_reaches_the_appended_prompt(self):
+        # The session cannot check the default branch out and must name HEAD
+        # to push to it, so the name has to arrive as fact rather than be
+        # inferred -- inferring it is what shipped nothing.
+        cmd = session.build_command(
+            self.cfg, "uuid-1", "do it", resume=False,
+            tree=Path("/worktrees/abc"), default_branch="trunk",
+        )
+        sent = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("git push origin HEAD:trunk", sent)
+        self.assertIn("/worktrees/abc", sent)
+
 
 class RunTest(unittest.TestCase):
     def setUp(self):
