@@ -319,6 +319,77 @@ class BlockedTest(unittest.TestCase):
         self.assertEqual(reopened.blocked(), [])
 
 
+class UnfinishedTest(unittest.TestCase):
+    """A task that started and reached no verdict. Under the Jira source this
+    is the only way back to work its own transition_start pushed out of the
+    operator's JQL -- see S12."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "state.db")
+
+    def test_returns_what_a_task_can_be_rebuilt_from(self):
+        self.state.start_task("aaaa", "jira", "OPS-1", "OPS-1: do a thing")
+        self.state.finish_task("aaaa", "error", "crashed", 0.0)
+
+        rows = self.state.unfinished()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "aaaa")
+        self.assertEqual(rows[0]["source"], "jira")
+        self.assertEqual(rows[0]["source_ref"], "OPS-1")
+        self.assertEqual(rows[0]["text"], "OPS-1: do a thing")
+
+    def test_collects_interrupted_and_error_only(self):
+        for index, status in enumerate(("done", "failed", "blocked", "error")):
+            self.state.start_task(f"id{index}", "jira", f"OPS-{index}", "x")
+            self.state.finish_task(f"id{index}", status, "", 0.0)
+        # Left 'running', which the next State() turns into 'interrupted'.
+        self.state.start_task("live", "jira", "OPS-9", "x")
+
+        reopened = State(self.tmp / "state.db")
+
+        self.assertEqual({row["id"] for row in reopened.unfinished()},
+                         {"id3", "live"})
+
+    def test_the_task_running_right_now_is_not_unfinished(self):
+        # 'running' means this process is working on it. Offering it back
+        # would have the loop pick up the task it is already running.
+        self.state.start_task("aaaa", "jira", "OPS-1", "x")
+
+        self.assertEqual(self.state.unfinished(), [])
+
+    def test_is_oldest_first(self):
+        for key in ("first", "second"):
+            self.state.start_task(key, "jira", f"OPS-{key}", key)
+            self.state.finish_task(key, "error", "", 0.0)
+            time.sleep(0.01)
+
+        self.assertEqual([row["id"] for row in self.state.unfinished()],
+                         ["first", "second"])
+
+    def test_ignores_another_repositorys_stranded_task(self):
+        # tasks.id is not a key on its own: unscoped, this loop would offer
+        # itself work stranded against a different repository, in a worktree
+        # cut from that one.
+        other = State(self.tmp / "state.db", "/repo/other")
+        other.start_task("aaaa", "jira", "OPS-1", "x")
+        other.finish_task("aaaa", "error", "", 0.0)
+
+        self.assertEqual(self.state.unfinished(), [])
+
+    def test_works_from_a_different_thread(self):
+        # pending() runs through asyncio.to_thread, and a connection opened
+        # without check_same_thread=False raises there -- the failure mode
+        # that made the re-run backstop silently inert in S3's live run.
+        self.state.start_task("aaaa", "jira", "OPS-1", "x")
+        self.state.finish_task("aaaa", "error", "", 0.0)
+
+        rows = asyncio.run(asyncio.to_thread(self.state.unfinished))
+
+        self.assertEqual([row["id"] for row in rows], ["aaaa"])
+
+
 class TaskIdentityTest(unittest.TestCase):
     """`id` alone used to be the primary key, so two repositories whose file
     sources hold identical task text shared one row and start_task's INSERT OR

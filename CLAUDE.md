@@ -200,8 +200,8 @@ correct.
 
 ## Always run the live smoke test before merging
 
-Seven slices have run one. Five of them surfaced defects the passing suite
-could not have caught — nine between them:
+Twelve slices have run one. Seven of them surfaced defects the passing suite
+could not have caught — eleven between them:
 
 - `blocking_reset` treated the live `allowed_warning` status as a quota block,
   parking the loop until the window reset. The fixtures had only ever shown
@@ -235,15 +235,28 @@ could not have caught — nine between them:
   no operator instructions the sentence lost its verb and stated no
   precedence at all. Seven tests covered the function and all passed, because
   they asserted on substrings rather than the whole sentence.
+- A task that parked on a question and was answered reported only what its
+  resume cost: `run_task` starts its accumulator at zero on every call and
+  `finish_task` writes `cost_usd=?` rather than adding, so the money spent
+  before the question was silently overwritten. Only a real two-part run
+  shows it, because the fake CLI's cost is whatever the fixture says.
+- `tasks.id` was the primary key on its own, and `id` is a hash of the task
+  text — so two repositories whose file sources held identical text shared
+  one row and `INSERT OR REPLACE` overwrote the other's.
 
-The two that found nothing wrong were still worth running. S1's is what
+The five that found nothing wrong were still worth running. S1's is what
 confirmed `resetsAt` is in seconds, that `--session-id` is honoured, and that
 `--resume` reattaches with the appended system prompt intact — assumptions the
 whole recovery path rests on. S6's confirmed that `--resume` still reattaches
 when the session's working directory is a git worktree rather than the
 repository, which nothing in a fixture suite can tell you, and that no session
 tried to check out the default branch — which under a worktree fails outright
-with `already checked out at`.
+with `already checked out at`. S12's is the one that could not have been run
+any other way: the defect it fixes — a Jira ticket ClaudeLoop's own
+`transition_start` moves out of the operator's JQL, leaving the loop idle
+beside its own unfinished work — **does not exist under the file source at
+all**, so a scratch checklist could not have reproduced it, and the recovery
+query it added is JQL that only a real instance can accept or reject.
 
 Prompt text, live payload shapes, and what a session does when it thinks it is
 done are all invisible to a suite built on fixtures and a fake CLI — and
@@ -255,6 +268,18 @@ Run it with a scratch repository, `model = "haiku"`, and **two tasks, not one**
 by the first one matters. The whole run costs about ten cents. When a fix
 changes prompt text, re-run afterwards: text fixes are exactly the kind that
 come back differently broken.
+
+**Run it against the source the change is about.** A slice that touches the
+Jira source needs a real Jira board — `SAM1` on `assimo.atlassian.net` is the
+scratch project the last one used — and the operator has to hand over an API
+token each time, since the only copy on the add-on box is in a `/data` volume
+nothing else can read. Two things bite here. Overriding `HOME` to point at
+the scratch config also hides `~/.claude/.credentials.json`, and every session
+then dies in four seconds with `Not logged in · Please run /login` at $0.00;
+symlink the credentials into the scratch home first. And haiku finishes a
+one-file task in under twenty seconds, so a run that has to be interrupted
+mid-task needs a task big enough to interrupt — eight modules, one commit
+each.
 
 ## Testing
 
