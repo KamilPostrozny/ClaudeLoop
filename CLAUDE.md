@@ -35,12 +35,12 @@ temptation to add workflow logic here.
 | `loop.py` | The decision state machine (`decide`), per-task orchestration, the polling loop, `main()` |
 | `session.py` | Spawns one `claude -p` invocation, streams and tees its output |
 | `worktree.py` | One git worktree per task: create, reuse, release, and the startup probe |
-| `prompt.py` | Composes the session's system prompt from four layers. Pure |
+| `prompt.py` | Composes the session's system prompt from three layers. Pure |
 | `source.py` | `Task`, the `TaskSource` protocol, `FileSource` over a markdown checklist |
 | `state.py` | SQLite record of what happened. Not the source of truth for what is pending |
 | `config.py` | Loads and validates `config.toml` |
 | `setup.py` | Setup mode: the schema-rendered wizard and the TOML writer. Runs only when the loop does not |
-| `plugins.py` | The proposed plugin set: its table, installing it, and the prompt layer it renders |
+| `plugins.py` | Registers the plugin marketplaces the target repository declares, so its own `enabledPlugins` work on this box |
 | `status.py` | The one value crossing the loop/web-thread boundary |
 | `render.py` | Raw `stream-json` events to compact display entries. Pure |
 | `web.py` | The dashboard's HTTP surface, routes, SSE pump |
@@ -117,13 +117,20 @@ deliberate decision recorded in a spec.
 - **`CLAUDELOOP_RESULT` is merged last** into the session's environment. The
   loop decides a task is finished by that file appearing; a `session_env` entry
   must never be able to redirect it.
-- **Plugins install at `--scope user`, never project or local.** Both of
-  those write `.claude/settings.json` or `.claude/settings.local.json` into
-  the target repository, which the constraint above forbids, and both would
-  be per-worktree so every task would reinstall. S7 reversed half of S1.1's
-  "pass through, do not manage" deliberately: ClaudeLoop installs the plugins
-  it proposes, because the S4 addon operator has no terminal to do it in.
-  `settings_file` passthrough is untouched.
+- **ClaudeLoop proposes no plugins and writes no plugin prompt text.** The
+  target repository's own `.claude/settings.json` decides, and a headless
+  session honours it: `enabledPlugins` there is installed at session start,
+  without writing into the repository. S7 shipped a curated set ClaudeLoop
+  installed and wrote a prompt layer for; S8 dropped both. What remains is
+  the one thing a session cannot do for itself — `claude plugin marketplace
+  add <source> --scope user`, once per marketplace the repository names,
+  because a session only auto-installs from a marketplace already in
+  `~/.claude/plugins/known_marketplaces.json`, and a repository's own
+  `extraKnownMarketplaces` never lands there. **User scope, never project or
+  local**: those write `.claude/settings.json` or `.claude/settings.local.json`
+  into the target repository, which the constraint below forbids, and both
+  would be per-worktree so every task would reinstall. `settings_file`
+  passthrough is untouched.
 - **Nothing ClaudeLoop writes into a repository may be committable.** The
   result file, event log and database all live under `~/.claudeloop/`, and
   `load_config` refuses a `tasks_file` that resolves inside `repo`. A session
@@ -160,8 +167,7 @@ failure. Do not simplify them.
 
 ## The prompt strings are the product
 
-`PROTOCOL`, `precedence()` and `BUILTIN_DEFINITION_OF_DONE` in `prompt.py`,
-and any `usage` text a `Plugin` in `plugins.py` carries, are
+`PROTOCOL`, `precedence()` and `BUILTIN_DEFINITION_OF_DONE` in `prompt.py` are
 not documentation. They are instructions a capable but **literal-minded** agent
 executes unsupervised for hours with bypassed permissions. Ambiguity in them is
 a defect exactly the way a bug in `decide()` is. Every live failure this project

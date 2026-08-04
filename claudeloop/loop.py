@@ -668,12 +668,11 @@ def main(argv: list[str] | None = None) -> None:
     problem = worktree.probe(cfg.repo)
     if problem:
         raise SystemExit(problem)
-    # Same treatment, same reason: a box that could not get the plugins the
-    # operator selected would otherwise run every task with a system prompt
-    # describing tools the session does not have. Nothing runs here when
-    # `plugins` is empty, and nothing touches the network when the box
-    # already matches.
-    problem = plugins.reconcile(cfg.plugins)
+    # Same treatment, same reason: a marketplace the repository names but
+    # this box has never heard of means every session runs without the
+    # plugins that repository chose, silently. Nothing runs here when the
+    # repository declares none.
+    problem = plugins.register_marketplaces(cfg.repo)
     if problem:
         raise SystemExit(problem)
     # After the config validates, so a non-loopback bind with no token fails

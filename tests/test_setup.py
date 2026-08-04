@@ -128,36 +128,6 @@ class DumpTomlTest(unittest.TestCase):
         self.assertEqual(cfg.web_port, 9000)
 
 
-class PluginsStepTest(unittest.TestCase):
-    def test_the_wizard_has_a_plugins_step_before_advanced(self):
-        ids = [step["id"] for step in STEPS]
-        self.assertIn("plugins", ids)
-        self.assertLess(ids.index("plugins"), ids.index("advanced"))
-        self.assertLess(ids.index("instructions"), ids.index("plugins"))
-
-    def test_the_schema_payload_carries_the_proposed_set(self):
-        payload = schema_payload({})
-        names = [entry["name"] for entry in payload["proposed"]]
-        self.assertEqual(names, ["caveman", "ponytail"])
-        for entry in payload["proposed"]:
-            self.assertTrue(entry["reason"])
-
-    def test_dump_toml_writes_a_plugins_array_that_reads_back(self):
-        text = dump_toml({"repo": "/tmp/r", "plugins": ["caveman", "ponytail"]})
-        self.assertIn('plugins = ["caveman", "ponytail"]', text)
-        self.assertEqual(tomllib.loads(text)["plugins"], ["caveman", "ponytail"])
-
-    def test_dump_toml_omits_an_empty_selection(self):
-        # `plugins = []` would be a key that says nothing, and every other
-        # unset key is left out too.
-        text = dump_toml({"repo": "/tmp/r", "plugins": []})
-        self.assertNotIn("plugins", text)
-
-    def test_dump_toml_escapes_a_plugin_name_like_any_other_string(self):
-        text = dump_toml({"repo": "/tmp/r", "plugins": ['odd"name@m']})
-        self.assertEqual(tomllib.loads(text)["plugins"], ['odd"name@m'])
-
-
 class SetupServerBase(unittest.TestCase):
     """Fixture only -- no tests of its own.
 
@@ -927,11 +897,7 @@ class WizardPageTest(SetupServerBase):
         page = self.get("/")[1].decode()
         self.assertIn("answer.error", page)
 
-    def test_the_page_renders_a_list_field_as_checkboxes(self):
+    def test_the_page_has_no_plugin_screen_left(self):
         page = (Path(__file__).parent.parent / "claudeloop" / "static"
                 / "setup.html").read_text()
-        self.assertIn('field.type === "list"', page)
-        self.assertIn("schema.proposed", page)
-        # The escape hatch for a plugin outside the set. Without it the only
-        # way to use one is hand-editing the file the wizard exists to avoid.
-        self.assertIn("plugin@marketplace", page)
+        self.assertNotIn("plugin", page.lower())

@@ -9,7 +9,6 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import plugins as plugins_module
 
 HOME = Path.home() / ".claudeloop"
 DEFAULT_CONFIG = HOME / "config.toml"
@@ -151,16 +150,6 @@ def _coerce(field: Field, value: object) -> object:
             return float(value)
         except (TypeError, ValueError):
             raise ValueError(f"{field.key} must be a number, not {value!r}")
-    if field.type == "list":
-        if isinstance(value, str):
-            items: list = value.split(",")
-        elif isinstance(value, (list, tuple)):
-            items = list(value)
-        else:
-            raise ValueError(
-                f"{field.key} must be a list of names, not {value!r}"
-            )
-        return tuple(str(item).strip() for item in items if str(item).strip())
     return str(value)
 
 
@@ -306,27 +295,6 @@ def _strict_mcp_needs_config(value, values) -> str | None:
     return None
 
 
-def _known_plugins(value, values) -> str | None:
-    """A bare name must be one ClaudeLoop knows how to install.
-
-    Anything else has to say which marketplace it comes from, because
-    reconcile() has nowhere else to learn it -- and that marketplace must
-    already be configured on the box.
-    """
-    unknown = [
-        name for name in value
-        if "@" not in name and plugins_module.by_name(name) is None
-    ]
-    if not unknown:
-        return None
-    proposed = ", ".join(plugin.name for plugin in plugins_module.PROPOSED)
-    return (
-        f"plugins: {', '.join(unknown)} is not in the proposed set"
-        f" ({proposed}). Name a plugin outside it as plugin@marketplace,"
-        " with its marketplace already configured on this machine."
-    )
-
-
 def _file_source(values) -> bool:
     return values.get("source") == "file"
 
@@ -425,11 +393,6 @@ SCHEMA: tuple[Field, ...] = (
           help="Overrides the built-in definition of done. The target"
                " repository's own CLAUDE.md still wins over both. Defaults to"
                " ~/.claudeloop/definition-of-done.md."),
-    Field("plugins", "list", step="plugins", default=(),
-          check=_known_plugins, label="Plugins",
-          help="Claude Code plugins ClaudeLoop installs and enables for every"
-               " session, at user scope. Names from the proposed set, or"
-               " plugin@marketplace for one outside it."),
     Field("max_resumes", "int", default=20, label="Max resumes",
           help="How many plain nudges one task may take before it is given"
                " up on."),
@@ -578,7 +541,6 @@ class Config:
     settings_file: Path | None = None
     mcp_config: Path | None = None
     strict_mcp: bool = False
-    plugins: tuple[str, ...] = ()
     session_env: dict[str, str] = field(default_factory=dict)
     home: Path = HOME
     source: str = "file"
@@ -643,7 +605,6 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
         settings_file=values["settings_file"],
         mcp_config=values["mcp_config"],
         strict_mcp=values["strict_mcp"],
-        plugins=values["plugins"],
         session_env=values["session_env"],
         home=home,
         source=values["source"],
