@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from claudeloop import prompt
 from claudeloop.config import Config, JiraConfig
 from claudeloop.jira import task_text
 from claudeloop.prompt import (
@@ -472,6 +473,33 @@ class NoPluginLayerTest(unittest.TestCase):
     def test_precedence_names_only_the_layers_that_exist(self):
         self.assertNotIn("plugin", precedence(has_operator=True).lower())
         self.assertNotIn("operator", precedence(has_operator=False).lower())
+
+
+class OversizedTest(unittest.TestCase):
+    """The composed prompt travels as one --append-system-prompt argument,
+    and Linux caps a single argv element at 128 KiB. Past it, execve fails on
+    every task with an errno the CLI reports as something unrelated."""
+
+    def test_an_ordinary_prompt_is_fine(self):
+        self.assertIsNone(prompt.oversized("x" * 1000))
+
+    def test_a_prompt_at_the_limit_is_still_fine(self):
+        self.assertIsNone(prompt.oversized("x" * prompt.MAX_ARG_BYTES))
+
+    def test_a_prompt_past_the_limit_is_named_with_its_size(self):
+        message = prompt.oversized("x" * (prompt.MAX_ARG_BYTES + 1))
+
+        self.assertIsNotNone(message)
+        self.assertIn(str(prompt.MAX_ARG_BYTES + 1), message)
+        self.assertIn("--append-system-prompt", message)
+
+    def test_the_limit_is_measured_in_bytes_not_characters(self):
+        # execve counts bytes. A prompt of multi-byte characters that fits as
+        # a str would otherwise pass the check and still fail to start.
+        text = "é" * (prompt.MAX_ARG_BYTES // 2 + 1)
+
+        self.assertLess(len(text), prompt.MAX_ARG_BYTES)
+        self.assertIsNotNone(prompt.oversized(text))
 
 
 if __name__ == "__main__":

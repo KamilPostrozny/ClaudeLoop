@@ -1064,6 +1064,39 @@ class ResumeWithAnswerTest(unittest.TestCase):
             "SELECT session_id FROM runs ORDER BY id").fetchall()
         self.assertEqual([row["session_id"] for row in runs], [session, session])
 
+    def test_a_resume_adds_to_what_the_task_already_spent(self):
+        # run_task starts its cost accumulator at zero on every call and
+        # finish_task writes cost_usd=?, so the money spent before the
+        # question was asked used to be overwritten by the resume's own.
+        # Measured live: $0.0395 parking plus $0.0162 finishing, recorded as
+        # $0.0162, and reported that way on the dashboard and in the source's
+        # closing comment.
+        self.park()  # records 0.1
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        # 0.1 parking + 0.5 from the fake CLI's done result.
+        self.assertAlmostEqual(self.state.task(self.task.id)["cost_usd"], 0.6)
+
+    def test_the_source_is_told_the_whole_cost_too(self):
+        # The closing comment on a Jira ticket quotes it, so it has to be the
+        # same number the database keeps.
+        self.park()
+        costs = []
+        self.source.mark = lambda task, status, summary, cost=0.0: costs.append(cost)
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
+                                  resume_with="use EUR"))
+
+        self.assertEqual(len(costs), 1)
+        self.assertAlmostEqual(costs[0], 0.6)
+
+    def test_a_fresh_task_does_not_inherit_a_cost(self):
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertAlmostEqual(self.state.task(self.task.id)["cost_usd"], 0.5)
+
     def test_a_resume_sends_the_answer_prompt(self):
         self.park()
 
@@ -1151,7 +1184,9 @@ class ResumeWithAnswerTest(unittest.TestCase):
             with self.assertLogs("claudeloop", level="ERROR"):
                 asyncio.run(loop.main_loop(self.cfg, once=True))
 
-        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
+        reader = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        self.addCleanup(reader.close)
+        row = reader.db.execute(
             "SELECT * FROM tasks WHERE id=?", (self.task.id,)).fetchone()
         self.assertEqual(row["status"], "error")
         self.assertNotIn(self.task.id, State(self.cfg.home / "state.db", str(self.cfg.repo)).terminal_ids())
@@ -1464,6 +1499,80 @@ class FindAnsweredTest(unittest.TestCase):
         self.assertIsNone(loop.find_answered(self.cfg, self.state, self.source))
 
 
+class AnswerBackoffTest(FindAnsweredTest):
+    """JiraSource.answer is a network round trip per parked task per poll, and
+    a parked task never expires: at POLL_S that was ~2,900 Jira requests per
+    parked ticket per day, forever, for a question nobody may ever answer."""
+
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+        self.source.answer = lambda task: self.asked.append(task.id) or None
+        self.schedule = loop.AnswerSchedule()
+
+    def scan(self) -> None:
+        loop.find_answered(self.cfg, self.state, self.source, self.schedule)
+
+    def test_the_source_is_asked_on_the_first_scan(self):
+        self.scan()
+
+        self.assertEqual(len(self.asked), 1)
+
+    def test_a_second_scan_straight_away_does_not_ask_again(self):
+        self.scan()
+        self.scan()
+
+        self.assertEqual(len(self.asked), 1)
+
+    def test_the_gap_grows_and_stops_at_the_ceiling(self):
+        now = 1000.0
+        for _ in range(20):
+            self.schedule.missed(self.task.id, now)
+        gaps = []
+        for _ in range(3):
+            self.schedule.missed(self.task.id, now)
+            gaps.append(self.schedule._next[self.task.id] - now)
+
+        self.assertEqual(gaps, [loop.ANSWER_POLL_MAX_S] * 3)
+
+    def test_the_first_backoff_is_one_poll(self):
+        now = 1000.0
+        self.schedule.missed(self.task.id, now)
+
+        self.assertEqual(self.schedule._next[self.task.id] - now, loop.POLL_S)
+
+    def test_the_answer_file_is_read_on_every_scan_regardless(self):
+        # A human who has just typed an answer into the dashboard must not
+        # wait out a backoff meant for a network call.
+        self.scan()
+        self.answer_file("use EUR")
+
+        found = loop.find_answered(self.cfg, self.state, self.source, self.schedule)
+
+        self.assertEqual(found[1], "use EUR")
+        self.assertEqual(len(self.asked), 1, "no second network call was needed")
+
+    def test_a_source_that_raises_still_backs_off(self):
+        def boom(task):
+            raise RuntimeError("jira is down")
+        self.source.answer = boom
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.scan()
+
+        self.assertFalse(self.schedule.due(self.task.id, time.time()))
+
+    def test_an_unparked_task_starts_fresh_next_time(self):
+        self.scan()
+        self.state.finish_task(self.task.id, "done", "did it", 0.1)
+        self.scan()  # drops it from the schedule
+        self.state.finish_task(self.task.id, "blocked", "stuck again", 0.1, "?")
+
+        self.scan()
+
+        self.assertEqual(len(self.asked), 2, "a newly parked task is asked at once")
+
+
 class AnsweredMainLoopTest(unittest.TestCase):
     """The whole path, against the fake CLI."""
 
@@ -1529,7 +1638,9 @@ class AnsweredMainLoopTest(unittest.TestCase):
         asyncio.run(loop.main_loop(self.cfg, once=True))
 
         self.assertEqual(self.tasks.read_text(), "- [x] ambiguous thing\n")
-        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
+        reader = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        self.addCleanup(reader.close)
+        row = reader.db.execute(
             "SELECT status FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
         self.assertFalse((run_dir / "answer.json").exists(),
@@ -1553,7 +1664,9 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.assertTrue(
             any("could not reopen" in line for line in logs.output), logs.output
         )
-        row = State(self.cfg.home / "state.db", str(self.cfg.repo)).db.execute(
+        reader = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        self.addCleanup(reader.close)
+        row = reader.db.execute(
             "SELECT status FROM tasks").fetchone()
         self.assertEqual(row["status"], "done")
 

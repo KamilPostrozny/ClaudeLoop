@@ -49,6 +49,30 @@ def bind_address(host: str, port: int) -> tuple[str, int]:
     return (INGRESS_HOST, INGRESS_PORT) if ingress() else (host, port)
 
 
+def narrow(path: Path, mode: int) -> None:
+    """Take permissions away from a path, never grant them, and never raise.
+
+    Everything under ~/.claudeloop carries something the config's own secrets
+    guard already refuses to leave world-readable one step earlier: task text
+    and parked questions in state.db, a session's raw stdout in events.jsonl.
+    Applied unconditionally rather than only on creation, because
+    `mkdir(exist_ok=True)` leaves an existing directory's mode alone and the
+    common case is a home directory made at the default umask by a version
+    without this.
+
+    Never raises: a path this process does not own -- a home mounted from
+    elsewhere, the add-on's /data before it is chowned -- must not stop the
+    loop from starting over a mode it cannot set.
+    """
+    if os.name != "posix":
+        return
+    try:
+        if (path.stat().st_mode & 0o777) != mode:
+            path.chmod(mode)
+    except OSError:
+        pass
+
+
 def _secrets_file_guard(path: Path) -> None:
     """Refuse to load a config readable beyond its owner.
 

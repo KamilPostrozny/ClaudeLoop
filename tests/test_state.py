@@ -1,4 +1,6 @@
 import asyncio
+import gc
+import os
 import sqlite3
 import tempfile
 import time
@@ -315,6 +317,219 @@ class BlockedTest(unittest.TestCase):
             "SELECT status FROM tasks WHERE id='aaaa'").fetchone()["status"]
         self.assertEqual(status, "interrupted")
         self.assertEqual(reopened.blocked(), [])
+
+
+class TaskIdentityTest(unittest.TestCase):
+    """`id` alone used to be the primary key, so two repositories whose file
+    sources hold identical task text shared one row and start_task's INSERT OR
+    REPLACE silently overwrote the other's."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "state.db"
+
+    def test_two_repositories_keep_separate_rows_for_the_same_task_id(self):
+        one = State(self.path, "/repo/one")
+        two = State(self.path, "/repo/two")
+        one.start_task("abc", "file", "- [ ] do it", "do it")
+        one.finish_task("abc", "done", "one finished", 0.5)
+
+        two.start_task("abc", "file", "- [ ] do it", "do it")
+
+        self.assertEqual(one.task("abc")["status"], "done")
+        self.assertEqual(one.task("abc")["summary"], "one finished")
+        self.assertEqual(two.task("abc")["status"], "running")
+
+    def test_task_reads_only_this_repositorys_row(self):
+        one = State(self.path, "/repo/one")
+        one.start_task("abc", "file", "- [ ] do it", "do it")
+
+        self.assertIsNone(State(self.path, "/repo/two").task("abc"))
+
+    def test_last_session_ignores_another_repositorys_runs(self):
+        # What the caller does with a session id is --resume it, and that
+        # session's transcript belongs to the other repository's worktree.
+        one = State(self.path, "/repo/one")
+        one.start_task("abc", "file", "- [ ] do it", "do it")
+        one.start_run("abc", "session-one", 0)
+
+        two = State(self.path, "/repo/two")
+        two.start_task("abc", "file", "- [ ] do it", "do it")
+
+        self.assertIsNone(two.last_session("abc"))
+        self.assertEqual(one.last_session("abc"), "session-one")
+
+    def test_a_database_with_the_old_single_column_key_is_rebuilt(self):
+        conn = sqlite3.connect(self.path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id          TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                source_ref  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                started_at  REAL,
+                finished_at REAL,
+                summary     TEXT,
+                cost_usd    REAL,
+                question    TEXT,
+                repo        TEXT
+            );
+            CREATE TABLE runs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id      TEXT NOT NULL REFERENCES tasks(id),
+                session_id   TEXT NOT NULL,
+                started_at   REAL NOT NULL,
+                ended_at     REAL,
+                exit_reason  TEXT,
+                resume_count INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO tasks (id, source, source_ref, text, status, created_at,
+                               cost_usd, repo)
+            VALUES ('abc', 'file', '- [ ] x', 'x', 'blocked', 1.0, 0.25, '/repo/one');
+            INSERT INTO runs (task_id, session_id, started_at)
+            VALUES ('abc', 'session-one', 1.0);
+            """
+        )
+        conn.close()
+
+        state = State(self.path, "/repo/one")
+
+        keyed = [
+            row[1] for row in state.db.execute("PRAGMA table_info(tasks)") if row[5]
+        ]
+        self.assertEqual(sorted(keyed), ["id", "repo"])
+        # The row and everything hanging off it survives the rebuild.
+        row = state.task("abc")
+        self.assertEqual(row["status"], "blocked")
+        self.assertAlmostEqual(row["cost_usd"], 0.25)
+        # runs gained `repo`, backfilled from the task it belongs to -- without
+        # that a task parked across the upgrade loses the session it resumes.
+        self.assertEqual(state.last_session("abc"), "session-one")
+
+    def test_a_pre_repo_column_row_still_belongs_to_no_repository(self):
+        conn = sqlite3.connect(self.path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id          TEXT PRIMARY KEY,
+                source      TEXT NOT NULL,
+                source_ref  TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                started_at  REAL,
+                finished_at REAL,
+                summary     TEXT,
+                cost_usd    REAL,
+                question    TEXT
+            );
+            INSERT INTO tasks (id, source, source_ref, text, status, created_at)
+            VALUES ('old', 'file', '- [ ] old', 'old', 'done', 1.0);
+            """
+        )
+        conn.close()
+
+        state = State(self.path, "/repo")
+
+        self.assertEqual(state.terminal_ids(), set())
+
+
+class PriorCostTest(unittest.TestCase):
+    """A task that parks and is later answered spans two run_task calls, and
+    the second one used to overwrite the first one's cost with its own."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = State(self.tmp / "state.db", "/repo")
+
+    def test_prior_cost_is_what_the_task_has_already_spent(self):
+        self.state.start_task("abc", "file", "- [ ] x", "x")
+        self.state.finish_task("abc", "blocked", "stuck", 0.0395, "which currency?")
+
+        self.assertAlmostEqual(self.state.prior_cost("abc"), 0.0395)
+
+    def test_prior_cost_is_zero_for_a_task_that_never_ran(self):
+        self.assertEqual(self.state.prior_cost("abc"), 0.0)
+
+    def test_prior_cost_is_zero_when_no_cost_was_recorded(self):
+        self.state.start_task("abc", "file", "- [ ] x", "x")
+
+        self.assertEqual(self.state.prior_cost("abc"), 0.0)
+
+    def test_prior_cost_ignores_another_repositorys_row(self):
+        other = State(self.tmp / "state.db", "/repo/other")
+        other.start_task("abc", "file", "- [ ] x", "x")
+        other.finish_task("abc", "blocked", "stuck", 9.99, "?")
+
+        self.assertEqual(self.state.prior_cost("abc"), 0.0)
+
+
+class PermissionsTest(unittest.TestCase):
+    """state.db carries task text, session summaries and the questions a
+    session parked on. config.toml's own secrets guard refuses a world-readable
+    file one step earlier; this is the same reasoning applied to the database
+    and the directory holding it."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def mode(self, path: Path) -> int:
+        return path.stat().st_mode & 0o777
+
+    @unittest.skipUnless(os.name == "posix", "posix modes")
+    def test_the_database_is_owner_only(self):
+        state = State(self.tmp / "home" / "state.db", "/repo")
+
+        self.assertEqual(self.mode(self.tmp / "home" / "state.db"), 0o600)
+
+    @unittest.skipUnless(os.name == "posix", "posix modes")
+    def test_the_home_directory_is_owner_only(self):
+        State(self.tmp / "home" / "state.db", "/repo")
+
+        self.assertEqual(self.mode(self.tmp / "home"), 0o700)
+
+    @unittest.skipUnless(os.name == "posix", "posix modes")
+    def test_an_existing_world_readable_home_is_narrowed(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        home.chmod(0o755)
+
+        State(home / "state.db", "/repo")
+
+        self.assertEqual(self.mode(home), 0o700)
+
+
+class CloseTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_close_releases_the_connection(self):
+        state = State(self.tmp / "state.db", "/repo")
+        state.close()
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            state.db.execute("SELECT 1")
+
+    def test_close_is_idempotent(self):
+        state = State(self.tmp / "state.db", "/repo")
+        state.close()
+        state.close()  # a second close must not raise
+
+    def test_a_dropped_state_closes_its_own_connection(self):
+        # The suite used to emit ~80 ResourceWarnings about unclosed sqlite
+        # connections, one per State that nobody closed. Every one of those
+        # call sites is a test, so the fix belongs on State rather than on
+        # eighty edits.
+        state = State(self.tmp / "state.db", "/repo")
+        connection = state.db
+        del state
+        gc.collect()
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
 
 if __name__ == "__main__":

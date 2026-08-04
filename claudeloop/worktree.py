@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 log = logging.getLogger("claudeloop")
@@ -237,6 +238,44 @@ def _branch_exists(repo: Path, branch: str) -> bool:
     return result is not None and result.returncode == 0
 
 
+def _move_aside(path: Path) -> None:
+    """Get an unregistered leftover out of the way, without destroying it.
+
+    A non-empty directory at `path` with no `.git` in it is not a worktree git
+    will reuse and not one it will overwrite: `worktree add` fails with
+    "already exists" every time, and so does the branch retry. Since 'error'
+    is deliberately non-terminal, the task was then re-offered every POLL_S
+    forever and no later task ever ran -- a permanent head-of-line block that
+    only a human deleting the directory could clear.
+
+    Renamed rather than removed. ClaudeLoop killed mid-`add` is the likeliest
+    cause, and whatever a session had written by then is the operator's, not
+    ours to delete unattended. An empty directory is left alone: `worktree
+    add` accepts one, so there is nothing in the way and nothing to explain.
+    """
+    if not path.is_dir() or not any(path.iterdir()):
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = path.with_name(f"{path.name}.broken-{stamp}")
+    suffix = 1
+    while aside.exists():  # two in the same second, or a repeat of the fault
+        aside = path.with_name(f"{path.name}.broken-{stamp}-{suffix}")
+        suffix += 1
+    try:
+        path.rename(aside)
+    except OSError as error:
+        # Left for `add` to fail on, with its own message. Nothing here is
+        # worth raising a different exception over.
+        log.warning("could not move %s aside (%s)", path, error)
+        return
+    log.warning(
+        "%s was there but is not a registered worktree -- moved it to %s and"
+        " starting a fresh one. Anything the previous attempt had written is"
+        " in that directory; nothing deletes it.",
+        path, aside,
+    )
+
+
 def ensure(repo: Path, root: Path, task_id: str) -> Path:
     """The task's worktree, created or reused. Raises RuntimeError if git
     cannot produce one -- the caller fails that task and moves on.
@@ -253,6 +292,9 @@ def ensure(repo: Path, root: Path, task_id: str) -> Path:
     if (path / ".git").exists():  # a worktree's .git is a file, not a directory
         return path
     root.mkdir(parents=True, exist_ok=True)
+    # Past the reuse check with a directory still sitting there: it is a
+    # leftover git will neither reuse nor overwrite. See _move_aside.
+    _move_aside(path)
     base = default_branch(repo)
     if base is None:
         raise RuntimeError(f"no default branch to cut {branch} from in {repo}")

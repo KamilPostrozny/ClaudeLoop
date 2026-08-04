@@ -844,18 +844,33 @@ const MARKS = { done: "✓", failed: "×", error: "×", blocked: "?", interrupte
 const REASON_CLASS = { RateLimited: "limited", Fail: "failed", Crash: "failed" };
 let completedKey = "";
 
+// Answer drafts, kept by task id across the rebuilds below. The key above is
+// every task's id and status, so any *other* task finishing rebuilds this
+// list -- and a rebuild used to throw away whatever was half-typed into an
+// open answer box. On an unattended loop that is not rare: the point of the
+// dashboard is that something else is running while you read it.
+const drafts = new Map();
+
 function renderCompleted(items) {
   $("completed-count").textContent = items.length;
   const key = items.map((t) => t.id + ":" + t.status).join(",");
   if (key === completedKey) return;
   completedKey = key;
   const host = $("completed");
+  // Collected before replaceChildren, which destroys the textareas.
+  for (const box of host.querySelectorAll("textarea[data-task]")) {
+    if (box.value.trim()) drafts.set(box.dataset.task, box.value);
+    else drafts.delete(box.dataset.task);
+  }
   host.replaceChildren();
   if (!items.length) {
     host.appendChild(el("p", "empty-row", "Nothing finished yet."));
     return;
   }
   for (const task of items) host.appendChild(completedRow(task));
+  // Drafts for tasks that are no longer listed have nowhere to go back to.
+  const live = new Set(items.map((t) => t.id));
+  for (const id of [...drafts.keys()]) if (!live.has(id)) drafts.delete(id);
 }
 
 function answerBox(task) {
@@ -863,6 +878,10 @@ function answerBox(task) {
   const input = el("textarea");
   input.rows = 3;
   input.placeholder = "Answer this, and the task picks up where it stopped…";
+  // Both halves of draft survival: the marker renderCompleted collects on,
+  // and whatever it collected last time.
+  input.dataset.task = task.id;
+  if (drafts.has(task.id)) input.value = drafts.get(task.id);
   // A placeholder is not an accessible name, and it vanishes on the first
   // keystroke. Same reason the theme button carries one.
   input.setAttribute("aria-label", "Your answer to this task's question");
@@ -908,6 +927,10 @@ function answerBox(task) {
       }
       note.textContent = "Answer recorded. The task resumes when the loop is free.";
       input.disabled = true;
+      // Sent, so it is no longer a draft: the next rebuild must not put this
+      // text back into a box for a task that has already been answered.
+      drafts.delete(task.id);
+      delete input.dataset.task;
     } catch (e) {
       note.textContent = "Could not send that: " + e.message;
       button.disabled = false;

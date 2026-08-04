@@ -559,6 +559,48 @@ class SaveOverExistingModeTest(SetupServerBase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
 
+class WriteConfigOrderingTest(unittest.TestCase):
+    """The narrowing has to happen before the first byte, not after the last.
+
+    The test above only reads the mode once the write has finished, where a
+    plain `path.chmod(0o600)` at the end would pass just as well -- and that
+    version leaves a Jira API token on disk world-readable for the length of
+    the write, which is the whole thing os.fchmod-on-the-open-fd exists to
+    prevent. Catching it needs the mode observed mid-write, which is the one
+    place this suite's real-files-not-mocks convention cannot reach; the mock
+    is confined to observing, and changes nothing.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "config.toml"
+
+    def modes_during_write(self) -> list[int]:
+        seen: list[int] = []
+        real = os.fdopen
+
+        def watching(fd, *args, **kwargs):
+            # os.open has returned and fchmod has had its chance; nothing has
+            # been written through the handle yet.
+            seen.append(os.fstat(fd).st_mode & 0o777)
+            return real(fd, *args, **kwargs)
+
+        with unittest.mock.patch("os.fdopen", watching):
+            setup.write_config(self.path, {"repo": str(self.tmp), "model": "haiku"})
+        return seen
+
+    def test_a_new_file_is_already_0600_before_anything_is_written(self):
+        self.assertEqual(self.modes_during_write(), [0o600])
+
+    def test_an_existing_0644_file_is_narrowed_before_anything_is_written(self):
+        # O_CREAT's mode applies only to a file the call creates, so this is
+        # the case a chmod-afterwards would leave exposed.
+        self.path.write_text("repo = \"/old\"\n")
+        self.path.chmod(0o644)
+
+        self.assertEqual(self.modes_during_write(), [0o600])
+
+
 class JiraRetentionTest(SetupServerBase):
     def existing_config(self) -> str:
         return (

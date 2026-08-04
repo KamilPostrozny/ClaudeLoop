@@ -117,14 +117,59 @@ class StateRouteTest(WebTestBase):
         payload = self.get_json("/api/state")
         self.assertTrue(payload["status"]["stale"])
 
-    def test_pending_comes_from_the_status_snapshot(self):
-        # Not the task file: under the Jira source cfg.tasks_file is None, so
-        # web must never re-read a task source itself. The loop publishes the
-        # list it already computed onto the snapshot each poll.
-        status.set_status(pending=(("aaa", "first thing"), ("bbb", "second thing")))
+    def test_pending_is_re_read_from_the_task_file(self):
+        # The snapshot is only published when a task starts, so an edit made
+        # while one runs did not show until the next one began. A markdown
+        # checklist is a local read, so the freshness this had before S3 is
+        # worth having back.
+        status.set_status(pending=(("aaa", "stale entry"),))
+        self.tasks.write_text("- [ ] first thing\n- [ ] added just now\n")
+
         payload = self.get_json("/api/state")
+
         self.assertEqual(
-            [t["text"] for t in payload["pending"]], ["first thing", "second thing"]
+            [t["text"] for t in payload["pending"]], ["first thing", "added just now"]
+        )
+
+    def test_a_task_marked_since_the_snapshot_disappears_from_pending(self):
+        status.set_status(pending=(("aaa", "first thing"), ("bbb", "second thing")))
+        self.tasks.write_text("- [x] first thing\n- [ ] second thing\n")
+
+        payload = self.get_json("/api/state")
+
+        self.assertEqual([t["text"] for t in payload["pending"]], ["second thing"])
+
+
+class JiraPendingTest(WebTestBase):
+    """Under the Jira source the snapshot stays the only source: re-reading
+    here would be an HTTP round trip on the web thread, on every poll of every
+    open dashboard."""
+
+    def setUp(self):
+        super().setUp()
+        self.server.shutdown()
+        self.server.server_close()
+        self.cfg = Config(
+            repo=self.tmp / "repo",
+            tasks_file=None,
+            source="jira",
+            home=self.tmp / "home",
+            web_host=self.web_host,
+            web_port=0,
+        )
+        self.server = web.serve(self.cfg)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def test_pending_comes_from_the_status_snapshot(self):
+        status.set_status(pending=(("aaa", "OPS-1: a thing"), ("bbb", "OPS-2: another")))
+
+        payload = self.get_json("/api/state")
+
+        self.assertEqual(
+            [t["text"] for t in payload["pending"]],
+            ["OPS-1: a thing", "OPS-2: another"],
         )
 
     def test_the_running_task_is_not_listed_as_pending(self):
@@ -244,6 +289,23 @@ class TaskRouteTest(WebTestBase):
         self.assertEqual(payload["task"]["status"], "done")
         self.assertEqual(len(payload["runs"]), 1)
         self.assertEqual([e["kind"] for e in payload["log"]], ["text", "done"])
+
+    def test_another_repositorys_task_of_the_same_id_is_404(self):
+        # `id` is a hash of the task text, so two repositories whose file
+        # sources hold identical text share one. This dashboard watches one
+        # repository and must not open another's row -- or list its runs,
+        # which name session ids belonging to a different worktree.
+        other = State(self.cfg.home / "state.db", "/somewhere/else")
+        self.addCleanup(other.close)
+        other.start_task("0123456789abcdef", "file", "- [ ] x", "x")
+        other.start_run("0123456789abcdef", "not-our-session", 0)
+        other.finish_task("0123456789abcdef", "done", "theirs", 0.25)
+
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/api/tasks/0123456789abcdef")
+
+        self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
     def test_unknown_task_is_404(self):
         self.seed()

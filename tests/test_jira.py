@@ -7,6 +7,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from claudeloop import jira
 from claudeloop.jira import (
     BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
     JiraSource, closing_comment, compose_jql, main, match_transitions,
@@ -16,6 +17,20 @@ from claudeloop.source import Task, task_id
 from claudeloop.state import State
 
 from .jira_fake import FakeJira, fixture
+
+
+def last_page() -> dict:
+    """The captured search fixture as a final page.
+
+    The capture is a real response to a real query with more results behind
+    it, so it carries a nextPageToken and isLast: false -- which is what
+    pins the pagination shape. A test that only wants "one page of two
+    issues" has to say so, or pending() rightly keeps asking for more.
+    """
+    page = dict(fixture("search"))
+    page.pop("nextPageToken", None)
+    page["isLast"] = True
+    return page
 
 
 class JiraClientTest(unittest.TestCase):
@@ -309,7 +324,7 @@ class JiraSourceTest(unittest.TestCase):
         return JiraSource(client, kwargs.pop("jql", "project = OPS"), **kwargs)
 
     def test_pending_builds_one_task_per_issue(self):
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())})
         tasks = source.pending()
         self.assertEqual(len(tasks), 2)
         first = tasks[0]
@@ -320,18 +335,18 @@ class JiraSourceTest(unittest.TestCase):
         self.assertTrue(first.text.startswith("OPS-1: "), first.text)
 
     def test_pending_survives_the_null_description_in_the_fixture(self):
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())})
         self.assertTrue(all(task.text for task in source.pending()))
 
     def test_pending_sends_the_composed_jql(self):
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))})
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())})
         source.pending()
         _, _, payload = self.fake.requests[0]
         self.assertIn("labels IS EMPTY", payload["jql"])
         self.assertIn("project = OPS", payload["jql"])
 
     def test_pending_drops_tasks_already_terminal_in_the_database(self):
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
                              state=FakeState({task_id("OPS-1")}))
         self.assertEqual([t.source_ref for t in source.pending()], ["OPS-2"])
 
@@ -347,7 +362,7 @@ class JiraSourceTest(unittest.TestCase):
         state = State(tmp / "state.db")
         state.start_task(task_id("OPS-1"), "jira", "OPS-1", "text")
         state.finish_task(task_id("OPS-1"), "done", "summary", 0.0)
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
                              state=state)
         tasks = asyncio.run(asyncio.to_thread(source.pending))
         self.assertEqual([t.source_ref for t in tasks], ["OPS-2"])
@@ -358,7 +373,7 @@ class JiraSourceTest(unittest.TestCase):
         # Jira's search index has not caught up yet -- not primarily because
         # the label write failed. An operator reading this at 3am should be
         # pointed at index lag first.
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
                              state=FakeState({task_id("OPS-1")}))
         with self.assertLogs("claudeloop", level="WARNING") as logs:
             source.pending()
@@ -368,6 +383,66 @@ class JiraSourceTest(unittest.TestCase):
         source = self.source({f"POST {SEARCH_PATH}": (401, {"errorMessages": ["nope"]})})
         with self.assertLogs("claudeloop", level="WARNING"):
             self.assertEqual(source.pending(), [])
+
+    def issue(self, key: str) -> dict:
+        return {"key": key, "fields": {"summary": f"do {key}", "description": ""}}
+
+    def test_pending_follows_the_next_page_token(self):
+        # One page of 50 was all pending() ever read, so an ordering that put
+        # wanted work past the 50th row never reached the loop at all.
+        source = self.source({f"POST {SEARCH_PATH}": [
+            (200, {"issues": [self.issue("OPS-1")], "nextPageToken": "page-2"}),
+            (200, {"issues": [self.issue("OPS-2")], "isLast": True}),
+        ]})
+
+        self.assertEqual([t.source_ref for t in source.pending()], ["OPS-1", "OPS-2"])
+
+    def test_the_page_token_is_sent_back_on_the_next_request(self):
+        source = self.source({f"POST {SEARCH_PATH}": [
+            (200, {"issues": [self.issue("OPS-1")], "nextPageToken": "page-2"}),
+            (200, {"issues": [self.issue("OPS-2")]}),
+        ]})
+
+        source.pending()
+
+        payloads = [payload for _, _, payload in self.fake.requests]
+        self.assertNotIn("nextPageToken", payloads[0])
+        self.assertEqual(payloads[1]["nextPageToken"], "page-2")
+
+    def test_a_response_without_a_token_is_the_last_page(self):
+        # An instance that does not paginate this way answers exactly as it
+        # always did, in one request.
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())})
+
+        source.pending()
+
+        self.assertEqual(len(self.fake.requests), 1)
+
+    def test_pagination_is_bounded(self):
+        # A token that never stops coming -- a bug at either end -- must not
+        # loop forever on a box nobody is watching.
+        source = self.source({f"POST {SEARCH_PATH}":
+                              (200, {"issues": [self.issue("OPS-1")],
+                                     "nextPageToken": "always-more"})})
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.pending()
+
+        self.assertEqual(len(self.fake.requests), jira.MAX_PAGES)
+        self.assertIn("more pages", "".join(logs.output))
+
+    def test_a_page_that_fails_keeps_the_pages_already_read(self):
+        # Partial work beats none: the loop can start on what did arrive, and
+        # the rest is offered on the next poll.
+        source = self.source({f"POST {SEARCH_PATH}": [
+            (200, {"issues": [self.issue("OPS-1")], "nextPageToken": "page-2"}),
+            (500, {"errorMessages": ["boom"]}),
+            (500, {"errorMessages": ["boom"]}),
+            (500, {"errorMessages": ["boom"]}),
+        ]})
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual([t.source_ref for t in source.pending()], ["OPS-1"])
 
     def test_pending_returns_empty_when_jira_is_unreachable(self):
         fake = FakeJira({})
@@ -491,7 +566,7 @@ class JiraSourceTest(unittest.TestCase):
         class BrokenState:
             def terminal_ids(self):
                 raise sqlite3.OperationalError("database is locked")
-        source = self.source({f"POST {SEARCH_PATH}": (200, fixture("search"))},
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
                              state=BrokenState())
         with self.assertLogs("claudeloop", level="WARNING"):
             self.assertEqual(len(source.pending()), 2)
@@ -850,13 +925,49 @@ class JiraAnswerTest(unittest.TestCase):
     task = Task("abc", "OPS-1: thing", "jira", "OPS-1")
 
     def source_for(self, *bodies: str) -> JiraSource:
-        fake = FakeJira({
+        self.fake = FakeJira({
             "GET /issue/OPS-1/comment": (200, {
                 "comments": [{"body": body} for body in bodies]
             }),
         })
-        self.addCleanup(fake.close)
-        return JiraSource(JiraClient(fake.url, "e@x", "t"), "project = OPS")
+        self.addCleanup(self.fake.close)
+        return JiraSource(JiraClient(self.fake.url, "e@x", "t"), "project = OPS")
+
+    def test_the_comment_read_is_bounded_to_the_newest_page(self):
+        # This runs once per parked task per poll, indefinitely -- a parked
+        # task never expires. Reading every comment on a long-lived ticket
+        # every 30s is the payload half of that; the ordering below is what
+        # keeps the newest ones in the page that is read.
+        source = self.source_for("chatter")
+
+        source.answer(self.task)
+
+        path = self.fake.raw_paths[0]
+        self.assertIn(f"maxResults={jira.ANSWER_COMMENTS}", path)
+        self.assertIn("orderBy=-created", path)
+
+    def test_a_newest_first_page_is_read_in_the_order_it_was_written(self):
+        # orderBy=-created reverses the list, and the whole boundary rule --
+        # our newest question, then the first marked comment after it --
+        # depends on chronological order.
+        from claudeloop.jira import QUESTION_HEADING
+
+        # Stored order, oldest first -- the fake reverses it on the way out,
+        # exactly as orderBy=-created makes Jira do.
+        self.fake = FakeJira({
+            "GET /issue/OPS-1/comment": (200, {
+                "comments": [
+                    {"id": "1001", "body": f"{QUESTION_HEADING}\n\nwhich currency?"},
+                    {"id": "1002", "body": "claudeloop: use EUR"},
+                    {"id": "1003", "body": f"{QUESTION_HEADING}\n\nwhich rounding?"},
+                    {"id": "1004", "body": "claudeloop: round half up"},
+                ]
+            }),
+        })
+        self.addCleanup(self.fake.close)
+        source = JiraSource(JiraClient(self.fake.url, "e@x", "t"), "project = OPS")
+
+        self.assertEqual(source.answer(self.task), "round half up")
 
     def test_a_marked_comment_after_the_question_is_the_answer(self):
         from claudeloop.jira import QUESTION_HEADING

@@ -477,15 +477,28 @@ yet.
 ## Where things go
 
 ```
-~/.claudeloop/
+~/.claudeloop/                  # 0700; state.db is 0600
   config.toml
   state.db                      # what happened: status, summary, cost, timings
   runs/<task-id>/
     events.jsonl                # the raw stream-json stream, appended per attempt
+    events.jsonl.1              # the previous generation, once the live one hits 64 MiB
     result.json                 # the session's own verdict
     stderr.log
   worktrees/<task-id>/          # the task's checkout -- see Branches and worktrees
+    ...broken-<timestamp>/      # only if a leftover had to be moved aside; see below
 ```
+
+Event logs rotate at 64 MiB keeping one previous generation, so a run
+directory is bounded at roughly 128 MiB per stream however long the task ran.
+Nothing deletes `events.jsonl.1`.
+
+If ClaudeLoop finds a directory at `worktrees/<task-id>` that is not a
+registered git worktree — it was killed part-way through creating one, or the
+box rebooted — it moves that directory to `<task-id>.broken-<timestamp>` and
+starts a fresh worktree, reattaching to the task's existing branch if there is
+one. Nothing deletes the moved directory: whatever the interrupted attempt had
+written is still in it.
 
 ## Warning
 
