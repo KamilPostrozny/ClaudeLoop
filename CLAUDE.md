@@ -282,6 +282,14 @@ For a whole slice, done additionally means the live smoke test has been run and
 its findings fixed.
 
 Do not push or open pull requests without being asked. `origin` is
-`github.com:KamilPostrozny/ClaudeLoop`, and pushing `main` is what publishes
-the S4 addon image, since `.github/workflows/addon.yml` builds it — so a push
-is never just a backup.
+`github.com:KamilPostrozny/ClaudeLoop`.
+
+**Publishing the S4 addon image is a tag, not a branch push.**
+`.github/workflows/addon.yml` triggers on `addon-v*` tags and on
+`workflow_dispatch`, and on nothing else — this file used to say pushing
+`main` did it, which was wrong. Releasing means: bump `version:` in
+`addon/config.yaml`, commit, push `main`, then push a matching
+`addon-v<version>` tag. `config.yaml`'s version is the single source of
+truth — the workflow reads it out of the file rather than off the tag, and
+the supervisor pulls `image:version`, so a tag naming a version the file
+does not carry publishes an image nobody can install.
