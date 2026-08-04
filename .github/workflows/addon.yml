@@ -3,19 +3,111 @@
 # Not home-assistant/builder: that action, like the supervisor itself, builds
 # the add-on folder as the docker context, and ClaudeLoop's source is the
 # repository root. This does the same job with the context one level up.
+#
+# Releasing is one act: bump `version:` in addon/config.yaml and push main.
+# Every push to main runs the gate below, which publishes only when that
+# version is not already in the registry -- so a push that changes code or
+# docs without bumping the version is a no-op, and a push that bumps it is a
+# release. The `addon-v*` tag trigger still works and is kept for re-running a
+# publish by hand; it is no longer how a release is made.
 name: add-on image
 
 on:
   push:
+    branches: [main]
     tags: ["addon-v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: The addon/config.yaml version to publish, e.g. 0.1.0
-        required: true
+      force:
+        description: >-
+          Publish even if this version is already in the registry. Overwrites
+          the image the supervisor pulls for it -- see the gate.
+        type: boolean
+        default: false
 
 jobs:
+  gate:
+    # Whether addon/config.yaml names a version that has not been published.
+    #
+    # This is the whole safety of triggering on main. The supervisor pulls
+    # `image:version`, so republishing an existing version silently changes
+    # what an operator already has installed, under a version string that
+    # says nothing changed -- and `latest` would move under them too. The
+    # registry is asked rather than the git history because the registry is
+    # what the supervisor actually reads.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.addon.outputs.version }}
+      owner: ${{ steps.addon.outputs.owner }}
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the add-on version and image owner
+        id: addon
+        # config.yaml's version is the single source of truth: the supervisor
+        # pulls image:version, so a tag that disagrees with it installs
+        # nothing. The owner is lowercased because a docker repository name
+        # must be -- "KamilPostrozny" fails the build outright.
+        run: |
+          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' addon/config.yaml)
+          if [ -z "${version}" ]; then
+            echo "::error::no version found in addon/config.yaml"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Has this version already been published?
+        id: check
+        # `docker manifest inspect` rather than a curl against the registry
+        # API: existence there depends on sending the right Accept types, and
+        # asking for only the docker v2 media type answers 404 for an image
+        # that is plainly there. Getting that wrong in either direction is
+        # bad -- a false 404 overwrites a published version, a false 200
+        # silently drops a release on the floor.
+        #
+        # Both architectures are checked, and either one missing publishes:
+        # a previous run that built amd64 and failed on aarch64 must be able
+        # to finish rather than being treated as done.
+        env:
+          OWNER: ${{ steps.addon.outputs.owner }}
+          VERSION: ${{ steps.addon.outputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "${FORCE}" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "forced: publishing ${VERSION} over whatever is there"
+            exit 0
+          fi
+          publish=false
+          for arch in amd64 aarch64; do
+            image="ghcr.io/${OWNER}/claudeloop-${arch}:${VERSION}"
+            if docker manifest inspect "${image}" > /dev/null 2>&1; then
+              echo "${image} is already published"
+            else
+              echo "${image} is missing"
+              publish=true
+            fi
+          done
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          if [ "${publish}" = "false" ]; then
+            echo "::notice::${VERSION} is already published; nothing to do."\
+              " Bump version: in addon/config.yaml to release."
+          fi
+
   build:
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -29,17 +121,6 @@ jobs:
             platform: linux/arm64
     steps:
       - uses: actions/checkout@v4
-
-      - name: Read the add-on version and image owner
-        id: addon
-        # config.yaml's version is the single source of truth: the supervisor
-        # pulls image:version, so a tag that disagrees with it installs
-        # nothing. The owner is lowercased because a docker repository name
-        # must be -- "KamilPostrozny" fails the build outright.
-        run: |
-          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' addon/config.yaml)
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -59,5 +140,5 @@ jobs:
           build-args: |
             BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base-debian:bookworm
           tags: |
-            ghcr.io/${{ steps.addon.outputs.owner }}/claudeloop-${{ matrix.arch }}:${{ steps.addon.outputs.version }}
-            ghcr.io/${{ steps.addon.outputs.owner }}/claudeloop-${{ matrix.arch }}:latest
+            ghcr.io/${{ needs.gate.outputs.owner }}/claudeloop-${{ matrix.arch }}:${{ needs.gate.outputs.version }}
+            ghcr.io/${{ needs.gate.outputs.owner }}/claudeloop-${{ matrix.arch }}:latest

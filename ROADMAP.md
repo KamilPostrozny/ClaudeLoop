@@ -1033,13 +1033,19 @@ No slice is scheduled. Three things are outstanding:
    with `isLast` and no token — the shape the pagination reads — and that Jira
    still refuses an unbounded JQL outright.
 
-2. **`main` is ahead of `origin/main`.** The remote sits at `73ca68e`
-   (`chore: addon 0.1.3`); S10, S11 and S12 are local only. Pushing is a
-   deliberate act nobody has asked for yet — and note that publishing the S4
-   add-on image is a tag, not a branch push, so a `main` push alone changes
-   nothing an operator installs. S12 fixes a defect an operator is hitting on
-   the running add-on, so this is the first time a release has a reason
-   behind it rather than merely being possible.
+2. **Releasing is now a version bump on `main`.** `.github/workflows/addon.yml`
+   triggers on every push to `main` and gates on the registry: it publishes
+   only when `addon/config.yaml`'s `version:` is not already there. A push
+   without a bump is a no-op; a push with one is a release. That gate is what
+   makes triggering on a branch safe at all — the supervisor pulls
+   `image:version`, so republishing a version would change an installed
+   add-on under a string that says nothing changed, and move `latest` under
+   it too. `addon-v*` tags still publish, as a manual re-run path, but are no
+   longer how a release is made.
+
+   `0.2.1` is the first release made this way, and the first to carry S10,
+   S11 and S12 — the remote had been sitting at `73ca68e`
+   (`chore: addon 0.1.3`) with `0.2.0` published from a tag.
 
 3. **Running a Jira smoke test needs the credentials handed over each time.**
    The add-on's `config.toml` lives in its `/data` volume, which the SSH

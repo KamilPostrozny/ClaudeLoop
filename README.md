@@ -470,9 +470,11 @@ Three things differ from running it on a workstation:
   is the repository root. `.github/workflows/addon.yml` builds it from the root;
   by hand it is `docker build -f addon/Dockerfile .`.
 
-The add-on cannot be installed until this repository is pushed and the
-workflow has published the image once: `image:` names a tag that does not exist
-yet.
+A new version is released by bumping `version:` in `addon/config.yaml` and
+pushing `main` — nothing else. The workflow runs on every push to `main` but
+publishes only when that version is not already in the registry, so a push
+that changes code without bumping it ships nothing, and the supervisor offers
+an update exactly when the version moves.
 
 ## Where things go
 
