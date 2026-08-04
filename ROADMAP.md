@@ -24,6 +24,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S9** | Resume an interrupted task | merged |
 | **S9.1** | Locale-proof Jira transitions | merged, live check outstanding |
 | **S10** | The repository's instructions come first | merged |
+| **S11** | Backlog defects | merged, Jira live check outstanding |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -738,6 +739,12 @@ the wizard's help text for both keys says the same.
 the offered payload — the precise kind of assumption this file's smoke-test
 rule exists for. Run one before trusting `done` in anger.
 
+**S11 tried and could not.** The configured instance has no projects left at
+all: `/project/search` comes back empty and `project = "KAN"` matches nothing,
+so the very tickets this finding came from are gone. It needs a Jira with a
+real board again — the same run would then also cover S11's pagination and
+bounded comment read, which are in the same position for the same reason.
+
 ---
 
 ### S10 — The repository's instructions come first
@@ -800,11 +807,109 @@ task two's commit landed on top of task one's on the remote, which is the
 fetch working. Nothing new was found, which is the first time a prompt slice
 here has run clean.
 
+### S11 — Backlog defects
+
+No slice was outstanding, so this one took the open-issues list below: the
+entries that are **genuine defects** — a wrong number, an unbounded growth, a
+permanent block, a leak — leaving the ones that are deliberate decisions with
+recorded reasons, since reversing one of those needs its own spec.
+
+Thirteen fixed, and the two most valuable were the two the fixtures could not
+have shown:
+
+- **A parked task reported only the cost of its resume.** `run_task` starts
+  its accumulator at zero on every call and `finish_task` writes `cost_usd=?`
+  rather than adding, so the money spent before the question was overwritten
+  by the money spent after it. `State.prior_cost` seeds the accumulator, read
+  *before* `start_task` — which is `INSERT OR REPLACE` and puts the column
+  back to NULL, the same ordering `was_interrupted` needs. Confirmed live:
+  parked at $0.0316, resume cost $0.0183, recorded $0.0499.
+- **`tasks.id` was the primary key on its own**, and `id` is a hash of the
+  task text, so two repositories whose file sources hold identical text shared
+  a row and `INSERT OR REPLACE` overwrote the other's. `tasks` is rebuilt on
+  `(id, repo)`; `runs` gains `repo` so `last_session` cannot hand back a
+  session id belonging to another repository's worktree. `repo` stays
+  **nullable** — SQLite does not enforce uniqueness across a NULL key part, so
+  pre-column rows keep belonging to no repository exactly as documented. The
+  `runs.repo` backfill runs *before* the rebuild, while `id` is still unique,
+  or a task parked across the upgrade loses the session it resumes.
+
+The rest: `~/.claudeloop`, `state.db` and `runs/` are narrowed to 0700/0600
+(`config.narrow`, which only ever takes permissions away and never raises);
+`events.jsonl` rotates at 64 MiB keeping one generation, with the matching
+`size < offset` guard in the dashboard's SSE pump; `JiraSource.pending` follows
+`nextPageToken` up to `MAX_PAGES`; `JiraSource.answer` reads a bounded
+newest-first page and backs off to 600s, cutting a parked ticket from ~2,900
+Jira requests a day to ~150, while the dashboard's answer file stays checked
+every poll because it is free; a leftover `worktrees/<id>` with no `.git` is
+moved aside rather than blocking the head of the queue forever; an `error`
+outcome releases its worktree; `State` closes its own connection; `prompt.
+oversized` refuses a system prompt past Linux's 128 KiB argv cap at startup;
+the dashboard keeps answer drafts across rebuilds and re-reads the checklist
+per request under the file source.
+
+**Live smoke test, two tasks on haiku, $0.09.** Task one finished; task two
+parked on a question, was answered on the dashboard, and resumed. The cost
+figure above is the finding it was run for. Everything else held: composite
+key and `runs.repo` live in the database, the resume reused the dead session's
+id, both branches carried exactly their own commit, the repository never left
+`main` and was never dirtied, both worktrees were released, and every path
+under the scratch home came out 0700/0600.
+
+Two checks beyond the two tasks. **The migration was run against a copy of a
+real `~/.claudeloop/state.db`** — old single-column key, no `runs.repo`, 7
+tasks and 8 runs — which came through with every row and every cost intact,
+was a no-op on the second open, and was narrowed to 0600. And the
+head-of-line worktree fault was reproduced by hand: the leftover was moved to
+`<id>.broken-<timestamp>` with its contents intact, and `ensure` reattached to
+the **existing branch**, so the earlier attempt's commit came back with it.
+
+**What could not be checked, and it is S9.1's outstanding item, not this
+slice's.** The Jira half — pagination, the bounded comment read, `orderBy`
+ordering — has unit tests against a fake and a real captured fixture, but no
+live run: the configured instance now has **no projects at all**
+(`/project/search` returns empty, `project = "KAN"` matches nothing), so the
+tickets behind S9.1's report are gone and there is nothing to run against.
+S9.1's `transition_done` check is still outstanding for the same reason. One
+thing the probe did confirm live: `/search/jql` really does answer with
+`isLast` and no token on a final page, which is the shape the pagination reads.
+
+Spec: `docs/superpowers/specs/2026-08-04-claudeloop-backlog-defects-design.md`
+
 ---
 
 ## Next
 
-Nothing is scheduled. The open issues below are the backlog.
+No slice is scheduled. Two things are genuinely outstanding, and both are the
+same blocker rather than two:
+
+1. **The Jira live smoke test has never run against S9.1 or S11.** S9.1 made
+   `transition_done` match on transition id, status name and status category
+   as well as name, and its fixtures assert a `to.statusCategory.key` shape
+   that only a real instance can confirm is actually in the offered payload.
+   S11 added `nextPageToken` pagination to `pending()` and a bounded,
+   `orderBy=-created` comment read to `answer()`, and neither has been seen
+   against a real Jira either.
+
+   **It cannot be run right now.** The configured instance has no projects
+   left at all — `/project/search` returns empty and `project = "KAN"` matches
+   nothing — so the tickets S9.1's finding came from are gone. This needs a
+   Jira with a real board again; one run then covers both slices. Until then,
+   treat `transition_done`, pagination past 50 issues, and the comment
+   ordering as unverified against reality, which is exactly the state this
+   file's smoke-test rule exists to make visible.
+
+   What the probe *did* confirm live: `/search/jql` answers a final page with
+   `isLast` and no token, which is the shape the pagination reads, and Jira
+   still refuses an unbounded JQL outright.
+
+2. **`main` is ahead of `origin/main`.** The remote sits at `73ca68e`
+   (`chore: addon 0.1.3`); S10 and S11 are local only. Pushing is a
+   deliberate act nobody has asked for yet — and note that publishing the S4
+   add-on image is a tag, not a branch push, so a `main` push alone changes
+   nothing an operator installs.
+
+The open issues below are the rest of the backlog. None is scheduled.
 
 ---
 
@@ -818,25 +923,15 @@ Real, deliberately deferred, tracked here so they are not lost.
   also demands a browser sweep needs an MCP server the session only has if
   `mcp_config` supplies one. Left as the target repository's decision to
   record in its own file; ClaudeLoop must not paper over it in a prompt.
-
 - **`state.db` is one database per machine, scoped by a repository path
-  string.** `home` is `~/.claudeloop` for every config, so `tasks` now carries
-  a `repo` column and the three reads that mean "this loop's work" —
-  `terminal_ids()`, `blocked()`, and the dashboard's completed list — filter on
-  it. Two consequences left standing: moving or renaming a repository orphans
-  its history, since the scope is the configured path verbatim; and `tasks.id`
-  is still the primary key on its own, so two repositories whose file sources
-  hold identical task text share an id and `start_task`'s `INSERT OR REPLACE`
-  overwrites the other's row. A composite `(id, repo)` key would fix the
-  second and needs a table rebuild.
-- `state.db` is created at the default umask and holds task text, summaries and
-  blocked questions. Run directories are 0700 and event logs 0600, but
-  `~/.claudeloop` and `runs/` are not.
-- `events.jsonl` grows without bound. No rotation, no size cap. Reads are
-  bounded, so this is disk usage rather than a hang.
-- `--append-system-prompt` carries the composed prompt as one argv element.
-  Linux caps a single argument at 128 KiB; a very large operator instructions
-  file would fail `execve` with an opaque error.
+  string.** `home` is `~/.claudeloop` for every config, so every read that
+  means "this loop's work" filters on `repo`, and S11 made `(id, repo)` the
+  primary key so two repositories can no longer overwrite each other's rows.
+  One consequence is left standing: moving or renaming a repository orphans
+  its history, since the scope is the configured path verbatim. Nothing
+  migrates a renamed path, and guessing which old scope a new path used to be
+  is not something ClaudeLoop can do safely — an operator who moves a
+  repository can `UPDATE tasks SET repo=...` themselves.
 - The dashboard token travels in the query string, because `EventSource` cannot
   set headers. It therefore reaches browser history and screenshots. S4 no
   longer adds the ingress access log to that list — under ingress the token is
@@ -862,18 +957,13 @@ Real, deliberately deferred, tracked here so they are not lost.
   per-key allowlist regardless — `repo`, `home` and the worktree root are not
   safely swappable under a task that is mid-flight.
 - `Config` has a `dict` field, so it is unhashable. Nothing hashes it.
-- `JiraSource.pending` fetches one page of 50 issues and never paginates, so an
-  ordering that puts wanted work past the 50th row never reaches it.
-- The dashboard's pending list is now published on the loop's status snapshot
-  rather than re-read on the web thread, so it reflects the backlog as of the
-  current task's start rather than live — under the file source, that's a
-  step back from re-reading the tasks file on every request.
 - Nothing prunes what a task leaves behind, and there are three kinds of it.
   **Worktree directories** accumulate conditionally: a parked task's persists
-  by design, a failed task's persists when it is dirty, since `git worktree
-  remove` is never forced, and an `error` task's persists always, because a
-  crash out of `run_task` never reaches `release` — bounded in practice by how
-  many questions go unanswered. **Branches** accumulate unconditionally:
+  by design, and a failed or errored task's persists when it is dirty, since
+  `git worktree remove` is never forced — bounded in practice by how many
+  questions go unanswered. S11 closed the unconditional half: `main_loop`'s
+  crash handler now releases an `error` task's tree, which a crash out of
+  `run_task` used to skip entirely. **Branches** accumulate unconditionally:
   nothing deletes `claudeloop/<task-id>`, on any outcome, so a long run leaves
   one branch per task ever run, done ones included. **Claude Code's own
   transcripts** now do too: it keys stored sessions on the slugified working
@@ -882,7 +972,10 @@ Real, deliberately deferred, tracked here so they are not lost.
   directory because they all ran in `cfg.repo`. `release` takes the worktree;
   the transcript directory outlives it, and it lives outside `~/.claudeloop`
   where nothing ClaudeLoop documents will look. No age or count policy for any
-  of the three; the branches and the transcripts are the unbounded halves.
+  of the three; the branches and the transcripts are the unbounded halves, and
+  S11 deliberately left both. Deleting a finished task's branch would destroy
+  the only copy of the work that task was paid to produce, and the transcript
+  directories belong to Claude Code rather than to ClaudeLoop.
 - **A task parked across the S6 upgrade cannot be resumed.** Same cause:
   Claude Code keys its stored sessions on the working directory, every pre-S6
   session ran with `cwd=cfg.repo`, and every S6 session runs in a worktree, so
@@ -891,45 +984,16 @@ Real, deliberately deferred, tracked here so they are not lost.
   resume against an unresolvable session id, and marks the task `- [!]`. It is
   a one-time cost affecting only tasks parked at the moment of the upgrade;
   the remedy is to answer parked tasks before upgrading.
-- **A per-task-permanent worktree fault blocks the head of the queue
-  indefinitely.** `ensure` reuses `worktrees/<task-id>` only when `.git`
-  exists inside it, so a non-empty directory left there without one —
-  ClaudeLoop killed mid-`add`, a reboot, an operator deleting `.git` while
-  tidying — makes `git worktree add` fail with "already exists" every time.
-  That is an environment fault by design, recorded as `error`, which is
-  deliberately non-terminal, so the task keeps being offered and re-picked
-  every `POLL_S` forever and no later task runs. Not new in kind — any
-  per-task-permanent crash in `run_task` did this before S6 — but S6 adds a
-  way to reach it. Clearing the directory unblocks it.
 - `ANSWER_PROMPT` tells a resumed session its uncommitted changes are still
   there, unconditionally. False only if an operator wipes
   `~/.claudeloop/worktrees` while a task is parked, in which case `ensure`
   recreates the tree from the task's branch and the session is told about work
   that is gone. Left as written: qualifying it would cost every honest resume
   clarity to cover an operator action.
-- **A task that parks and is later answered reports only the cost of its
-  resume.** `run_task` starts its `cost` accumulator at zero on every call and
-  `State.finish_task` writes `cost_usd=?` rather than adding to it, so the
-  money spent before the question was asked is overwritten. Measured in S6's
-  live smoke test: a task that spent $0.0395 parking and $0.0162 finishing is
-  recorded at $0.0162, and the dashboard and the source's closing comment both
-  report that. Pre-existing, from S2b — parking is what made a task able to
-  span two `run_task` calls.
 - The answered path does not publish `set_status(pending=...)`, so the
   dashboard's backlog list can be stale while a resumed task runs. Deliberate:
   publishing it would cost a `source.pending()` network round trip on every
   resume.
-- `JiraSource.answer` reads the full comment list on every poll for every
-  parked task — one `GET /comment` every `POLL_S` (30s), indefinitely, since
-  a parked task never expires: roughly 2,900 Jira requests per parked ticket
-  per day, forever. Also unpaginated, the same limitation `pending()` already
-  carries.
-- The dashboard's answer box has no draft persistence. `renderCompleted` keys
-  on `id:status` across every task, so any unrelated task changing status
-  mid-typing rebuilds the list and wipes the draft — not only a closed tab.
-- The test suite emits roughly 46 `ResourceWarning`s about unclosed SQLite
-  connections. Pre-existing on `main` and unrelated to any slice so far, so
-  not yet triaged.
 - A `claude -p` session survives its parent being killed abruptly: it runs
   with `start_new_session=True`, and the loop's kill path only runs on its
   own orderly exit. An operator who kills the orchestrator with SIGKILL must
@@ -941,14 +1005,6 @@ Real, deliberately deferred, tracked here so they are not lost.
   it means a `systemd` unit with `Restart=on-failure`, or the S4 addon, whose
   `config.toml` goes missing hangs holding the loopback socket rather than
   crash-looping visibly where a supervisor would notice.
-- `write_config`'s fix for `O_CREAT`'s mode only applying to a file it
-  creates — `os.fchmod` on the open fd before writing — has no test that
-  fails without it. The existing test only reads the file's mode after the
-  write finishes, which lands on `0600` either way; a test that would actually
-  fail needs to catch the mode mid-write, e.g. mocking `os.fdopen` to assert
-  `os.fstat(fd)` before any byte is written. Not added: this repo's
-  convention is real files on disk, not mocks. Flagged during S5's review for
-  triage rather than fixed, so it isn't rediscovered as a silent gap later.
 - Nothing ever *removes* a marketplace. Dropping an entry from the target
   repository's `extraKnownMarketplaces` leaves it registered at user scope,
   where it stays available to every other Claude Code run on the box.
@@ -977,7 +1033,9 @@ Real, deliberately deferred, tracked here so they are not lost.
   agent is reliably available. Note the same agent makes `git commit` **hang**
   inside scratch repositories created by tests — test fixtures disable signing
   locally for that reason.
-- **Nothing has ever been pushed.** `origin` exists but has no `main`.
+- **`origin/main` exists but trails.** It sits at `73ca68e`; every slice from
+  S10 on is local only. The older note here said nothing had ever been
+  pushed, which stopped being true.
 - **`home` is not a config key.** It is an argument to `load_config(path,
   home)`, defaulting to `~/.claudeloop`, and `validate()` silently ignores a
   `home =` line in a TOML file. S10's smoke test put one in a scratch config

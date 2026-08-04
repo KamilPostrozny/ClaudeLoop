@@ -294,6 +294,80 @@ class OverlongLineTest(unittest.TestCase):
         self.assertIn("exceeded", text)
 
 
+class RotationTest(unittest.TestCase):
+    """events.jsonl used to grow without bound. A session under
+    bypassPermissions streams every tool result -- full file reads included --
+    through it, and a task that nudges or waits out a quota reopens the same
+    file for every attempt."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "events.jsonl"
+
+    async def _feed(self, lines: list[bytes], cap: int) -> None:
+        stream = asyncio.StreamReader()
+        for line in lines:
+            stream.feed_data(line)
+        stream.feed_eof()
+        await session._drain(stream, self.path, cap=cap)
+
+    def rotated(self) -> Path:
+        return self.tmp / "events.jsonl.1"
+
+    def test_a_log_past_the_cap_rotates(self):
+        asyncio.run(self._feed([b"x" * 40 + b"\n"] * 6, cap=100))
+
+        self.assertTrue(self.rotated().exists())
+        # Bounded by 2x the cap: the live file plus one kept generation.
+        total = self.path.stat().st_size + self.rotated().stat().st_size
+        self.assertLessEqual(total, 2 * 100 + 41)
+
+    def test_rotation_keeps_the_most_recent_lines_live(self):
+        lines = [f"line-{n}\n".encode() for n in range(20)]
+        asyncio.run(self._feed(lines, cap=40))
+
+        self.assertIn("line-19", self.path.read_text())
+
+    def test_only_one_generation_is_kept(self):
+        asyncio.run(self._feed([b"x" * 40 + b"\n"] * 30, cap=100))
+
+        self.assertEqual(
+            sorted(p.name for p in self.tmp.iterdir()),
+            ["events.jsonl", "events.jsonl.1"],
+        )
+
+    def test_a_log_under_the_cap_is_never_rotated(self):
+        asyncio.run(self._feed([b"small\n"] * 3, cap=1024))
+
+        self.assertFalse(self.rotated().exists())
+        self.assertEqual(self.path.read_text(), "small\nsmall\nsmall\n")
+
+    def test_a_reopened_log_counts_what_is_already_there(self):
+        # Every resume of a task reopens the same file. Counting only this
+        # invocation's own bytes would let a task that nudges twenty times
+        # grow the file twenty caps deep.
+        self.path.write_bytes(b"y" * 95 + b"\n")
+
+        asyncio.run(self._feed([b"z" * 40 + b"\n"] * 2, cap=100))
+
+        self.assertTrue(self.rotated().exists())
+        self.assertIn("y" * 95, self.rotated().read_text())
+
+    def test_events_are_still_collected_across_a_rotation(self):
+        async def case():
+            stream = asyncio.StreamReader()
+            for _ in range(6):
+                stream.feed_data(b'{"type":"result","total_cost_usd":0.1}\n')
+            stream.feed_eof()
+            events: list[dict] = []
+            await session._read_events(stream, self.path, events, cap=100)
+            return events
+
+        events = asyncio.run(case())
+
+        self.assertEqual(len(events), 6, "rotation must not lose an event")
+
+
 class SessionEnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

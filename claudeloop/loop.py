@@ -13,12 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import plugins
+from . import prompt
 from . import session
 from . import setup
 from . import status as status_module
 from . import web
 from . import worktree
-from .config import DEFAULT_CONFIG, HOME, Config, load_config
+from .config import DEFAULT_CONFIG, HOME, Config, load_config, narrow
 from .jira import JiraClient, JiraSource
 from .source import FileSource, Task, TaskSource
 from .state import State
@@ -369,6 +370,10 @@ async def run_task(
     run_dir = cfg.home / "runs" / task.id
     result_path = run_dir / "result.json"
     run_dir.mkdir(parents=True, exist_ok=True)
+    # session.run narrows run_dir itself, but not the directory holding every
+    # run: `runs/` was made at the default umask, and its names alone leak
+    # which tasks this box has worked on.
+    narrow(run_dir.parent, 0o700)
     # A previous attempt's verdict would otherwise end this one immediately.
     # For an answered task that previous verdict is the `blocked` result the
     # session wrote before it parked, so this matters more, not less.
@@ -393,6 +398,12 @@ async def run_task(
     # so the loop would nudge and burn every resume; that is the failure
     # ROADMAP.md already records for tasks parked across the S6 upgrade.
     interrupted = resume_with is None and state.was_interrupted(task.id)
+    # Read here for the same reason, and with the same ordering constraint: a
+    # task that parked and was answered spans two run_task calls, and this one
+    # would otherwise report only what its own invocations cost. finish_task
+    # writes cost_usd rather than adding to it, so the accumulator has to
+    # start where the previous attempt stopped.
+    cost = state.prior_cost(task.id) if resume_with is not None or interrupted else 0.0
     # None when there is no session to resume: a state.db from before S2b, or
     # a task whose runs were pruned. The answer still gets through, only the
     # context is lost.
@@ -481,7 +492,6 @@ async def run_task(
 
     resume_count = 0  # plain nudges: no result, no rate limit
     wait_count = 0  # quota waits: bounded separately, see decide()
-    cost = 0.0
     prompt, resume = opening_prompt(task.text, resume_with, resumed, interrupted)
     while True:
         attempt = resume_count + wait_count
@@ -574,24 +584,91 @@ def read_answer(run_dir: Path) -> str | None:
     return answer or None
 
 
-def find_answered(cfg: Config, state: State, source: TaskSource) -> tuple[Task, str] | None:
+ANSWER_POLL_MAX_S = 600
+"""Longest gap between two asks of a task source for an answer.
+
+The source's own channel is a network call -- under Jira, one GET /comment
+per parked task -- and a parked task never expires, so at POLL_S it was
+roughly 2,900 requests per parked ticket per day, forever, for a question
+that may never be answered. The interval starts at POLL_S and doubles to
+this, which costs a ticket parked for a day about 150 requests instead.
+
+The dashboard's channel is not on this schedule: an answer.json is a local
+file read, it costs nothing, and it is the one a human is most likely to be
+sitting in front of waiting for.
+"""
+
+
+class AnswerSchedule:
+    """When each parked task's source may next be asked for an answer.
+
+    Kept in memory rather than in state.db on purpose: the only cost of
+    losing it is one extra poll per parked task after a restart, and a
+    restart is already the moment an operator most wants a prompt answer.
+    """
+
+    def __init__(self, first: float = 0.0, cap: float = ANSWER_POLL_MAX_S):
+        self.first = first
+        self.cap = cap
+        self._next: dict[str, float] = {}
+        self._interval: dict[str, float] = {}
+
+    def due(self, task_id: str, now: float) -> bool:
+        return now >= self._next.get(task_id, self.first)
+
+    def missed(self, task_id: str, now: float) -> None:
+        """Asked, no answer. Back off, to a bounded ceiling."""
+        interval = min(max(self._interval.get(task_id, 0.0) * 2, POLL_S), self.cap)
+        self._interval[task_id] = interval
+        self._next[task_id] = now + interval
+
+    def forget(self, task_id: str) -> None:
+        """This task is no longer parked, so its next question starts fresh."""
+        self._next.pop(task_id, None)
+        self._interval.pop(task_id, None)
+
+    def keep_only(self, task_ids: set[str]) -> None:
+        for gone in set(self._next) - task_ids:
+            self.forget(gone)
+
+
+def find_answered(
+    cfg: Config,
+    state: State,
+    source: TaskSource,
+    schedule: AnswerSchedule | None = None,
+) -> tuple[Task, str] | None:
     """The first parked task with an answer waiting, through either channel.
 
     Blocking on both counts -- sqlite3 on this connection and, under the Jira
     source, one HTTP round trip per parked task -- so the loop calls this
     through asyncio.to_thread. The Jira reads are only paid while something
-    is actually parked, and only for a task with no answer file waiting.
+    is actually parked, only for a task with no answer file waiting, and only
+    as often as `schedule` allows.
     """
-    for row in state.blocked():
+    schedule = schedule if schedule is not None else AnswerSchedule()
+    rows = state.blocked()
+    schedule.keep_only({row["id"] for row in rows})
+    now = time.time()
+    for row in rows:
         task = Task(row["id"], row["text"], row["source"], row["source_ref"])
         try:
-            answer = read_answer(cfg.home / "runs" / task.id) or source.answer(task)
+            # The dashboard's file first and always: it costs a stat, and a
+            # human who has just typed an answer should not wait out a
+            # backoff meant for the network.
+            answer = read_answer(cfg.home / "runs" / task.id)
+            if not answer and schedule.due(task.id, now):
+                answer = source.answer(task)
+                if not answer:
+                    schedule.missed(task.id, now)
         except Exception as error:
             # Confined to this row on purpose: one faulty task must not hide
             # every later parked task's answer from the same scan.
             log.warning("could not check task %s for an answer (%s)", task.id, error)
+            schedule.missed(task.id, now)
             continue
         if answer:
+            schedule.forget(task.id)
             return task, answer
     return None
 
@@ -617,11 +694,14 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
     """
     state = State(cfg.home / "state.db", str(cfg.repo))
     source = build_source(cfg, state)
+    schedule = AnswerSchedule()
     heartbeat = asyncio.create_task(_heartbeat())
     try:
         while True:
             try:
-                answered = await asyncio.to_thread(find_answered, cfg, state, source)
+                answered = await asyncio.to_thread(
+                    find_answered, cfg, state, source, schedule
+                )
             except Exception:
                 # A locked database or a Jira fault must not stop the loop
                 # from picking up ordinary pending work.
@@ -678,8 +758,8 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                     # with ended_at/exit_reason NULL forever.
                     state.db.execute(
                         "UPDATE runs SET ended_at=?, exit_reason='Crash'"
-                        " WHERE task_id=? AND ended_at IS NULL",
-                        (time.time(), task.id),
+                        " WHERE task_id=? AND repo IS ? AND ended_at IS NULL",
+                        (time.time(), task.id, state.repo),
                     )
                     state.finish_task(task.id, "error", f"ClaudeLoop crashed: {error}", 0.0)
                 except Exception:
@@ -688,6 +768,20 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
                     # write that fails (e.g. a schema this process's migration
                     # didn't handle).
                     log.exception("task %s: failed to record crash in state.db", task.id)
+                # A crash out of run_task never reaches its own release call,
+                # so an 'error' outcome used to leave its worktree behind
+                # unconditionally -- the one kind of leftover that accumulated
+                # on every occurrence rather than only on a dirty tree. Still
+                # never forced, so a tree holding uncommitted work survives
+                # exactly as it does on any other outcome, and a clean one is
+                # recreated from the task's branch when the task is offered
+                # again.
+                try:
+                    await asyncio.to_thread(
+                        worktree.release, cfg.repo, cfg.home / "worktrees" / task.id
+                    )
+                except Exception:
+                    log.exception("task %s: failed to release its worktree", task.id)
                 if once:
                     return
                 await asyncio.sleep(POLL_S)
@@ -699,6 +793,7 @@ async def main_loop(cfg: Config, once: bool = False) -> None:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
+        state.close()
 
 
 def _serve_dashboard(cfg: Config) -> None:
@@ -765,6 +860,13 @@ def main(argv: list[str] | None = None) -> None:
     problem = plugins.register_marketplaces(cfg.repo)
     if problem:
         raise SystemExit(problem)
+    # Composed against cfg.repo rather than a worktree, which only changes
+    # which CLAUDE.md is named -- a path, not the bulk. The bulk is the
+    # operator's own instructions, and this is where an oversized one gets
+    # named once instead of failing execve on every task.
+    problem = prompt.oversized(prompt.compose(cfg))
+    if problem:
+        raise SystemExit(f"{DEFAULT_CONFIG}: {problem}")
     # After the config validates, so a non-loopback bind with no token fails
     # before anything is listening.
     _serve_dashboard(cfg)

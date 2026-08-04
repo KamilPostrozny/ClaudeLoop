@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from . import status as status_module
 from .config import LOOPBACK_HOSTS, WILDCARD_HOSTS, Config, bind_address, ingress
 from .render import render_event
+from .source import FileSource
 
 log = logging.getLogger("claudeloop.web")
 
@@ -134,6 +135,30 @@ def render_line(raw: bytes) -> list[dict]:
         return []
 
 
+def pending_now(cfg: Config, snapshot) -> list[tuple[str, str]]:
+    """The backlog, as fresh as this request can cheaply make it.
+
+    The snapshot is published when a task starts, so under the file source an
+    edit to tasks.md made mid-task did not show until the next one began --
+    a step back from the per-request re-read this had before S3. Reading a
+    markdown checklist is a local file read on a file the loop only appends
+    verdicts to, so the freshness is worth having back.
+
+    The Jira source is deliberately left on the snapshot: re-reading it here
+    is an HTTP round trip on the web thread, on every poll of every open
+    dashboard, which is what moved this onto the snapshot in the first place.
+    """
+    if cfg.source != "file" or cfg.tasks_file is None:
+        return list(snapshot.pending)
+    try:
+        return [(task.id, task.text) for task in FileSource(cfg.tasks_file).pending()]
+    except OSError:
+        # The operator's file, and it may vanish or turn unreadable mid-run.
+        # The snapshot is a worse answer than the file, and a better one than
+        # a 500.
+        return list(snapshot.pending)
+
+
 def api_state(cfg: Config) -> dict:
     snapshot = status_module.current
     db = _connect(cfg)
@@ -174,7 +199,7 @@ def api_state(cfg: Config) -> dict:
         },
         "pending": [
             {"id": task_id, "text": text}
-            for task_id, text in snapshot.pending
+            for task_id, text in pending_now(cfg, snapshot)
             if task_id != snapshot.task_id
         ],
         "completed": completed,
@@ -188,18 +213,30 @@ def api_task(cfg: Config, task_id: str) -> dict | None:
     db = _connect(cfg)
     if db is None:
         return None
+    repo = str(cfg.repo)
     try:
-        row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        # Scoped like every other read that means "this loop's work": `id` is
+        # a hash of the task text, so a task worded identically in two
+        # repositories shares one, and this dashboard must show its own
+        # repository's row and its own repository's runs.
+        row = db.execute(
+            "SELECT * FROM tasks WHERE id=? AND repo IS ?", (task_id, repo)
+        ).fetchone()
         if row is None:
             return None
         runs = [
             dict(run)
             for run in db.execute(
                 "SELECT id, session_id, started_at, ended_at, exit_reason,"
-                " resume_count FROM runs WHERE task_id=? ORDER BY id",
-                (task_id,),
+                " resume_count FROM runs WHERE task_id=? AND repo IS ? ORDER BY id",
+                (task_id, repo),
             )
         ]
+    except sqlite3.OperationalError:
+        # Same window api_state guards: the dashboard is served before
+        # main_loop opens State, so a database written by a version without
+        # runs.repo is queryable here before the migration has run.
+        return None
     finally:
         db.close()
     return {
@@ -335,11 +372,17 @@ class Handler(BaseHTTPRequestHandler):
     def _is_blocked(self, task_id: str) -> bool:
         """Whether that task is actually parked on a question. Keeps stray
         files out of arbitrary run directories."""
-        db = _connect(self.server.cfg)
+        cfg = self.server.cfg
+        db = _connect(cfg)
         if db is None:
             return False
         try:
-            row = db.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            row = db.execute(
+                "SELECT status FROM tasks WHERE id=? AND repo IS ?",
+                (task_id, str(cfg.repo)),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
         finally:
             db.close()
         return row is not None and row["status"] == "blocked"
@@ -499,6 +542,14 @@ class Handler(BaseHTTPRequestHandler):
             size = path.stat().st_size
         except OSError:
             return offset
+        if size < offset:
+            # The log rotated under us (session.MAX_LOG_BYTES) -- this is a
+            # new, shorter file, and the bytes at `offset` are somewhere in
+            # the middle of it. Start it again rather than resuming into a
+            # position that no longer means anything, which would have
+            # stalled the stream until the new file grew past the old size
+            # and then emitted from a spliced position.
+            offset = 0
         if size <= offset:
             return offset
         with open(path, "rb") as handle:

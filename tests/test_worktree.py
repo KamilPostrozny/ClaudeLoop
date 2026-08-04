@@ -158,6 +158,75 @@ class WorktreeTest(unittest.TestCase):
 
         worktree.release(self.repo, path)  # must not raise
 
+
+class UnregisteredLeftoverTest(unittest.TestCase):
+    """A non-empty directory at worktrees/<task-id> with no `.git` in it --
+    ClaudeLoop killed mid-`add`, a reboot, an operator deleting `.git` while
+    tidying -- fell past `ensure`'s reuse check into `add`, which fails with
+    "already exists" every time, and the branch retry failed identically. The
+    task is recorded 'error', which is deliberately non-terminal, so it was
+    re-picked every POLL_S forever and no later task ever ran."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp / "repo")
+        self.root = self.tmp / "worktrees"
+
+    def leftover(self, task_id: str) -> Path:
+        path = self.root / task_id
+        path.mkdir(parents=True)
+        (path / "half-written.txt").write_text("from the attempt that died\n")
+        return path
+
+    def test_a_leftover_directory_no_longer_blocks_the_queue(self):
+        path = self.leftover("abc123")
+
+        again = worktree.ensure(self.repo, self.root, "abc123")
+
+        self.assertEqual(again, path)
+        self.assertTrue((again / ".git").exists())
+        self.assertEqual(branch_of(again), "claudeloop/abc123")
+
+    def test_the_leftover_is_moved_aside_rather_than_deleted(self):
+        self.leftover("abc123")
+
+        worktree.ensure(self.repo, self.root, "abc123")
+
+        aside = [p for p in self.root.iterdir() if p.name.startswith("abc123.broken")]
+        self.assertEqual(len(aside), 1, "the old directory must still be on disk")
+        self.assertEqual((aside[0] / "half-written.txt").read_text(),
+                         "from the attempt that died\n")
+
+    def test_an_empty_leftover_directory_is_not_kept(self):
+        # `git worktree add` is happy to use an existing empty directory, so
+        # there is nothing to move aside and nothing to explain afterwards.
+        (self.root / "abc123").mkdir(parents=True)
+
+        worktree.ensure(self.repo, self.root, "abc123")
+
+        self.assertEqual([p.name for p in self.root.iterdir()], ["abc123"])
+
+    def test_a_second_leftover_does_not_collide_with_the_first(self):
+        self.leftover("abc123")
+        worktree.ensure(self.repo, self.root, "abc123")
+        worktree.release(self.repo, self.root / "abc123")
+        self.leftover("abc123")
+
+        worktree.ensure(self.repo, self.root, "abc123")
+
+        aside = [p for p in self.root.iterdir() if p.name.startswith("abc123.broken")]
+        self.assertEqual(len(aside), 2)
+
+    def test_a_real_worktree_is_never_moved_aside(self):
+        path = worktree.ensure(self.repo, self.root, "abc123")
+        (path / "uncommitted.txt").write_text("do not move this\n")
+
+        again = worktree.ensure(self.repo, self.root, "abc123")
+
+        self.assertEqual(again, path)
+        self.assertEqual((again / "uncommitted.txt").read_text(), "do not move this\n")
+        self.assertEqual([p.name for p in self.root.iterdir()], ["abc123"])
+
         self.assertTrue((path / "uncommitted.txt").exists(),
                         "an unattended loop must never destroy a working tree")
 

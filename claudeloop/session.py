@@ -95,37 +95,101 @@ def _overrun_marker(limit: int) -> bytes:
     return f"<claudeloop: line exceeded {limit} byte limit, discarded>\n".encode()
 
 
-def _open_log(path: Path):
-    """Open (or create) a run log for append, restricted to the owner.
+MAX_LOG_BYTES = 64 * 1024 * 1024
+"""Rotate a run log past this size, keeping one previous generation -- so a
+run directory's events.jsonl is bounded at twice this, not by how long the
+task ran.
 
-    These logs carry a session's raw stdout/stderr verbatim, and that
-    session was handed [session_env] credentials -- a run that executes
-    `env`, `git config --list --show-origin`, or echoes a failing `gh`
-    invocation writes a credential straight into this file. The default
-    umask (0644) would make it world-readable, which is exactly what the
-    config.toml permissions guard refuses to allow for the same secrets one
-    step earlier. Explicit mode on os.open, not a chmod after: still subject
-    to umask, but umask can only clear bits from 0o600, never add ones.
+It had no bound at all. A session under bypassPermissions streams every tool
+result, full file reads included, through this file, and a task that nudges or
+waits out a quota reopens the same one for every attempt; a multi-day run
+could reach hundreds of MB with nothing to stop it. 64 MiB comfortably holds
+more than the dashboard ever replays (web.TAIL_CAP_BYTES is 8 MiB) and more
+than a human reads.
+"""
+
+
+class _Log:
+    """An append-only run log that rotates rather than growing forever.
+
+    Restricted to the owner, because these logs carry a session's raw
+    stdout/stderr verbatim and that session was handed [session_env]
+    credentials -- a run that executes `env`, `git config --list
+    --show-origin`, or echoes a failing `gh` invocation writes a credential
+    straight into this file. The default umask (0644) would make it
+    world-readable, which is exactly what the config.toml permissions guard
+    refuses to allow for the same secrets one step earlier. Explicit mode on
+    os.open, not a chmod after: still subject to umask, but umask can only
+    clear bits from 0o600, never add ones.
+
+    The size is tracked as bytes go by rather than stat()ed per line: the
+    whole file is written a line at a time, and one integer add per line
+    costs nothing where a syscall would not.
     """
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    return os.fdopen(fd, "ab")
+
+    def __init__(self, path: Path, cap: int = MAX_LOG_BYTES):
+        self.path = path
+        self.cap = cap
+        # What is already there counts. Every resume of a task reopens this
+        # same file, so counting only this invocation's bytes would let a
+        # task that nudges twenty times grow it twenty caps deep.
+        self.size = path.stat().st_size if path.exists() else 0
+        self.handle = self._open()
+
+    def _open(self):
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, "ab")
+
+    def write(self, raw: bytes) -> None:
+        # Rotated *before* the write, never mid-line: a line lands whole in
+        # one generation or the other. The constraint that every stdout line
+        # reaches disk verbatim before it is parsed is untouched -- this only
+        # changes which file the older ones are in.
+        if self.size and self.size + len(raw) > self.cap:
+            self._rotate()
+        self.handle.write(raw)
+        self.handle.flush()  # visible on the dashboard while it still matters
+        self.size += len(raw)
+
+    def _rotate(self) -> None:
+        self.handle.close()
+        try:
+            # One generation, overwritten. Two files of a known size beat an
+            # unbounded number of them on a box nobody is watching.
+            os.replace(self.path, self.path.with_name(self.path.name + ".1"))
+        except OSError as error:
+            # Keep writing to the file we have: an unbounded log is a much
+            # smaller problem than losing the session's output.
+            log.warning("could not rotate %s (%s); it will keep growing", self.path, error)
+            self.handle = self._open()
+            return
+        self.size = 0
+        self.handle = self._open()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.handle.close()
 
 
 async def _read_events(
-    stream: asyncio.StreamReader, path: Path, out: list[dict], limit: int = MAX_LINE
+    stream: asyncio.StreamReader,
+    path: Path,
+    out: list[dict],
+    limit: int = MAX_LINE,
+    cap: int = MAX_LOG_BYTES,
 ) -> None:
-    with _open_log(path) as log:
+    with _Log(path, cap) as log_file:
         while True:
             try:
                 raw = await stream.readline()
             except ValueError:
-                log.write(_overrun_marker(limit))  # keep a durable trace of the drop
-                log.flush()
+                log_file.write(_overrun_marker(limit))  # a durable trace of the drop
                 continue
             if not raw:
                 return
-            log.write(raw)  # verbatim first: a parser bug never loses the record
-            log.flush()
+            log_file.write(raw)  # verbatim first: a parser bug never loses the record
             try:
                 event = json.loads(raw)
             except json.JSONDecodeError:
@@ -139,8 +203,13 @@ async def _read_events(
                 out.append(event)
 
 
-async def _drain(stream: asyncio.StreamReader, path: Path, limit: int = MAX_LINE) -> None:
-    with _open_log(path) as log:
+async def _drain(
+    stream: asyncio.StreamReader,
+    path: Path,
+    limit: int = MAX_LINE,
+    cap: int = MAX_LOG_BYTES,
+) -> None:
+    with _Log(path, cap) as log_file:
         while True:
             try:
                 raw = await stream.readline()
@@ -148,13 +217,11 @@ async def _drain(stream: asyncio.StreamReader, path: Path, limit: int = MAX_LINE
                 # Same overrun as _read_events: an unbroken --verbose diagnostic
                 # (e.g. a giant traceback) must not crash the gather and take
                 # the whole run() -- and the events already collected -- with it.
-                log.write(_overrun_marker(limit))
-                log.flush()
+                log_file.write(_overrun_marker(limit))
                 continue
             if not raw:
                 return
-            log.write(raw)
-            log.flush()  # same reason as _read_events: visible while it matters
+            log_file.write(raw)
 
 
 async def run(

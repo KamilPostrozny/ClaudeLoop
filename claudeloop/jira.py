@@ -32,6 +32,21 @@ against a real instance, not the one the documentation happened to show."""
 BACKOFF_S = (1.0, 2.0, 4.0)
 """Waits between retries. Only 5xx and network faults get here."""
 
+MAX_PAGES = 10
+"""How many pages of search results one poll will read, at 50 issues each.
+
+Bounded rather than unlimited: a token that never stops coming -- a bug at
+either end -- must not spin an unattended loop through Jira forever. 500
+issues is far past what a serial loop can work through between polls."""
+
+ANSWER_COMMENTS = 50
+"""How many of a ticket's newest comments JiraSource.answer reads.
+
+That call runs once per parked task per poll, indefinitely, because a parked
+task never expires. Reading every comment on a long-lived ticket every 30s is
+payload nobody needs: the boundary it looks for is ClaudeLoop's own newest
+question, which is by construction near the end."""
+
 DONE_LABEL = "claudeloop-done"
 BLOCKED_LABEL = "claudeloop-blocked"
 
@@ -188,6 +203,26 @@ question. Locating the newest comment starting with this heading is what
 keeps the two rounds straight, with nothing persisted anywhere."""
 
 
+def _chronological(comments: list) -> list[dict]:
+    """A comment page in the order it was written, oldest first.
+
+    `answer` asks for `orderBy=-created` so the newest comments are the ones
+    that fit in the bounded page -- but the boundary rule it then applies
+    (ClaudeLoop's newest question, then the first marked comment *after* it)
+    needs chronological order, so the page has to be turned back around.
+
+    Sorted on the comment id rather than reversed on trust: Jira allocates
+    those from one increasing sequence, so it is right whatever the instance
+    did with `orderBy`, including ignoring it. Falls back to reversing when
+    the ids are not numeric -- which is what the request asked for anyway.
+    """
+    entries = [c for c in comments if isinstance(c, dict)]
+    try:
+        return sorted(entries, key=lambda c: int(c["id"]))
+    except (KeyError, TypeError, ValueError):
+        return list(reversed(entries))
+
+
 def question_comment(summary: str, cost: float) -> str:
     """Posted instead of closing_comment when a task parks.
 
@@ -252,7 +287,12 @@ class JiraClient:
             try:
                 return self._once(method, path, payload)
             except urllib.error.HTTPError as error:
-                body = error.read().decode(errors="replace")
+                # HTTPError is itself a file object over the response socket,
+                # so reading it is not enough -- an unclosed one leaks the
+                # connection, and an unattended loop polling every 30s makes
+                # that a slow fd leak rather than a one-off.
+                with error:
+                    body = error.read().decode(errors="replace")
                 # A 4xx is a verdict, not a hiccup: a 401, a 403 or a
                 # malformed JQL answers the same way every time, and an
                 # unattended loop polling every 30s must not spend a minute
@@ -265,20 +305,39 @@ class JiraClient:
             self.sleep(BACKOFF_S[min(attempt, len(BACKOFF_S) - 1)])
         raise JiraError(0, "retries exhausted")  # unreachable, kept total
 
-    def search(self, jql: str, max_results: int = 50) -> dict:
-        return self._request("POST", SEARCH_PATH, {
+    def search(self, jql: str, max_results: int = 50, page_token: str = "") -> dict:
+        payload = {
             "jql": jql,
             "maxResults": max_results,
             "fields": ["summary", "description"],
-        })
+        }
+        if page_token:
+            # /search/jql pages on an opaque token rather than startAt. Sent
+            # only when the previous response offered one, so an instance
+            # that answers without one sees exactly the request it always did.
+            payload["nextPageToken"] = page_token
+        return self._request("POST", SEARCH_PATH, payload)
 
     def issue(self, key: str) -> dict:
         key = urllib.parse.quote(key, safe="")
         return self._request("GET", f"/issue/{key}?fields=summary,description,status,labels")
 
-    def comments(self, key: str) -> dict:
+    def comments(self, key: str, max_results: int = 0, newest_first: bool = False) -> dict:
+        """An issue's comments. Unbounded by default -- the session's own
+        `show` subcommand prints the lot, and a human reading a ticket wants
+        all of it.
+
+        `JiraSource.answer` is the caller that cannot afford that: it runs
+        once per parked task per poll, forever.
+        """
         key = urllib.parse.quote(key, safe="")
-        return self._request("GET", f"/issue/{key}/comment")
+        query = []
+        if max_results:
+            query.append(f"maxResults={max_results}")
+        if newest_first:
+            query.append("orderBy=-created")
+        suffix = f"?{'&'.join(query)}" if query else ""
+        return self._request("GET", f"/issue/{key}/comment{suffix}")
 
     def add_comment(self, key: str, body: str) -> dict:
         key = urllib.parse.quote(key, safe="")
@@ -338,15 +397,50 @@ class JiraSource:
         self.transition_start = transition_start
         self.transition_done = transition_done
 
+    def _search_pages(self, jql: str) -> list:
+        """Every issue the query matches, across pages, up to MAX_PAGES.
+
+        One page of 50 was all this ever read, so an ordering that put wanted
+        work past the 50th row never reached the loop -- it simply never
+        appeared in the backlog, with nothing saying why.
+
+        A page that fails keeps the pages already read rather than discarding
+        them: the loop can start on what did arrive, and the rest comes back
+        on the next poll.
+        """
+        issues: list = []
+        token = ""
+        for page in range(MAX_PAGES):
+            try:
+                data = self.client.search(jql, page_token=token)
+            except JiraError as error:
+                # Deliberately indistinguishable from an empty backlog when
+                # it is the first page. The loop idles POLL_S and asks again;
+                # a raise here would instead crash main_loop's task handler
+                # on every poll.
+                log.warning("could not read the Jira backlog (%s); retrying later", error)
+                return issues
+            found = data.get("issues")
+            if isinstance(found, list):
+                issues.extend(found)
+            elif page == 0:
+                log.warning(
+                    "Jira returned no issues list (got %s); treating the"
+                    " backlog as empty", type(found).__name__,
+                )
+                return []
+            token = str(data.get("nextPageToken") or "")
+            if not token or data.get("isLast"):
+                return issues
+        log.warning(
+            "stopped reading the Jira backlog after %s pages with more pages"
+            " still offered -- narrow the JQL if this is not a bug",
+            MAX_PAGES,
+        )
+        return issues
+
     def pending(self) -> list[Task]:
-        try:
-            data = self.client.search(compose_jql(self.jql))
-        except JiraError as error:
-            # Deliberately indistinguishable from an empty backlog. The loop
-            # idles POLL_S and asks again; a raise here would instead crash
-            # main_loop's task handler on every poll.
-            log.warning("could not read the Jira backlog (%s); retrying later", error)
-            return []
+        issues = self._search_pages(compose_jql(self.jql))
         done = set()
         if self.state is not None:
             try:
@@ -364,13 +458,6 @@ class JiraSource:
                     " without that backstop this poll", error,
                 )
                 done = set()
-        issues = data.get("issues")
-        if not isinstance(issues, list):
-            log.warning(
-                "Jira returned no issues list (got %s); treating the"
-                " backlog as empty", type(issues).__name__,
-            )
-            return []
         tasks = []
         for issue in issues:
             if not isinstance(issue, dict):
@@ -454,7 +541,9 @@ class JiraSource:
         persisted.
         """
         try:
-            comments = self.client.comments(task.source_ref).get("comments")
+            comments = self.client.comments(
+                task.source_ref, max_results=ANSWER_COMMENTS, newest_first=True
+            ).get("comments")
         except JiraError as error:
             # Indistinguishable from "no answer yet", exactly as pending()
             # treats an unreachable Jira as an empty backlog.
@@ -471,8 +560,7 @@ class JiraSource:
             return None
         bodies = [
             str(comment.get("body") or "")
-            for comment in comments
-            if isinstance(comment, dict)
+            for comment in _chronological(comments)
         ]
         asked = -1
         for index, body in enumerate(bodies):

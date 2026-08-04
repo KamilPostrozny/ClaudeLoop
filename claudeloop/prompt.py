@@ -210,6 +210,34 @@ def precedence(has_operator: bool) -> str:
     return " ".join(parts)
 
 
+MAX_ARG_BYTES = 128 * 1024
+"""Linux's MAX_ARG_STRLEN: the cap on a single argv element, independent of
+the much larger total. The composed prompt travels as one
+`--append-system-prompt` argument, so an operator instructions file large
+enough to push it past this makes execve fail -- with an errno the CLI
+reports as something unrelated, on every task, forever."""
+
+
+def oversized(prompt: str) -> str | None:
+    """An error message written for a human, or None.
+
+    Checked at startup against the same composition a session gets, so a
+    prompt that cannot be passed says so once, before anything is listening
+    and before a single paid task fails on it.
+    """
+    size = len(prompt.encode())
+    if size <= MAX_ARG_BYTES:
+        return None
+    return (
+        f"the composed system prompt is {size} bytes, past the {MAX_ARG_BYTES}"
+        " byte limit Linux puts on a single command-line argument. ClaudeLoop"
+        " passes it to the CLI as one --append-system-prompt argument, so"
+        " every session would fail to start. Shorten your instructions file"
+        " or your definition of done -- or point the session at a file in the"
+        " repository instead of inlining it."
+    )
+
+
 def compose(
     cfg: Config, tree: Path | None = None, default_branch: str | None = None
 ) -> str:
