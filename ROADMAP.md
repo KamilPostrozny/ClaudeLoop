@@ -1043,9 +1043,12 @@ No slice is scheduled. Three things are outstanding:
    it too. `addon-v*` tags still publish, as a manual re-run path, but are no
    longer how a release is made.
 
-   `0.2.1` is the first release made this way, and the first to carry S10,
-   S11 and S12 — the remote had been sitting at `73ca68e`
-   (`chore: addon 0.1.3`) with `0.2.0` published from a tag.
+   `0.2.1` is the first release made this way, and carries S12. The note
+   that used to sit here — that the remote was stuck at `73ca68e`
+   (`chore: addon 0.1.3`) with S10 and S11 local only — was stale:
+   `origin/main` was already at `18cc0d2` (`chore: addon 0.2.0`), so both had
+   been pushed and published. Check `git log origin/main..main` rather than
+   this paragraph.
 
 3. **Running a Jira smoke test needs the credentials handed over each time.**
    The add-on's `config.toml` lives in its `/data` volume, which the SSH
