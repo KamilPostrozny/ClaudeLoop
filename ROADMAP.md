@@ -24,7 +24,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S9** | Resume an interrupted task | merged |
 | **S9.1** | Locale-proof Jira transitions | merged, live check outstanding |
 | **S10** | The repository's instructions come first | merged |
-| **S11** | Backlog defects | merged |
+| **S11** | Backlog defects | merged, Jira live check outstanding |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -880,7 +880,36 @@ Spec: `docs/superpowers/specs/2026-08-04-claudeloop-backlog-defects-design.md`
 
 ## Next
 
-Nothing is scheduled. The open issues below are the backlog.
+No slice is scheduled. Two things are genuinely outstanding, and both are the
+same blocker rather than two:
+
+1. **The Jira live smoke test has never run against S9.1 or S11.** S9.1 made
+   `transition_done` match on transition id, status name and status category
+   as well as name, and its fixtures assert a `to.statusCategory.key` shape
+   that only a real instance can confirm is actually in the offered payload.
+   S11 added `nextPageToken` pagination to `pending()` and a bounded,
+   `orderBy=-created` comment read to `answer()`, and neither has been seen
+   against a real Jira either.
+
+   **It cannot be run right now.** The configured instance has no projects
+   left at all — `/project/search` returns empty and `project = "KAN"` matches
+   nothing — so the tickets S9.1's finding came from are gone. This needs a
+   Jira with a real board again; one run then covers both slices. Until then,
+   treat `transition_done`, pagination past 50 issues, and the comment
+   ordering as unverified against reality, which is exactly the state this
+   file's smoke-test rule exists to make visible.
+
+   What the probe *did* confirm live: `/search/jql` answers a final page with
+   `isLast` and no token, which is the shape the pagination reads, and Jira
+   still refuses an unbounded JQL outright.
+
+2. **`main` is ahead of `origin/main`.** The remote sits at `73ca68e`
+   (`chore: addon 0.1.3`); S10 and S11 are local only. Pushing is a
+   deliberate act nobody has asked for yet — and note that publishing the S4
+   add-on image is a tag, not a branch push, so a `main` push alone changes
+   nothing an operator installs.
+
+The open issues below are the rest of the backlog. None is scheduled.
 
 ---
 
@@ -1004,7 +1033,9 @@ Real, deliberately deferred, tracked here so they are not lost.
   agent is reliably available. Note the same agent makes `git commit` **hang**
   inside scratch repositories created by tests — test fixtures disable signing
   locally for that reason.
-- **Nothing has ever been pushed.** `origin` exists but has no `main`.
+- **`origin/main` exists but trails.** It sits at `73ca68e`; every slice from
+  S10 on is local only. The older note here said nothing had ever been
+  pushed, which stopped being true.
 - **`home` is not a config key.** It is an argument to `load_config(path,
   home)`, defaulting to `~/.claudeloop`, and `validate()` silently ignores a
   `home =` line in a TOML file. S10's smoke test put one in a scratch config
