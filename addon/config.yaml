@@ -1,6 +1,6 @@
 name: ClaudeLoop
 slug: claudeloop
-version: "0.1.0"
+version: "0.1.1"
 description: >-
   Unattended orchestrator for Claude Code: one headless session per task,
   against one repository, surviving rate limits.
@@ -20,9 +20,14 @@ ingress: true
 ingress_port: 8765
 panel_icon: mdi:sync
 panel_title: ClaudeLoop
-# The repository is normally a URL ClaudeLoop clones into /data. share is for
-# an operator who would rather keep a checkout of their own on the box.
+# addon_config lands at /config in here and at addon_configs/<slug>/ for the
+# File editor and Samba add-ons -- the only place an operator with no shell
+# can put a task checklist that this add-on can also write. run.sh hands it to
+# the unprivileged user; /share cannot be handed over, since it is shared.
+# share is for an operator who would rather keep a checkout of their own on
+# the box, and has already dealt with its ownership.
 map:
+  - addon_config:rw
   - share:rw
 options:
   claude_code_oauth_token: ""

@@ -39,7 +39,17 @@ afterwards**, or the next restart opens the wizard again and waits there.
 The **repository** is normally a URL — `https://…`, `ssh://…`, or
 `git@host:owner/repo.git` — which is cloned once into `/data/.claudeloop/clones/`
 and worked in from there. A path also works if you keep a checkout under
-`/share`, which is mapped into the add-on.
+`/share`, which is mapped into the add-on — but sessions run unprivileged and
+`/share` belongs to root, so you have to make that checkout writable by uid
+1000 yourself. The clone is the path with nothing to arrange.
+
+The **tasks file** goes at `/config/tasks.md`, and the add-on creates an empty
+one on first start. That folder is the add-on's own: the File editor and Samba
+add-ons show it as `addon_configs/local_claudeloop/` (or `xxxxxxxx_claudeloop/`
+when installed from this repository), which is how you add tasks without a
+shell. Do not put the checklist on `/share`: ClaudeLoop marks each task off as
+it finishes, a task it cannot mark is offered and paid for again on every poll,
+and the setup wizard will refuse the path rather than let that happen.
 
 ## What persists, and what does not
 

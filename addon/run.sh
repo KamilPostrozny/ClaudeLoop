@@ -50,6 +50,28 @@ fi
 # instantly with no result file. Hand /data to the unprivileged user first --
 # it is HOME, and everything the loop writes goes under it.
 chown -R claudeloop:claudeloop /data
+# The add-on's own config folder, shown to the operator as
+# addon_configs/<slug>/ by the File editor and Samba add-ons. It is where a
+# task checklist goes: ClaudeLoop must be able to write the file to mark each
+# task off, and a task it cannot mark is offered -- and paid for -- again on
+# every poll. Ours alone, so handing it over is safe; /share is not.
+#
+# `if`, not `[ -d /config ] && chown ...`: under `set -e` a false test as the
+# last statement of the script's flow would end the add-on rather than skip a
+# line.
+if [ -d /config ]; then
+    if [ ! -e /config/tasks.md ]; then
+        # Something for the operator to edit, since the wizard cannot create
+        # it and an empty checklist just idles the loop with no explanation.
+        printf '%s\n' \
+            "# ClaudeLoop tasks. One task per line. \`- [ ]\` is pending;" \
+            "# ClaudeLoop rewrites it to \`- [x]\` when the task is done and" \
+            "# \`- [!]\` when it needs you. Anything else here is ignored." \
+            "" \
+            "- [ ] " > /config/tasks.md
+    fi
+    chown -R claudeloop:claudeloop /config
+fi
 
 # exec, so the loop is the process the supervisor's stop signal reaches rather
 # than a shell that would leave it orphaned. setpriv rather than su/runuser
