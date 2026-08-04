@@ -163,6 +163,45 @@ class StateTest(unittest.TestCase):
         self.assertEqual(one.task("abc")["status"], "running")
 
 
+class WasInterruptedTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "state.db"
+
+    def test_a_task_left_running_by_a_dead_process_reads_as_interrupted(self):
+        dying = State(self.path, "/repo")
+        dying.start_task("abc", "file", "- [ ] do it", "do it")
+
+        self.assertTrue(State(self.path, "/repo").was_interrupted("abc"))
+
+    def test_a_finished_task_does_not(self):
+        state = State(self.path, "/repo")
+        state.start_task("abc", "file", "- [ ] do it", "do it")
+        state.finish_task("abc", "done", "shipped", 0.1)
+
+        self.assertFalse(State(self.path, "/repo").was_interrupted("abc"))
+
+    def test_an_errored_task_does_not(self):
+        state = State(self.path, "/repo")
+        state.start_task("abc", "file", "- [ ] do it", "do it")
+        state.finish_task("abc", "error", "no disk", 0.0)
+
+        self.assertFalse(State(self.path, "/repo").was_interrupted("abc"))
+
+    def test_a_task_that_never_ran_does_not(self):
+        self.assertFalse(State(self.path, "/repo").was_interrupted("abc"))
+
+    def test_another_repositorys_interruption_does_not_count(self):
+        # `id` is the primary key on its own, so two repositories whose file
+        # sources hold identical task text share a row. Answering yes here
+        # would resume a session id belonging to the other repository.
+        dying = State(self.path, "/repo/one")
+        dying.start_task("abc", "file", "- [ ] do it", "do it")
+        State(self.path, "/repo/one")  # flips /repo/one's row to interrupted
+
+        self.assertFalse(State(self.path, "/repo/two").was_interrupted("abc"))
+
+
 class TerminalIdsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

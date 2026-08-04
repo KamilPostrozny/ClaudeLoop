@@ -21,6 +21,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S7** | Proposed plugin set | merged, reversed by S8 |
 | **S4** | Home Assistant OS addon | merged |
 | **S8** | Repository-owned plugins | merged |
+| **S9** | Resume an interrupted task | merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -617,6 +618,77 @@ is untouched, and so is the `--scope user` constraint.
 No spec of its own: the finding above *is* the design, and it is recorded
 here rather than in a document that would only repeat it.
 
+### S9 — Resume an interrupted task
+
+Restarting ClaudeLoop mid-task used to throw that task's session away and
+start it over from the original task text — on a worktree that already held
+the dead session's commits and uncommitted edits, which the fresh session was
+told nothing about.
+
+Almost all of the recovery already existed and stopped one step short.
+`State.__init__` flips a `running` row to `interrupted`, `terminal_ids()`
+excludes `interrupted` so the source offers the task back, `worktree.ensure`
+reuses the tree, and `last_session()` holds the id to resume. What was missing
+was the join: `run_task` only reached `last_session` when it had an answer to
+deliver, so an interrupted task took the fresh-start branch.
+
+Now `run_task` asks `State.was_interrupted(task.id)` **before** `start_task`
+(which is `INSERT OR REPLACE` and would erase the status), and on a yes
+resumes that session with `INTERRUPTED_PROMPT` — which says the process was
+restarted, names `git status` and `git log` rather than saying "check what you
+did", forbids starting over, and still demands the result file.
+`FRESH_INTERRUPTED_PROMPT` covers the case where the session is gone, exactly
+as `FRESH_ANSWER_PROMPT` does for a parked task. `source.start` no longer
+re-fires: its skip condition widened from "resuming with an answer" to
+"resuming at all", since an interrupted task already fired
+`transition_start` on the attempt that died.
+
+The selection moved out of `run_task` into `opening_prompt(task_text,
+resume_with, resumed, interrupted)`, pure, joining `decide` and
+`blocking_reset`. Four prompts chosen by three inputs is exactly the shape
+that produced S7's live failure, and every combination is now pinned against
+the whole rendered string. An answer outranks an interruption, for a task
+that is both.
+
+Two deliberate limits. **`error` does not resume**: it is non-terminal too,
+but its causes are environment faults that can happen before any session
+exists, and `--resume` against an id that never ran fails silently — the same
+failure this file already records for tasks parked across the S6 upgrade.
+**`was_interrupted` is repo-scoped**, like `terminal_ids()` and `blocked()`,
+and here that is load-bearing rather than tidy: `tasks.id` is the primary key
+on its own, so an unscoped read could answer yes on another loop's
+interruption and resume a transcript belonging to a different repository's
+worktree.
+
+Not built: config is still read once in `main()`. Restarting is now cheap,
+which is what an operator needed; hot-reload is in the open issues below.
+
+**Live smoke test** — two scratch repositories, `model = "haiku"`, two tasks
+each, `SIGKILL` on the loop mid-first-task, then a restart. Both cases the
+slice has to handle came up, the second only because the first attempt to
+provoke the first one missed:
+
+- *Killed after the session wrote `result.json`, before the loop read it.*
+  Row left `running`, run row with no `exit_reason` — the narrow window, hit
+  by accident because haiku finished a two-commit task faster than the poll
+  that was watching for it. The resumed session ran `git status && git log
+  --oneline -5`, said "Work already done. Both commits present.", and wrote
+  the result file. No commits redone; the branch kept the two SHAs the dead
+  session's own summary had named.
+- *Killed genuinely mid-work*, two of five steps committed. The resumed
+  session opened with `git log --oneline -10 && git status` and carried on at
+  step 3. The branch ended with five commits in order, steps 1 and 2 still
+  the pre-kill SHAs.
+
+Both runs reused the dead session's id across the restart, so `--resume`
+reattaches to a session whose process is gone, not merely one this process
+started. The second task ran normally afterwards, on its own branch cut from
+the default rather than from the resumed task's.
+
+No defects found — the third such run out of nine. What it did confirm is the
+sentence the slice turns on: naming `git status` and `git log` produced that
+exact command as the resumed session's first action in both runs.
+
 ---
 
 ## Next
@@ -663,6 +735,26 @@ Real, deliberately deferred, tracked here so they are not lost.
   supported path is a URL cloned into `/data`, which the loop's own user owns;
   the `share:rw` mapping is for an operator who has already dealt with the
   ownership.
+- **`config.toml` is read once, in `main()`.** `build_source` runs once before
+  the poll loop, so every key — the Jira credentials, the JQL, the transition
+  names, `model`, `max_resumes` — is fixed for the life of the process. An
+  operator who gets one wrong has to restart. S9 made that cheap rather than
+  free: the running task now resumes its session instead of starting over.
+  Hot-reload is not obviously worth building on top of that, and would need a
+  per-key allowlist regardless — `repo`, `home` and the worktree root are not
+  safely swappable under a task that is mid-flight.
+- **A transition name that Jira reports in another language never matches.**
+  `_transition` compares the operator's configured name against
+  `/issue/{key}/transitions`, which returns each transition's *display* name,
+  localised. Jira's built-in statuses are translated per account — a Polish
+  site reports `Do zrobienia` / `W toku` / `Gotowe` — so `transition_done =
+  "In Progress"` silently never fires, warning once per task and leaving the
+  issue where it is. JQL is unaffected, because there Jira resolves the
+  untranslated canonical name, so the *pickup* side of the same config works:
+  `status = "To Do"` matches an issue displaying `Do zrobienia`. Observed
+  live. The workaround is to configure the localised names; the fix is to
+  match on the transition id and `to.statusCategory.key` (`indeterminate` /
+  `done`, which never translate) as well as the name.
 - `Config` has a `dict` field, so it is unhashable. Nothing hashes it.
 - `JiraSource.pending` fetches one page of 50 issues and never paginates, so an
   ordering that puts wanted work past the 50th row never reaches it.

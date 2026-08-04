@@ -202,6 +202,100 @@ class ResumePromptTest(unittest.TestCase):
 
         self.assertIn("genuinely need a human to decide", NUDGE_PROMPT)
 
+    def test_the_interrupted_prompt_says_what_happened_and_forbids_starting_over(self):
+        # The whole point of the slice: a session that comes back after a
+        # restart is standing on its own commits and must not redo them.
+        text = loop.INTERRUPTED_PROMPT
+        self.assertIn("ClaudeLoop was restarted while you were working", text)
+        self.assertIn("rather than starting the task over", text)
+        self.assertIn("do not redo it", text)
+
+    def test_the_interrupted_prompt_tells_the_session_how_to_look(self):
+        # "Check what you had already done" without naming the commands is an
+        # instruction a literal-minded session can satisfy by guessing.
+        text = loop.INTERRUPTED_PROMPT
+        self.assertIn("git status", text)
+        self.assertIn("git log", text)
+
+    def test_the_interrupted_prompt_still_demands_the_result_file(self):
+        text = loop.INTERRUPTED_PROMPT
+        self.assertIn("CLAUDELOOP_RESULT", text)
+        self.assertIn("not your last message", text)
+
+    def test_the_fresh_interrupted_prompt_carries_the_task_and_warns_about_the_branch(self):
+        rendered = loop.FRESH_INTERRUPTED_PROMPT.format(task="do a thing")
+
+        self.assertIn("do a thing", rendered)
+        self.assertIn("any commits an earlier attempt made", rendered)
+        self.assertIn("look before you redo work that is already done", rendered)
+
+    def test_the_fresh_interrupted_prompt_still_demands_the_result_file(self):
+        rendered = loop.FRESH_INTERRUPTED_PROMPT.format(task="do a thing")
+
+        self.assertIn("CLAUDELOOP_RESULT", rendered)
+
+    def test_the_four_opening_prompts_are_all_different(self):
+        # Each says something the others do not; a copy-paste that collapsed
+        # two of them would take a real instruction away silently.
+        rendered = {
+            loop.ANSWER_PROMPT.format(answer="use EUR"),
+            loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR"),
+            loop.INTERRUPTED_PROMPT,
+            loop.FRESH_INTERRUPTED_PROMPT.format(task="do a thing"),
+        }
+        self.assertEqual(len(rendered), 4)
+
+
+class OpeningPromptTest(unittest.TestCase):
+    """Which prompt opens an invocation, and whether it resumes.
+
+    Pure, and pinned on the whole rendered string rather than a substring:
+    S7's live failure was a sentence that lost its verb under a combination
+    seven passing substring tests never assembled.
+    """
+
+    def test_a_first_attempt_sends_the_task_text_without_resuming(self):
+        self.assertEqual(
+            loop.opening_prompt("do the thing", None, None, False),
+            ("do the thing", False),
+        )
+
+    def test_an_answered_task_with_a_session_resumes_with_the_answer(self):
+        self.assertEqual(
+            loop.opening_prompt("do the thing", "use EUR", "sess", False),
+            (loop.ANSWER_PROMPT.format(answer="use EUR"), True),
+        )
+
+    def test_an_answered_task_without_a_session_starts_over_with_the_answer(self):
+        self.assertEqual(
+            loop.opening_prompt("do the thing", "use EUR", None, False),
+            (
+                loop.FRESH_ANSWER_PROMPT.format(task="do the thing", answer="use EUR"),
+                False,
+            ),
+        )
+
+    def test_an_interrupted_task_with_a_session_resumes_it(self):
+        self.assertEqual(
+            loop.opening_prompt("do the thing", None, "sess", True),
+            (loop.INTERRUPTED_PROMPT, True),
+        )
+
+    def test_an_interrupted_task_without_a_session_starts_over_warned(self):
+        self.assertEqual(
+            loop.opening_prompt("do the thing", None, None, True),
+            (loop.FRESH_INTERRUPTED_PROMPT.format(task="do the thing"), False),
+        )
+
+    def test_an_answer_outranks_an_interruption(self):
+        # A task can be both: parked, answered, and then the process died
+        # before the resumed session got anywhere. The answer is the newer
+        # fact, and the prompt that carries it is the one that must win.
+        self.assertEqual(
+            loop.opening_prompt("do the thing", "use EUR", "sess", True),
+            (loop.ANSWER_PROMPT.format(answer="use EUR"), True),
+        )
+
 
 class SleepDelayTest(unittest.TestCase):
     def test_normal_wait_is_unclamped(self):
@@ -352,6 +446,27 @@ class MainLoopTest(unittest.TestCase):
         self.assertEqual(runs[1]["exit_reason"], "ReadResult")
         # The resume must reuse the session, not start a fresh one.
         self.assertEqual(runs[0]["session_id"], runs[1]["session_id"])
+
+    def test_a_task_left_running_by_a_dead_process_resumes_on_the_next_start(self):
+        # The whole chain the slice joins up: State.__init__ flips the row to
+        # 'interrupted', terminal_ids() leaves it out so the source offers it
+        # back, and run_task resumes rather than starting over. Written as an
+        # integration test because each of those three was already correct on
+        # its own -- what was missing was them meeting.
+        self.tasks.write_text("- [ ] first thing\n")
+        source = FileSource(self.tasks)
+        task = source.pending()[0]
+        dying = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        dying.start_task(task.id, task.source, task.source_ref, task.text)
+        dying.start_run(task.id, "session-that-died", 0)
+        args_out = self.tmp / "args.txt"
+        os.environ["FAKE_ARGS_OUT"] = str(args_out)
+        self.addCleanup(os.environ.pop, "FAKE_ARGS_OUT", None)
+
+        asyncio.run(loop.main_loop(self.cfg, once=True))
+
+        self.assertIn("--resume session-that-died", args_out.read_text())
+        self.assertEqual(self.tasks.read_text(), "- [x] first thing\n")
 
     def test_gives_up_after_max_resumes_and_marks_for_attention(self):
         # A CLI that never writes a result: every invocation is a nudge.
@@ -1079,6 +1194,172 @@ class ResumeWithAnswerTest(unittest.TestCase):
         self.assertEqual(result["status"], "done")
         row = self.state.db.execute("SELECT * FROM tasks WHERE id=?",
                                     (self.task.id,)).fetchone()
+        self.assertEqual(row["status"], "done")
+
+
+class ResumeInterruptedTest(unittest.TestCase):
+    """A task whose process died mid-run resumes its session instead of
+    starting over on top of its own half-finished work.
+
+    Same fake-CLI fixture as ResumeWithAnswerTest, duplicated for the same
+    reason: subclassing a TestCase re-runs every parent test.
+    """
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        repo = self.tmp / "repo"
+        make_repo(repo)
+        self.tasks = self.tmp / "tasks.md"
+        self.tasks.write_text("- [ ] first thing\n")
+        self.cfg = Config(
+            repo=repo,
+            tasks_file=self.tasks,
+            home=self.tmp / "home",
+            max_resumes=3,
+        )
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+        self.args_out = self.tmp / "args.txt"
+        os.environ["FAKE_ARGS_OUT"] = str(self.args_out)
+        self.state = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        self.source = FileSource(self.tasks)
+        self.task = self.source.pending()[0]
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_ARGS_OUT", None)
+
+    def interrupt(self, session: str | None = "session-that-died") -> str | None:
+        """Leave the task exactly as a killed process leaves it: a row that
+        was 'running', which State.__init__ has since flipped to
+        'interrupted', and the run rows that process wrote.
+
+        Reopening the database is what does the flip, rather than an UPDATE
+        of our own -- so the test exercises the recovery that ships instead
+        of a hand-made imitation of it.
+        """
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        if session is not None:
+            self.state.start_run(self.task.id, session, 0)
+        self.state = State(self.cfg.home / "state.db", str(self.cfg.repo))
+        return session
+
+    def args(self) -> str:
+        return self.args_out.read_text()
+
+    def test_startup_leaves_the_row_interrupted(self):
+        # The premise every other test here rests on.
+        self.interrupt()
+
+        row = self.state.task(self.task.id)
+        self.assertEqual(row["status"], "interrupted")
+
+    def test_an_interrupted_task_resumes_the_session_that_died(self):
+        session = self.interrupt()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertIn(f"--resume {session}", self.args())
+        runs = self.state.db.execute(
+            "SELECT session_id FROM runs ORDER BY id").fetchall()
+        self.assertEqual([row["session_id"] for row in runs], [session, session])
+
+    def test_an_interrupted_task_sends_the_interrupted_prompt(self):
+        self.interrupt()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertIn("ClaudeLoop was restarted while you were working",
+                      self.args())
+        self.assertIn("rather than starting the task over", self.args())
+
+    def test_an_interrupted_task_does_not_re_fire_the_source_start_hook(self):
+        # start already fired on the attempt that died. Under the Jira source
+        # it is a transition, and re-firing it against an issue already in
+        # that status is the case the answered-resume skip was written for.
+        started = []
+        self.source.start = lambda task: started.append(task)
+        self.interrupt()
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertEqual(started, [])
+
+    def test_an_interrupted_task_with_no_prior_session_starts_over_warned(self):
+        self.interrupt(session=None)
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertNotIn("--resume", self.args())
+        self.assertIn("first thing", self.args())
+        self.assertIn("look before you redo work that is already done",
+                      self.args())
+
+    def test_an_interrupted_task_returns_to_the_same_worktree(self):
+        # Where the dead session's commits and uncommitted edits are.
+        self.interrupt()
+        calls = []
+        real = loop.worktree.ensure
+
+        def spy(repo, root, task_id):
+            calls.append(task_id)
+            return real(repo, root, task_id)
+
+        with mock.patch.object(loop.worktree, "ensure", side_effect=spy):
+            asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertEqual(calls, [self.task.id])
+
+    def test_a_first_attempt_is_untouched_by_the_new_lookup(self):
+        # No row at all: the common path must not have acquired a resume.
+        started = []
+        self.source.start = lambda task: started.append(task)
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertNotIn("--resume", self.args())
+        self.assertIn("first thing", self.args())
+        self.assertEqual(started, [self.task])
+
+    def test_a_finished_task_run_again_does_not_resume(self):
+        # 'done' is terminal and a task source normally filters it out, but
+        # the status check must be the thing that decides, not the mere
+        # presence of a row with a session id behind it.
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.start_run(self.task.id, "session-that-finished", 0)
+        self.state.finish_task(self.task.id, "done", "shipped", 0.1, None)
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertNotIn("--resume", self.args())
+
+    def test_an_errored_task_does_not_resume(self):
+        # Deliberately out of scope: 'error' covers environment faults that
+        # can happen before any session exists, and --resume against an id
+        # that never ran fails silently.
+        self.state.start_task(self.task.id, self.task.source, self.task.source_ref,
+                              self.task.text)
+        self.state.finish_task(self.task.id, "error", "no disk", 0.0, None)
+
+        asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))
+
+        self.assertNotIn("--resume", self.args())
+
+    def test_an_interrupted_task_reaches_a_verdict_like_any_other(self):
+        self.interrupt()
+
+        result = asyncio.run(loop.run_task(self.cfg, self.state, self.source,
+                                           self.task))
+
+        self.assertEqual(result["status"], "done")
+        row = self.state.task(self.task.id)
         self.assertEqual(row["status"], "done")
 
 
