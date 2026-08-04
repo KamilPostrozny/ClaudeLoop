@@ -57,7 +57,19 @@ GUARD = (
 with no labels at all, which is most of a fresh backlog. The IS EMPTY
 disjunct is not defensive padding, it is the only correct idiom."""
 
+MAX_RECOVERED = 50
+"""How many stranded keys one recovery query may name.
+
+Bounded for the reason MAX_PAGES is: `tasks` only grows, and an unattended
+loop must not build an ever-longer query out of it. Oldest first, so the work
+that has waited longest is the work that comes back."""
+
 _ORDER_BY = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
+
+_ISSUE_KEY = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
+"""Jira's own issue-key shape, and the only thing between a `tasks` row and an
+injected JQL clause: `source_ref` arrives from a database column and is
+spliced into a query string, and JQL has no parameter binding."""
 
 
 def _in_string(text: str) -> bool:
@@ -105,6 +117,33 @@ def compose_jql(operator_jql: str) -> str:
     order = order.strip()
     composed = f"({where}) AND {GUARD}" if where else GUARD
     return f"{composed} ORDER BY {order}" if order else composed
+
+
+def recovery_jql(keys: list[str]) -> str:
+    """Find these issues whatever the operator's query selects on.
+
+    `pending()`'s backlog query cannot reach work ClaudeLoop has already
+    started: `start()` fires transition_start, which moves the issue to the
+    in-progress status, and an operator's JQL selects the backlog one. From
+    that moment the loop's only route back to its own unfinished task is by
+    key. Observed live -- KAN-13 was rate-limited, the process restarted, and
+    the loop idled forever beside a ticket it had itself moved out of view.
+
+    Two predicates ride along, and both are the point rather than padding:
+
+    `statusCategory != Done` is what stops a stranded row being resumed after
+    a human finished the ticket by hand -- which is exactly what happened to
+    the ticket this function was written for. The *category*, never a status
+    name: Jira translates those per account (the instance in question renders
+    Done as "Gotowe"), and matching on a translated name is the defect S9.1
+    already fixed once, in the transition matcher.
+
+    GUARD is the same label exclusion compose_jql splices in, so a mark()
+    whose label landed while the row stayed non-terminal still excludes.
+
+    Keys reach this validated by _ISSUE_KEY; nothing here quotes them.
+    """
+    return f"key IN ({', '.join(keys)}) AND statusCategory != Done AND {GUARD}"
 
 
 def task_text(key: str, summary: str | None, description: str | None) -> str:
@@ -381,6 +420,10 @@ class JiraSource:
     (below) is what covers that window -- it is not merely insurance against a
     label write that failed outright, it is load-bearing every time the loop
     polls again shortly after finishing a task.
+
+    `pending()` therefore runs two queries per poll, not one: the operator's
+    backlog, and a recovery by key for work this source itself pushed out of
+    that backlog when `start()` transitioned the issue. See `_stranded`.
     """
 
     def __init__(
@@ -397,7 +440,7 @@ class JiraSource:
         self.transition_start = transition_start
         self.transition_done = transition_done
 
-    def _search_pages(self, jql: str) -> list:
+    def _search_pages(self, jql: str, what: str = "backlog") -> list:
         """Every issue the query matches, across pages, up to MAX_PAGES.
 
         One page of 50 was all this ever read, so an ordering that put wanted
@@ -407,6 +450,12 @@ class JiraSource:
         A page that fails keeps the pages already read rather than discarding
         them: the loop can start on what did arrive, and the rest comes back
         on the next poll.
+
+        `what` names the query in this method's three warnings. Two different
+        queries run per poll -- the operator's backlog and S12's recovery by
+        key -- and an operator reading "could not read the Jira backlog" at
+        3am when it was actually the recovery that failed would look in
+        entirely the wrong place.
         """
         issues: list = []
         token = ""
@@ -418,26 +467,79 @@ class JiraSource:
                 # it is the first page. The loop idles POLL_S and asks again;
                 # a raise here would instead crash main_loop's task handler
                 # on every poll.
-                log.warning("could not read the Jira backlog (%s); retrying later", error)
+                log.warning("could not read the Jira %s (%s); retrying later",
+                            what, error)
                 return issues
             found = data.get("issues")
             if isinstance(found, list):
                 issues.extend(found)
             elif page == 0:
                 log.warning(
-                    "Jira returned no issues list (got %s); treating the"
-                    " backlog as empty", type(found).__name__,
+                    "Jira returned no issues list for the %s (got %s);"
+                    " treating it as empty", what, type(found).__name__,
                 )
                 return []
             token = str(data.get("nextPageToken") or "")
             if not token or data.get("isLast"):
                 return issues
         log.warning(
-            "stopped reading the Jira backlog after %s pages with more pages"
+            "stopped reading the Jira %s after %s pages with more pages"
             " still offered -- narrow the JQL if this is not a bug",
-            MAX_PAGES,
+            what, MAX_PAGES,
         )
         return issues
+
+    def _stranded(self) -> list:
+        """This source's own unfinished work, found by key rather than by the
+        operator's query.
+
+        `start()` moves an issue to the in-progress status, and an operator's
+        JQL selects the backlog one -- so from the moment a task starts, the
+        backlog query can no longer see it. That is invisible until something
+        interrupts the task: a restart leaves the row 'interrupted', and
+        `main_loop` takes work from `pending()` and `state.blocked()` only.
+        Neither reaches it, and the loop idles beside its own unfinished work
+        forever. Observed live on KAN-13, which sat that way through an
+        add-on upgrade until a human finished the ticket by hand.
+
+        A `FileSource` needs none of this: an interrupted task's line is
+        still `- [ ]`. Only a source whose backlog is a query can lose sight
+        of what it has already started.
+
+        Deliberately a second round trip rather than rebuilding the Task from
+        the row, which carries everything a Task needs. Jira is the authority
+        on whether the work is still wanted -- and in the very incident this
+        exists for, a human had closed the ticket in the meantime. See
+        recovery_jql for what stops it being resumed anyway.
+        """
+        if self.state is None:
+            return []
+        try:
+            rows = self.state.unfinished()
+        except sqlite3.Error as error:
+            # Same shape as the terminal_ids() guard below: a locked or
+            # corrupt database costs this poll its recovery, not the backlog.
+            log.warning(
+                "could not read state.db unfinished tasks (%s); not looking"
+                " for stranded work this poll", error,
+            )
+            return []
+        keys = []
+        for row in rows:
+            if row["source"] != "jira":
+                continue  # one state.db can hold another source's rows
+            key = (row["source_ref"] or "").strip()
+            if not _ISSUE_KEY.match(key):
+                log.warning(
+                    "not asking Jira about %r: it is not an issue key, and"
+                    " this value would be spliced into a JQL query", key,
+                )
+                continue
+            keys.append(key)
+        if not keys:
+            return []
+        return self._search_pages(recovery_jql(keys[:MAX_RECOVERED]),
+                                  "recovery query for stranded work")
 
     def pending(self) -> list[Task]:
         issues = self._search_pages(compose_jql(self.jql))
@@ -459,12 +561,18 @@ class JiraSource:
                 )
                 done = set()
         tasks = []
-        for issue in issues:
+        seen = set()
+        # Stranded work first, and first in the list main_loop takes [0] from:
+        # money is already spent on it, a worktree already exists for it, and
+        # its session may still be resumable. A transition Jira refused leaves
+        # the issue in both answers, hence `seen`.
+        for issue in self._stranded() + issues:
             if not isinstance(issue, dict):
                 continue
             key = issue.get("key")
-            if not key:
+            if not key or key in seen:
                 continue
+            seen.add(key)
             identifier = task_id(key)
             if identifier in done:
                 # Most often Jira's search index has not yet caught up with

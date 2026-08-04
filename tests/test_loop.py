@@ -12,7 +12,7 @@ from unittest import mock
 
 from claudeloop import loop, status
 from claudeloop.config import Config, JiraConfig
-from claudeloop.jira import JiraSource
+from claudeloop.jira import SEARCH_PATH, JiraSource
 from claudeloop.loop import (
     FALLBACK_WAIT_S,
     MAX_WAIT_S,
@@ -31,6 +31,7 @@ from claudeloop.source import FileSource, Task, task_id
 from claudeloop.state import State
 
 from .gitrepo import make_repo
+from .jira_fake import FakeJira
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -1407,6 +1408,7 @@ class ResumeInterruptedTest(unittest.TestCase):
         self.assertEqual(row["status"], "done")
 
 
+
 class AnsweredScanTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -1736,6 +1738,95 @@ class AnsweredMainLoopTest(unittest.TestCase):
         self.assertIn(f"{parked['id']}.txt", files)
         self.assertNotIn(f"{others[0]}.txt", files,
                          "the resumed task must not carry the intervening task's work")
+
+
+class StrandedMainLoopTest(unittest.TestCase):
+    """S12, end to end: a Jira task the operator's own JQL can no longer see
+    comes back and resumes, rather than the loop idling beside it.
+
+    The whole chain in one test, because every link existed and worked before
+    this slice and the loop still went idle: state.db's row, the recovery
+    query, the Task built from its answer, and run_task's resume branch.
+    """
+
+    def setUp(self):
+        status.reset()
+        self.tmp = Path(tempfile.mkdtemp())
+        make_repo(self.tmp / "repo")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        shutil.copy(Path(__file__).parent / "fake_claude.sh", bin_dir / "claude")
+        (bin_dir / "claude").chmod(0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self.old_path}"
+        self.args_out = self.tmp / "args.txt"
+        os.environ["FAKE_ARGS_OUT"] = str(self.args_out)
+
+    def tearDown(self):
+        os.environ["PATH"] = self.old_path
+        os.environ.pop("FAKE_ARGS_OUT", None)
+
+    def config(self, site: str) -> Config:
+        return Config(
+            repo=self.tmp / "repo",
+            home=self.tmp / "home",
+            max_resumes=3,
+            source="jira",
+            jira=JiraConfig(site, "me@example.com", "secret",
+                            'project = KAN AND status = "To Do"'),
+        )
+
+    def strand(self, cfg: Config, key: str) -> tuple[str, str]:
+        """Leave `key` exactly as a killed process leaves it: a row that was
+        'running', which the next State() flips to 'interrupted', plus the
+        run row naming the session that died."""
+        state = State(cfg.home / "state.db", str(cfg.repo))
+        identifier = task_id(key)
+        state.start_task(identifier, "jira", key, f"{key}: do a thing")
+        state.start_run(identifier, "session-that-died", 0)
+        state.close()
+        return identifier, "session-that-died"
+
+    def test_a_stranded_task_comes_back_and_resumes_its_session(self):
+        fake = FakeJira({
+            # The operator's backlog query: the issue moved to In Progress
+            # when ClaudeLoop started it, so this no longer matches it.
+            f"POST {SEARCH_PATH}": [
+                (200, {"issues": []}),
+                (200, {"issues": [{"key": "KAN-13", "fields": {
+                    "summary": "do a thing", "description": ""}}]}),
+            ],
+            "GET /issue/KAN-13/transitions": (200, {"transitions": []}),
+            "POST /issue/KAN-13/comment": (200, {}),
+            "PUT /issue/KAN-13": (200, {}),
+        })
+        self.addCleanup(fake.close)
+        cfg = self.config(fake.url)
+        identifier, session = self.strand(cfg, "KAN-13")
+
+        asyncio.run(loop.main_loop(cfg, once=True))
+
+        self.assertIn(f"--resume {session}", self.args_out.read_text())
+        state = State(cfg.home / "state.db", str(cfg.repo))
+        self.assertEqual(state.task(identifier)["status"], "done")
+
+    def test_the_loop_idles_when_jira_says_the_issue_is_no_longer_wanted(self):
+        # What the recovery query's `statusCategory != Done` is for: a human
+        # finished the ticket by hand while the loop was down. Jira answers
+        # the recovery query with nothing, and the work is not paid for twice.
+        fake = FakeJira({f"POST {SEARCH_PATH}": [
+            (200, {"issues": []}),
+            (200, {"issues": []}),
+        ]})
+        self.addCleanup(fake.close)
+        cfg = self.config(fake.url)
+        identifier, _ = self.strand(cfg, "KAN-13")
+
+        asyncio.run(loop.main_loop(cfg, once=True))
+
+        self.assertFalse(self.args_out.exists(), "no session may have started")
+        state = State(cfg.home / "state.db", str(cfg.repo))
+        self.assertEqual(state.task(identifier)["status"], "interrupted")
 
 
 class MainSetupTest(unittest.TestCase):

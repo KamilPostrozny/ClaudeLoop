@@ -280,6 +280,32 @@ class State:
             (self.repo,),
         ).fetchall()
 
+    def unfinished(self) -> list[sqlite3.Row]:
+        """Tasks that started and reached no verdict, oldest first.
+
+        Exactly the complement of terminal_ids(), less 'running' -- which is
+        the task this process is working on right now, and offering that back
+        would have the loop pick up what it is already doing.
+
+        A source whose backlog is a file does not need this: an interrupted
+        task's line is still `- [ ]` and comes back on the next poll by
+        itself. A source whose backlog is a *query* can lose sight of work it
+        has already started -- JiraSource.start moves the issue to the
+        operator's in-progress status, and an operator's JQL usually selects
+        the backlog one. This is how it finds that work again; see
+        JiraSource._stranded.
+
+        Repo-scoped for the reason was_interrupted() is: tasks.id is not a key
+        on its own, so an unscoped read could hand another loop's stranded
+        work to this one, in a worktree cut from a different repository.
+        """
+        return self.db.execute(
+            "SELECT id, source, source_ref, text FROM tasks"
+            " WHERE status IN ('interrupted', 'error') AND repo IS ?"
+            " ORDER BY started_at",
+            (self.repo,),
+        ).fetchall()
+
     def last_session(self, task_id: str) -> str | None:
         """The session id of this task's most recent run.
 

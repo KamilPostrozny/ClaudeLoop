@@ -11,7 +11,7 @@ from claudeloop import jira
 from claudeloop.jira import (
     BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
     JiraSource, closing_comment, compose_jql, main, match_transitions,
-    task_text,
+    recovery_jql, task_text,
 )
 from claudeloop.source import Task, task_id
 from claudeloop.state import State
@@ -122,6 +122,35 @@ class JiraClientTest(unittest.TestCase):
         # main_loop's try/except.
         client = self.client({f"POST {SEARCH_PATH}": (200, ["not", "a", "dict"])})
         self.assertEqual(client.search("project = OPS"), {})
+
+
+class RecoveryJqlTest(unittest.TestCase):
+    """The query that finds work the operator's own JQL can no longer see,
+    because ClaudeLoop's transition_start moved the issue out of it."""
+
+    def test_names_the_keys_and_excludes_closed_and_labelled_issues(self):
+        # Pinned whole rather than by substring: S7's live failure was a
+        # sentence assembled from fragments where every substring assertion
+        # passed and the composed string still said nothing.
+        self.assertEqual(
+            recovery_jql(["KAN-1", "KAN-13"]),
+            'key IN (KAN-1, KAN-13) AND statusCategory != Done AND '
+            '(labels IS EMPTY OR labels NOT IN ("claudeloop-done", '
+            '"claudeloop-blocked"))',
+        )
+
+    def test_the_status_predicate_is_the_category_not_a_status_name(self):
+        # Jira translates status names per account -- "Done" displays as
+        # "Gotowe" on the instance this slice came from -- so a name here
+        # would be the same defect S9.1 fixed in the transition matcher. The
+        # three category keys never translate.
+        composed = recovery_jql(["KAN-1"])
+        self.assertIn("statusCategory != Done", composed)
+
+    def test_carries_the_same_label_guard_as_the_backlog_query(self):
+        # A mark() whose label landed while the row stayed non-terminal must
+        # still exclude the issue.
+        self.assertIn(GUARD, recovery_jql(["KAN-1"]))
 
 
 class ComposeJqlTest(unittest.TestCase):
@@ -308,11 +337,25 @@ class LabelsTest(unittest.TestCase):
 
 
 class FakeState:
-    def __init__(self, ids=()):
+    def __init__(self, ids=(), unfinished_rows=(), unfinished_error=None):
         self.ids = set(ids)
+        self.rows = list(unfinished_rows)
+        self.unfinished_error = unfinished_error
 
     def terminal_ids(self):
         return self.ids
+
+    def unfinished(self):
+        if self.unfinished_error is not None:
+            raise self.unfinished_error
+        return self.rows
+
+
+def stranded_row(key: str, source: str = "jira") -> dict:
+    """A `tasks` row as State.unfinished() hands it over. sqlite3.Row and dict
+    are both subscriptable by column name, which is all _stranded reads."""
+    return {"id": task_id(key), "source": source,
+            "source_ref": key, "text": f"{key}: do it"}
 
 
 class JiraSourceTest(unittest.TestCase):
@@ -386,6 +429,183 @@ class JiraSourceTest(unittest.TestCase):
 
     def issue(self, key: str) -> dict:
         return {"key": key, "fields": {"summary": f"do {key}", "description": ""}}
+
+    # --- S12: work the operator's own JQL can no longer see ----------------
+    #
+    # JiraSource.start fires transition_start, which moves the issue to the
+    # in-progress status; an operator's JQL selects the backlog one. From that
+    # moment the backlog query cannot reach a task ClaudeLoop itself started,
+    # and a restart leaves it stranded at 'interrupted' with nothing to offer
+    # it back. Observed live on KAN-13, which idled beside a running loop
+    # until a human finished it by hand.
+
+    def test_pending_recovers_a_task_the_backlog_query_no_longer_matches(self):
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, {"issues": []}),                       # the backlog
+                (200, {"issues": [self.issue("KAN-13")]}),   # the recovery
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        self.assertEqual([t.source_ref for t in source.pending()], ["KAN-13"])
+
+    def test_the_recovery_query_names_this_repositorys_stranded_keys(self):
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, {"issues": []}),
+                (200, {"issues": []}),
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-1"),
+                                             stranded_row("KAN-13")]),
+        )
+
+        source.pending()
+
+        self.assertEqual(self.fake.requests[1][2]["jql"],
+                         recovery_jql(["KAN-1", "KAN-13"]))
+
+    def test_recovered_work_is_offered_before_the_backlog(self):
+        # main_loop takes pending[0]. Money is already spent on the stranded
+        # task, a worktree already exists for it, and its session may still be
+        # resumable -- it outranks work nobody has started.
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, {"issues": [self.issue("OPS-1")]}),
+                (200, {"issues": [self.issue("KAN-13")]}),
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        self.assertEqual([t.source_ref for t in source.pending()],
+                         ["KAN-13", "OPS-1"])
+
+    def test_an_issue_in_both_answers_is_offered_once(self):
+        # A transition that Jira refused leaves the issue in the backlog
+        # status, so both queries return it.
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, {"issues": [self.issue("KAN-13"), self.issue("OPS-1")]}),
+                (200, {"issues": [self.issue("KAN-13")]}),
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        self.assertEqual([t.source_ref for t in source.pending()],
+                         ["KAN-13", "OPS-1"])
+
+    def test_nothing_stranded_means_no_second_query(self):
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
+                             state=FakeState())
+
+        source.pending()
+
+        self.assertEqual(len(self.fake.requests), 1)
+
+    def test_a_stranded_row_from_another_source_is_not_asked_about(self):
+        # One state.db can hold rows a file source wrote. `- [ ] do a thing`
+        # is not an issue key and Jira has nothing to say about it.
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
+                             state=FakeState(unfinished_rows=[
+                                 stranded_row("- [ ] a thing", source="file")]))
+
+        source.pending()
+
+        self.assertEqual(len(self.fake.requests), 1)
+
+    def test_a_source_ref_that_is_not_an_issue_key_never_reaches_the_query(self):
+        # source_ref comes out of a database column and is spliced into a
+        # query string; JQL has no parameter binding. This is the only thing
+        # standing between the two.
+        injected = 'KAN-1) OR (project = SECRET'
+        source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
+                             state=FakeState(unfinished_rows=[
+                                 stranded_row(injected)]))
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.pending()
+
+        self.assertEqual(len(self.fake.requests), 1)
+        self.assertIn(injected, "".join(logs.output))
+
+    def test_the_recovery_query_is_bounded(self):
+        rows = [stranded_row(f"KAN-{index}") for index in range(1, 120)]
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [(200, {"issues": []}), (200, {"issues": []})]},
+            state=FakeState(unfinished_rows=rows),
+        )
+
+        source.pending()
+
+        keys = self.fake.requests[1][2]["jql"].split("(", 1)[1].split(")", 1)[0]
+        self.assertEqual(len(keys.split(", ")), jira.MAX_RECOVERED)
+
+    def test_an_unreadable_state_db_leaves_the_backlog_working(self):
+        source = self.source(
+            {f"POST {SEARCH_PATH}": (200, last_page())},
+            state=FakeState(unfinished_error=sqlite3.OperationalError("locked")),
+        )
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            tasks = source.pending()
+
+        self.assertEqual([t.source_ref for t in tasks], ["OPS-1", "OPS-2"])
+
+    def test_a_recovered_issue_already_terminal_in_the_database_is_dropped(self):
+        # Belt and braces with the statusCategory predicate: if a row somehow
+        # reads terminal while the issue still answers the recovery query, the
+        # existing backstop still has to win.
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, {"issues": []}),
+                (200, {"issues": [self.issue("KAN-13")]}),
+            ]},
+            state=FakeState(ids={task_id("KAN-13")},
+                            unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            self.assertEqual(source.pending(), [])
+
+    def test_a_failing_recovery_query_says_which_query_failed(self):
+        # Two queries run per poll. "could not read the Jira backlog" when it
+        # was the recovery that failed sends an operator to the wrong config
+        # line at 3am.
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, last_page()),
+                (500, {"errorMessages": ["boom"]}),
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.pending()
+
+        self.assertIn("recovery query for stranded work", "".join(logs.output))
+        self.assertNotIn("could not read the Jira backlog", "".join(logs.output))
+
+    def test_a_failing_backlog_query_still_names_the_backlog(self):
+        source = self.source({f"POST {SEARCH_PATH}": (500, {"errorMessages": ["x"]})})
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.pending()
+
+        self.assertIn("could not read the Jira backlog", "".join(logs.output))
+
+    def test_a_failing_recovery_query_leaves_the_backlog_result_intact(self):
+        source = self.source(
+            {f"POST {SEARCH_PATH}": [
+                (200, last_page()),
+                (500, {"errorMessages": ["boom"]}),
+            ]},
+            state=FakeState(unfinished_rows=[stranded_row("KAN-13")]),
+        )
+
+        with self.assertLogs("claudeloop", level="WARNING"):
+            tasks = source.pending()
+
+        self.assertEqual([t.source_ref for t in tasks], ["OPS-1", "OPS-2"])
 
     def test_pending_follows_the_next_page_token(self):
         # One page of 50 was all pending() ever read, so an ordering that put
@@ -562,9 +782,12 @@ class JiraSourceTest(unittest.TestCase):
         self.assertEqual([t.source_ref for t in source.pending()], ["OPS-7"])
 
     def test_pending_survives_a_database_that_will_not_answer(self):
-        # a state whose terminal_ids() raises sqlite3.Error
+        # a state whose every read raises sqlite3.Error
         class BrokenState:
             def terminal_ids(self):
+                raise sqlite3.OperationalError("database is locked")
+
+            def unfinished(self):
                 raise sqlite3.OperationalError("database is locked")
         source = self.source({f"POST {SEARCH_PATH}": (200, last_page())},
                              state=BrokenState())
