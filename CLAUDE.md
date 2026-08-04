@@ -309,12 +309,24 @@ its findings fixed.
 Do not push or open pull requests without being asked. `origin` is
 `github.com:KamilPostrozny/ClaudeLoop`.
 
-**Publishing the S4 addon image is a tag, not a branch push.**
-`.github/workflows/addon.yml` triggers on `addon-v*` tags and on
-`workflow_dispatch`, and on nothing else — this file used to say pushing
-`main` did it, which was wrong. Releasing means: bump `version:` in
-`addon/config.yaml`, commit, push `main`, then push a matching
-`addon-v<version>` tag. `config.yaml`'s version is the single source of
-truth — the workflow reads it out of the file rather than off the tag, and
-the supervisor pulls `image:version`, so a tag naming a version the file
-does not carry publishes an image nobody can install.
+**Releasing the S4 addon image is a version bump, and nothing else.**
+`.github/workflows/addon.yml` triggers on every push to `main`, and a `gate`
+job decides whether that push is a release: it asks the registry whether
+`addon/config.yaml`'s `version:` is already published, and builds only when it
+is not. So a push that changes code or docs without touching that line is a
+no-op, and a push that bumps it publishes. `config.yaml`'s version is the
+single source of truth — the workflow reads it out of the file, and the
+supervisor pulls `image:version`.
+
+That gate is the whole safety of triggering on a branch. Republishing an
+existing version silently changes what an operator already has installed,
+under a version string that says nothing changed, and moves `latest` under
+them too. Do not weaken it into "build on every push"; the `force` dispatch
+input exists for the one case that genuinely wants an overwrite.
+
+Two consequences worth knowing. **A release is only as deliberate as the
+version bump** — merging a slice to `main` with the version untouched ships
+nothing, which is the intended default. And **`addon-v*` tags still trigger a
+publish** but are no longer how a release is made; they are a manual re-run
+path. This file used to say the opposite, and before that said something else
+again — check the workflow, not your memory.
