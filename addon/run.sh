@@ -25,6 +25,24 @@ else
         "and paste the result into this add-on's configuration."
 fi
 
+# A private repository has no other way to authenticate in here: there is no
+# terminal for a credential prompt (GIT_TERMINAL_PROMPT=0 makes git say so
+# rather than hang), no SSH agent, and no keyring. The helper reads GH_TOKEN
+# out of the environment rather than storing the token in .gitconfig, and it
+# covers all three users of it -- the wizard's repository check, the startup
+# clone, and a session pushing a branch -- because every one of them inherits
+# this process's environment. GH_TOKEN is what the gh CLI reads, too.
+if bashio::config.has_value 'github_token'; then
+    export GH_TOKEN="$(bashio::config 'github_token')"
+    git config --global credential.https://github.com.helper \
+        '!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f'
+else
+    # Removing the option has to remove the helper: left behind, it answers
+    # every prompt with an empty password instead of letting git try
+    # something else.
+    git config --global --unset-all credential.https://github.com.helper || true
+fi
+
 # git refuses to commit without an identity, and a session discovering that has
 # already been paid for. gpgsign is forced off here rather than through
 # [session_env]: a headless box cannot unlock a signing key, and a target

@@ -1,6 +1,6 @@
 name: ClaudeLoop
 slug: claudeloop
-version: "0.1.1"
+version: "0.1.2"
 description: >-
   Unattended orchestrator for Claude Code: one headless session per task,
   against one repository, surviving rate limits.
@@ -31,6 +31,7 @@ map:
   - share:rw
 options:
   claude_code_oauth_token: ""
+  github_token: ""
   git_user_name: ClaudeLoop
   git_user_email: claudeloop@localhost
   setup: false
@@ -41,5 +42,7 @@ schema:
   # Optional so the add-on can start unconfigured and say so in its log,
   # rather than refusing to save an empty configuration on a fresh install.
   claude_code_oauth_token: password?
+  # Optional: a public repository needs none.
+  github_token: password?
   git_user_name: str
   git_user_email: str

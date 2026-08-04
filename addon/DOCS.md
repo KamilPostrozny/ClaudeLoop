@@ -20,6 +20,16 @@ Paste the result into **Claude code oauth token** in the Configuration tab. It
 is the only option that must be set; without it every session fails to
 authenticate, and the add-on log says so on every start.
 
+**A private repository also needs a GitHub token.** There is no terminal for a
+credential prompt in here, no SSH agent and no keyring, so a private clone
+otherwise fails with *could not read Username for 'https://github.com'*. Put a
+personal access token in **Github token** — classic with the `repo` scope, or
+fine-grained with Contents read/write on that repository (add Pull requests
+write if you want sessions opening PRs). It reaches the wizard's repository
+check, the startup clone, and any push a session makes, and it is exported as
+`GH_TOKEN` so the `gh` CLI picks it up too. The token is never written into
+`.gitconfig`; a credential helper reads it out of the environment.
+
 ## First run
 
 1. Start the add-on and open **Open Web UI**.
