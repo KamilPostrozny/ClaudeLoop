@@ -281,5 +281,7 @@ work is committed on a branch created from `main`.
 For a whole slice, done additionally means the live smoke test has been run and
 its findings fixed.
 
-Do not push or open pull requests without being asked — this repository has no
-remote configured yet.
+Do not push or open pull requests without being asked. `origin` is
+`github.com:KamilPostrozny/ClaudeLoop`, and pushing `main` is what publishes
+the S4 addon image, since `.github/workflows/addon.yml` builds it — so a push
+is never just a backup.
