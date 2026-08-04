@@ -22,6 +22,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S4** | Home Assistant OS addon | merged |
 | **S8** | Repository-owned plugins | merged |
 | **S9** | Resume an interrupted task | merged |
+| **S9.1** | Locale-proof Jira transitions | merged, live check outstanding |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -689,6 +690,53 @@ No defects found — the third such run out of nine. What it did confirm is the
 sentence the slice turns on: naming `git status` and `git log` produced that
 exact command as the resumed session's first action in both runs.
 
+### S9.1 — Locale-proof Jira transitions
+
+Observed live on a real instance: `transition_done = "In Progress"` never
+fired, warning once per task —
+
+> `KAN-9: Jira does not offer a 'In Progress' transition from its current status (offered: Idea, Do zrobienia, W toku, Testing, Gotowe, Kosz) -- leaving the issue where it is`
+
+Jira translates its **built-in** statuses per account, and
+`/issue/{key}/transitions` reports the translated display name.
+`Do zrobienia` / `W toku` / `Gotowe` are To Do / In Progress / Done in
+Polish; `Idea` and `Testing`, added by hand, came back in the English they
+were typed in — which is what identifies this as translation rather than
+someone renaming things.
+
+The half that kept working is the confusing part, and worth remembering: the
+*pickup* side of the same config was fine. `_compose_jql` emits `status = "To
+Do"`, and JQL resolves the untranslated canonical name, so it matched issues
+displaying `Do zrobienia`. Jira does the resolving in JQL; `_transition` was
+doing its own string compare and had nothing to resolve against.
+
+So `match_transitions(offered, wanted)` — pure — compares a configured value
+against four tiers, most specific first: transition id, transition name,
+destination status name, destination status category key. It returns a
+**list**, from the first tier that matches anything at all, because the
+caller has to tell "nothing" from "several".
+
+- The category keys (`new`, `indeterminate`, `done`) are Jira's own
+  vocabulary and are never translated, so they are what a localised board can
+  configure and keep.
+- First-tier-wins means a transition literally named `done` beats every
+  transition whose *category* is done, rather than colliding with them.
+- Ambiguity moves nothing and logs every candidate. This is not caution for
+  its own sake: `Kosz` is the board's bin and sits in the `done` category
+  beside `Gotowe`, so an arbitrary pick is the one that bins a finished
+  ticket.
+- The unmatched warning now lists each offered transition with the values
+  that would reach it, since bare names were exactly what made the live
+  failure hard to act on.
+
+`README.md` gains the four-value table and the "not an English board" note;
+the wizard's help text for both keys says the same.
+
+**No live check yet.** It needs a real Jira, and the fixtures assert a
+`to.statusCategory.key` shape that only an instance can confirm is really in
+the offered payload — the precise kind of assumption this file's smoke-test
+rule exists for. Run one before trusting `done` in anger.
+
 ---
 
 ## Next
@@ -743,18 +791,6 @@ Real, deliberately deferred, tracked here so they are not lost.
   Hot-reload is not obviously worth building on top of that, and would need a
   per-key allowlist regardless — `repo`, `home` and the worktree root are not
   safely swappable under a task that is mid-flight.
-- **A transition name that Jira reports in another language never matches.**
-  `_transition` compares the operator's configured name against
-  `/issue/{key}/transitions`, which returns each transition's *display* name,
-  localised. Jira's built-in statuses are translated per account — a Polish
-  site reports `Do zrobienia` / `W toku` / `Gotowe` — so `transition_done =
-  "In Progress"` silently never fires, warning once per task and leaving the
-  issue where it is. JQL is unaffected, because there Jira resolves the
-  untranslated canonical name, so the *pickup* side of the same config works:
-  `status = "To Do"` matches an issue displaying `Do zrobienia`. Observed
-  live. The workaround is to configure the localised names; the fix is to
-  match on the transition id and `to.statusCategory.key` (`indeterminate` /
-  `done`, which never translate) as well as the name.
 - `Config` has a `dict` field, so it is unhashable. Nothing hashes it.
 - `JiraSource.pending` fetches one page of 50 issues and never paginates, so an
   ordering that puts wanted work past the 50th row never reaches it.

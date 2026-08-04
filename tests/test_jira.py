@@ -9,7 +9,8 @@ from pathlib import Path
 
 from claudeloop.jira import (
     BLOCKED_LABEL, DONE_LABEL, GUARD, SEARCH_PATH, JiraClient, JiraError,
-    JiraSource, closing_comment, compose_jql, main, task_text,
+    JiraSource, closing_comment, compose_jql, main, match_transitions,
+    task_text,
 )
 from claudeloop.source import Task, task_id
 from claudeloop.state import State
@@ -166,6 +167,95 @@ class ComposeJqlTest(unittest.TestCase):
         composed = compose_jql("assignee = \"o'brien\" ORDER BY created")
         self.assertTrue(composed.endswith(" ORDER BY created"), composed)
         self.assertIn("assignee = \"o'brien\"", composed)
+
+
+class MatchTransitionsTest(unittest.TestCase):
+    """Which offered transitions a configured value could mean.
+
+    The live failure this exists for: a Jira whose built-in statuses display
+    in Polish offered `Do zrobienia, W toku, Gotowe` where the operator had
+    configured `In Progress`, so nothing ever matched -- while the *pickup*
+    side of the same config worked, because JQL resolves the untranslated
+    name and this comparison does not.
+    """
+
+    POLISH = [
+        {"id": "11", "name": "Do zrobienia",
+         "to": {"name": "Do zrobienia", "statusCategory": {"key": "new"}}},
+        {"id": "21", "name": "W toku",
+         "to": {"name": "W toku", "statusCategory": {"key": "indeterminate"}}},
+        {"id": "31", "name": "Gotowe",
+         "to": {"name": "Gotowe", "statusCategory": {"key": "done"}}},
+    ]
+
+    def ids(self, matches):
+        return [t["id"] for t in matches]
+
+    def test_the_transition_name_still_matches(self):
+        self.assertEqual(self.ids(match_transitions(self.POLISH, "W toku")), ["21"])
+
+    def test_the_name_match_is_case_and_space_insensitive(self):
+        self.assertEqual(self.ids(match_transitions(self.POLISH, "  w TOKU ")), ["21"])
+
+    def test_the_transition_id_matches(self):
+        # The one value that is stable across locale, rename and workflow
+        # edits, and the only one an operator can read straight off the API.
+        self.assertEqual(self.ids(match_transitions(self.POLISH, "31")), ["31"])
+
+    def test_the_destination_status_name_matches(self):
+        # A custom workflow names the transition for the action and the
+        # status for the state: "Finish work" leads to "Done".
+        offered = [{"id": "41", "name": "Finish work",
+                    "to": {"name": "Done", "statusCategory": {"key": "done"}}}]
+        self.assertEqual(self.ids(match_transitions(offered, "Done")), ["41"])
+
+    def test_the_status_category_key_matches(self):
+        # `new`, `indeterminate` and `done` are Jira's own vocabulary and are
+        # never translated, so they are what an operator on a localised site
+        # can configure and rely on.
+        self.assertEqual(self.ids(match_transitions(self.POLISH, "done")), ["31"])
+        self.assertEqual(
+            self.ids(match_transitions(self.POLISH, "indeterminate")), ["21"])
+
+    def test_a_more_specific_tier_wins(self):
+        # A transition literally named "done" must beat every transition
+        # whose category is done, rather than colliding with them.
+        offered = self.POLISH + [
+            {"id": "51", "name": "done",
+             "to": {"name": "Zrobione", "statusCategory": {"key": "done"}}},
+        ]
+        self.assertEqual(self.ids(match_transitions(offered, "done")), ["51"])
+
+    def test_an_ambiguous_category_returns_every_candidate(self):
+        # The hazard that makes this worth reporting rather than guessing: a
+        # Jira board's bin sits in the `done` category alongside the real
+        # finished status, so picking the first match could bin the issue.
+        offered = self.POLISH + [
+            {"id": "61", "name": "Kosz",
+             "to": {"name": "Kosz", "statusCategory": {"key": "done"}}},
+        ]
+        self.assertEqual(self.ids(match_transitions(offered, "done")), ["31", "61"])
+
+    def test_nothing_matching_returns_empty(self):
+        self.assertEqual(match_transitions(self.POLISH, "In Progress"), [])
+
+    def test_an_empty_wanted_matches_nothing(self):
+        # Not merely tidiness: every tier reads "" out of a transition that
+        # omits the key, so an empty value would match the first malformed
+        # entry in the payload.
+        self.assertEqual(match_transitions(self.POLISH, ""), [])
+        self.assertEqual(match_transitions(self.POLISH, "   "), [])
+
+    def test_a_transition_missing_to_does_not_raise(self):
+        # `to` is in the payload by default, but a stripped or mocked one
+        # must fall through the last two tiers rather than crash in them.
+        offered = [{"id": "71", "name": "Finish work"}]
+        self.assertEqual(self.ids(match_transitions(offered, "Finish work")), ["71"])
+        self.assertEqual(match_transitions(offered, "done"), [])
+
+    def test_a_non_dict_entry_is_skipped(self):
+        offered = ["nonsense", None] + self.POLISH
+        self.assertEqual(self.ids(match_transitions(offered, "Gotowe")), ["31"])
 
 
 class TaskTextTest(unittest.TestCase):
@@ -434,6 +524,89 @@ class JiraSourceTest(unittest.TestCase):
         task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
         with self.assertLogs("claudeloop", level="WARNING"):
             source.mark(task, "done", "went fine")
+
+    POLISH_TRANSITIONS = [
+        {"id": "21", "name": "W toku",
+         "to": {"name": "W toku", "statusCategory": {"key": "indeterminate"}}},
+        {"id": "31", "name": "Gotowe",
+         "to": {"name": "Gotowe", "statusCategory": {"key": "done"}}},
+    ]
+
+    def test_a_status_category_key_moves_a_localised_workflow(self):
+        # The live failure, fixed: `done` is Jira's own vocabulary and is
+        # never translated, so it works on a board whose statuses display in
+        # Polish without the operator transcribing them.
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200,
+                                             {"transitions": self.POLISH_TRANSITIONS}),
+            "POST /issue/OPS-1/transitions": (204, {}),
+        }, transition_done="done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+
+        source.mark(task, "done", "went fine", 0.5)
+
+        _, _, move = self.fake.requests[-1]
+        self.assertEqual(move, {"transition": {"id": "31"}})
+
+    def test_a_transition_id_moves_the_issue(self):
+        source = self.source({
+            "GET /issue/OPS-1/transitions": (200,
+                                             {"transitions": self.POLISH_TRANSITIONS}),
+            "POST /issue/OPS-1/transitions": (204, {}),
+        }, transition_start="21")
+
+        source.start(Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1"))
+
+        _, _, move = self.fake.requests[-1]
+        self.assertEqual(move, {"transition": {"id": "21"}})
+
+    def test_an_ambiguous_match_moves_nothing_and_names_the_candidates(self):
+        # A board's bin sits in the `done` category alongside the real
+        # finished status. Picking the first match could bin a finished
+        # ticket, so this refuses and tells the operator what to configure
+        # instead.
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200, {"transitions": [
+                {"id": "31", "name": "Gotowe",
+                 "to": {"name": "Gotowe", "statusCategory": {"key": "done"}}},
+                {"id": "61", "name": "Kosz",
+                 "to": {"name": "Kosz", "statusCategory": {"key": "done"}}},
+            ]}),
+        }, transition_done="done")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.mark(task, "done", "went fine")
+
+        text = "".join(logs.output)
+        self.assertIn("Gotowe", text)
+        self.assertIn("Kosz", text)
+        self.assertIn("ambiguous", text)
+        self.assertNotIn(("POST", "/issue/OPS-1/transitions"),
+                         [(m, p) for m, p, _ in self.fake.requests])
+
+    def test_the_unmatched_warning_shows_what_to_configure(self):
+        # Listing bare names was what made the live failure hard to act on:
+        # the operator could see `Gotowe` but not that `done` would reach it.
+        source = self.source({
+            "PUT /issue/OPS-1": (204, {}),
+            "POST /issue/OPS-1/comment": (201, {}),
+            "GET /issue/OPS-1/transitions": (200,
+                                             {"transitions": self.POLISH_TRANSITIONS}),
+        }, transition_done="In Progress")
+        task = Task(task_id("OPS-1"), "OPS-1: t", "jira", "OPS-1")
+
+        with self.assertLogs("claudeloop", level="WARNING") as logs:
+            source.mark(task, "done", "went fine")
+
+        text = "".join(logs.output)
+        self.assertIn("Gotowe", text)
+        self.assertIn("done", text)
+        self.assertIn("21", text)
 
 
 class CliTest(unittest.TestCase):
