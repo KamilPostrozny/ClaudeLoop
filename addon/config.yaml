@@ -1,6 +1,6 @@
 name: ClaudeLoop
 slug: claudeloop
-version: "0.1.3"
+version: "0.2.0"
 description: >-
   Unattended orchestrator for Claude Code: one headless session per task,
   against one repository, surviving rate limits.
