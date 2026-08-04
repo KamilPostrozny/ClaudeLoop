@@ -98,6 +98,69 @@ default instead, and there is nothing of the earlier attempt on it. The
 wording promises only the branch, not what is on it, so it stays true either
 way."""
 
+INTERRUPTED_PROMPT = (
+    "ClaudeLoop was restarted while you were working, so this session was "
+    "cut off part-way through the task. Nothing else has touched your "
+    "working tree: it is still on your branch, with any commits you made and "
+    "any uncommitted changes still there. Before you do anything else, run "
+    "`git status` and `git log` to see how far you had got, and carry on "
+    "from there rather than starting the task over. If the work turns out to "
+    "be complete and committed already, do not redo it. Either way the task "
+    "ends when you write the result file at the path in the "
+    "CLAUDELOOP_RESULT environment variable -- that file, not your last "
+    "message, is what ends it."
+)
+"""Sent when resuming a task whose previous process died mid-run.
+
+The session believes it is mid-task, because it was, so the danger is the
+opposite of the nudge's: not a session that thinks it has finished, but one
+that has lost the last thing it did and would cheerfully do it again. Naming
+`git status` and `git log` is deliberate -- "check what you had already done"
+is an instruction a literal-minded session can satisfy by guessing."""
+
+FRESH_INTERRUPTED_PROMPT = (
+    "{task}\n\n"
+    "An earlier attempt at this task was cut off when ClaudeLoop restarted, "
+    "and its session is no longer available, so start from the beginning. "
+    "You are on this task's branch, and any commits an earlier attempt made "
+    "are on it; look before you redo work that is already done. Write the "
+    "result file at the path in the CLAUDELOOP_RESULT environment variable "
+    "when the work is complete."
+)
+"""For an interrupted task with no session to resume -- a state.db from
+before S2b, or a task whose runs were pruned. Same shape and same reasoning
+as FRESH_ANSWER_PROMPT: `ensure` reuses `claudeloop/<task.id>` when it
+exists, so the fresh session lands back on the dead attempt's commits, and
+the wording promises only the branch rather than what is on it."""
+
+
+def opening_prompt(
+    task_text: str,
+    resume_with: str | None,
+    resumed: str | None,
+    interrupted: bool,
+) -> tuple[str, bool]:
+    """The prompt an invocation opens with, and whether it resumes a session.
+
+    Pure so every combination can be pinned whole: this is four prompts
+    selected by three inputs, and S7's live failure was a prompt sentence
+    that came out wrong under a combination its tests never assembled.
+
+    An answer outranks an interruption. A task can be both -- parked,
+    answered, then killed before the resumed session got anywhere -- and the
+    answer is the newer fact, so the prompt carrying it is the one that must
+    survive.
+    """
+    if resume_with is not None:
+        if resumed:
+            return ANSWER_PROMPT.format(answer=resume_with), True
+        return FRESH_ANSWER_PROMPT.format(task=task_text, answer=resume_with), False
+    if interrupted:
+        if resumed:
+            return INTERRUPTED_PROMPT, True
+        return FRESH_INTERRUPTED_PROMPT.format(task=task_text), False
+    return task_text, False
+
 
 @dataclass(frozen=True)
 class ReadResult:
@@ -316,10 +379,28 @@ async def run_task(
     # answer to a different question the next time this task parks.
     (run_dir / "answer.json").unlink(missing_ok=True)
 
+    # An 'interrupted' row means the previous process died mid-task:
+    # State.__init__ writes that status at startup and nothing else does, so
+    # this task's worktree already holds a dead session's commits and
+    # uncommitted edits. Read *before* start_task, which is INSERT OR REPLACE
+    # and puts the row back to 'running'.
+    #
+    # Only 'interrupted'. 'error' is non-terminal too, so the source offers
+    # those back as well, but its causes are environment faults -- an
+    # index.lock, a full disk, a worktree that could not be created -- and
+    # several happen before any session exists. --resume against a session id
+    # that never ran fails silently, with no result file and no rate limit,
+    # so the loop would nudge and burn every resume; that is the failure
+    # ROADMAP.md already records for tasks parked across the S6 upgrade.
+    interrupted = resume_with is None and state.was_interrupted(task.id)
     # None when there is no session to resume: a state.db from before S2b, or
     # a task whose runs were pruned. The answer still gets through, only the
     # context is lost.
-    resumed = state.last_session(task.id) if resume_with is not None else None
+    resumed = (
+        state.last_session(task.id)
+        if resume_with is not None or interrupted
+        else None
+    )
     session_id = resumed or str(uuid.uuid4())
     state.start_task(task.id, task.source, task.source_ref, task.text)
     # One worktree per task, so nothing is shared between tasks and there is
@@ -357,11 +438,13 @@ async def run_task(
     tree = await asyncio.to_thread(
         worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
     )
-    if resume_with is None:
+    if resume_with is None and not interrupted:
         # source.start would re-fire transition_start against an issue
         # already in that status; reopen() covers the source-side state
         # instead, so this stays conditional even though the worktree above
-        # is not.
+        # is not. An interrupted task fired start on the attempt that died,
+        # so the same holds -- the condition is "resuming at all", not
+        # "resuming with an answer".
         #
         # Offloaded for the same reason: under the Jira source this is a
         # blocking HTTP round trip.
@@ -369,7 +452,9 @@ async def run_task(
     log.info(
         "task %s %s: %s",
         task.id,
-        "resuming with an answer" if resume_with is not None else "starting",
+        "resuming with an answer" if resume_with is not None
+        else "resuming after an interruption" if interrupted
+        else "starting",
         task.text,
     )
     status_module.set_status(
@@ -387,13 +472,7 @@ async def run_task(
     resume_count = 0  # plain nudges: no result, no rate limit
     wait_count = 0  # quota waits: bounded separately, see decide()
     cost = 0.0
-    if resume_with is None:
-        prompt, resume = task.text, False
-    elif resumed:
-        prompt, resume = ANSWER_PROMPT.format(answer=resume_with), True
-    else:
-        prompt = FRESH_ANSWER_PROMPT.format(task=task.text, answer=resume_with)
-        resume = False
+    prompt, resume = opening_prompt(task.text, resume_with, resumed, interrupted)
     while True:
         attempt = resume_count + wait_count
         run_id = state.start_run(task.id, session_id, attempt)

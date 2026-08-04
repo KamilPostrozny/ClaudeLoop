@@ -124,6 +124,26 @@ class State:
     def task(self, task_id: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
 
+    def was_interrupted(self, task_id: str) -> bool:
+        """Whether this task's previous run died mid-task.
+
+        Scoped to this repository for the same reason terminal_ids() and
+        blocked() are, and here it is load-bearing rather than tidy: `id` is
+        the primary key on its own, so two repositories whose file sources
+        hold identical task text share a row, and an unscoped read could
+        answer yes on the strength of the *other* loop's interruption. What
+        the caller does with a yes is resume a session id -- a session whose
+        stored transcript belongs to a different repository's worktree.
+
+        Must be called before start_task, which is INSERT OR REPLACE and puts
+        the row back to 'running'.
+        """
+        row = self.db.execute(
+            "SELECT 1 FROM tasks WHERE id=? AND status='interrupted' AND repo IS ?",
+            (task_id, self.repo),
+        ).fetchone()
+        return row is not None
+
     def terminal_ids(self) -> set[str]:
         """Task ids that reached a verdict, for a source that needs a backstop
         against re-running finished work.
