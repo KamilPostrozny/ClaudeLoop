@@ -82,22 +82,31 @@ task now has its own worktree, which nothing else touches while it is parked
 -- so the honest thing to say is the opposite, and saying it stops a resumed
 session guessing at a branch name it may have renamed."""
 
+BRANCH_NOTE = (
+    "You are on this task's branch; if an earlier attempt committed anything, "
+    "those commits are on it, so look before you redo work that is already "
+    "done."
+)
+"""The one sentence both fresh-start prompts make about the branch, written
+once because it is the sentence that is hardest to keep true.
+
+`worktree.ensure` reuses `claudeloop/<task.id>` when it exists, so a task
+whose runs were pruned lands back on its own commits. A task from before S6
+never had that branch -- its session named its own -- so `ensure` cuts a fresh
+one from the default and there is nothing of the earlier attempt on it. The
+old wording ("any commits an earlier attempt made are on it") asserted the
+first case outright and was simply false in the second; its docstring defended
+itself by claiming it promised only the branch, which it did not. This is
+conditional, so it is true either way."""
+
 FRESH_ANSWER_PROMPT = (
     "{task}\n\n"
     "A human has already answered a question about this task: {answer}\n\n"
     "The session that asked that question is no longer available, so start "
-    "this task from the beginning, using that answer. You are on this task's "
-    "branch, and any commits an earlier attempt made are on it; look before "
-    "you redo work that is already done."
+    "this task from the beginning, using that answer. " + BRANCH_NOTE
 )
 """For the edge case where a parked task has no session to resume -- a
-state.db from before this slice, or a task whose runs were pruned. `ensure`
-reuses `claudeloop/<task.id>` when it already exists, so a pruned task from
-this slice lands back on its own commits. A pre-slice task never had that
-branch -- its session named its own -- so `ensure` cuts a fresh one from the
-default instead, and there is nothing of the earlier attempt on it. The
-wording promises only the branch, not what is on it, so it stays true either
-way."""
+state.db from before this slice, or a task whose runs were pruned."""
 
 INTERRUPTED_PROMPT = (
     "ClaudeLoop was restarted while you were working, so this session was "
@@ -123,16 +132,13 @@ FRESH_INTERRUPTED_PROMPT = (
     "{task}\n\n"
     "An earlier attempt at this task was cut off when ClaudeLoop restarted, "
     "and its session is no longer available, so start from the beginning. "
-    "You are on this task's branch, and any commits an earlier attempt made "
-    "are on it; look before you redo work that is already done. Write the "
-    "result file at the path in the CLAUDELOOP_RESULT environment variable "
-    "when the work is complete."
+    + BRANCH_NOTE +
+    " Write the result file at the path in the CLAUDELOOP_RESULT environment "
+    "variable when the work is complete."
 )
 """For an interrupted task with no session to resume -- a state.db from
 before S2b, or a task whose runs were pruned. Same shape and same reasoning
-as FRESH_ANSWER_PROMPT: `ensure` reuses `claudeloop/<task.id>` when it
-exists, so the fresh session lands back on the dead attempt's commits, and
-the wording promises only the branch rather than what is on it."""
+as FRESH_ANSWER_PROMPT, down to the shared BRANCH_NOTE."""
 
 
 def opening_prompt(
@@ -860,11 +866,16 @@ def main(argv: list[str] | None = None) -> None:
     problem = plugins.register_marketplaces(cfg.repo)
     if problem:
         raise SystemExit(problem)
-    # Composed against cfg.repo rather than a worktree, which only changes
-    # which CLAUDE.md is named -- a path, not the bulk. The bulk is the
-    # operator's own instructions, and this is where an oversized one gets
-    # named once instead of failing execve on every task.
-    problem = prompt.oversized(prompt.compose(cfg))
+    # Composed with a tree and a default branch, not bare, so this measures
+    # what a session actually gets: compose(cfg) alone drops the working-tree
+    # section, which is ~1 KB present in every real invocation. cfg.repo
+    # stands in for the worktree -- their paths differ by a few dozen bytes,
+    # and it is the checkout that actually holds a CLAUDE.md to name. The
+    # bulk is the operator's own instructions, and this is where an oversized
+    # one gets named once instead of failing execve on every task.
+    problem = prompt.oversized(
+        prompt.compose(cfg, cfg.repo, worktree.default_branch(cfg.repo) or "main")
+    )
     if problem:
         raise SystemExit(f"{DEFAULT_CONFIG}: {problem}")
     # After the config validates, so a non-loopback bind with no token fails

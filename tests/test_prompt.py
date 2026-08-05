@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from claudeloop import prompt
-from claudeloop.config import Config, JiraConfig
+from claudeloop.config import Config, JiraConfig, validate
 from claudeloop.jira import task_text
 from claudeloop.prompt import (
     BUILTIN_DEFINITION_OF_DONE,
@@ -35,20 +35,27 @@ class PromptTest(unittest.TestCase):
         self.assertIn("small set of invariants", text)
         self.assertIn("this repository's own instructions come first", text)
 
-    def test_the_protocol_carries_the_task_file_guard(self):
-        # It used to live in BUILTIN_DEFINITION_OF_DONE, which compose() drops
-        # whenever the repository's own CLAUDE.md defines done -- so the better
-        # a repository documented itself, the fewer of ClaudeLoop's own guards
-        # survived. This is not a definition of done; it is ClaudeLoop's
-        # bookkeeping, and it holds whatever the repository says.
-        self.assertIn("task-tracking file", PROTOCOL)
-        self.assertIn("git add -A", PROTOCOL)
+    def test_no_layer_carries_the_task_file_guard(self):
+        # 90 words of every session's prompt describing a file that cannot be
+        # there. The pair below is the point: the guard is gone *because* the
+        # config check makes an in-repo tasks_file impossible, so relaxing
+        # that check breaks this test rather than silently reopening the hole
+        # the guard covered.
+        text = compose(self.cfg())
+        for phrase in ("task-tracking file", "git add -A", "git stash"):
+            self.assertNotIn(phrase, text)
 
-    def test_the_guards_survive_a_repo_that_fully_defines_done(self):
-        (self.repo / "CLAUDE.md").write_text(
-            "# rules\n\nDone means: committed and pushed to main.\n"
+    def test_the_config_is_what_makes_that_guard_unnecessary(self):
+        _, errors = validate({
+            "repo": str(self.repo),
+            "source": "file",
+            "tasks_file": str(self.repo / "tasks.md"),
+        })
+        self.assertTrue(
+            any("inside repo" in message for _, message in errors),
+            "an in-repo tasks_file must stay rejected: the prompt no longer"
+            " guards against one",
         )
-        self.assertIn("task-tracking file", compose(self.cfg()))
 
     def test_the_builtin_no_longer_carries_the_guards(self):
         self.assertNotIn("task-tracking file", BUILTIN_DEFINITION_OF_DONE)
@@ -163,23 +170,24 @@ class PromptTest(unittest.TestCase):
                          BUILTIN_DEFINITION_OF_DONE)
         self.assertIn("branch you are already on", BUILTIN_DEFINITION_OF_DONE)
 
-    def test_the_definition_of_done_allows_a_rename(self):
-        self.assertIn("git branch -m", BUILTIN_DEFINITION_OF_DONE)
+    def test_the_definition_of_done_forbids_a_rename(self):
+        # It used to permit one ("you may rename the one you are on with
+        # `git branch -m` if you like"). worktree.ensure finds an earlier
+        # attempt's commits only by looking up claudeloop/<task.id>, so a
+        # rename makes that lookup miss, a fresh branch is cut from the
+        # default, and loop.BRANCH_NOTE's claim about the earlier attempt's
+        # commits stops being true.
+        self.assertIn("do not rename the one you are on",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("finds this task's work again by that branch's name",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertNotIn("git branch -m", BUILTIN_DEFINITION_OF_DONE)
 
     def test_the_builtin_qualifies_the_tests_requirement(self):
         # The target case for this feature -- a scratch repo -- very likely
         # has no test suite at all; a literal "the tests pass" sends the
         # session hunting indefinitely or writing speculative tests.
         self.assertIn("if it has any", BUILTIN_DEFINITION_OF_DONE)
-
-    def test_the_protocol_forbids_touching_the_task_list(self):
-        # Sequence this guards against: a `git add -A` sweeps ClaudeLoop's
-        # own tasks file into a commit, then a later session's branch
-        # cleanup (`git checkout -- .` / `git stash`) discards the `- [x]`
-        # mark, and main_loop re-reads the file and repeats the task forever.
-        self.assertIn("task-tracking file", PROTOCOL)
-        self.assertIn("git checkout -- .", PROTOCOL)
-        self.assertIn("git stash", PROTOCOL)
 
     def test_a_definition_of_done_file_wins_over_the_builtin(self):
         dod = self.tmp / "dod.md"
@@ -255,6 +263,37 @@ class PromptTest(unittest.TestCase):
         # that outranked it.
         for text in (precedence(has_operator=True), precedence(has_operator=False)):
             self.assertNotIn("definition of done is the base", text)
+
+    def test_precedence_is_pinned_whole_in_both_shapes(self):
+        # Substrings are how S7's live failure got past seven passing tests:
+        # each fragment was present and the assembled sentence had lost its
+        # verb. This function is four sentences long; pin all of them.
+        base = (
+            "These instructions are layered. The ClaudeLoop protocol above is"
+            " a small set of invariants that hold because ClaudeLoop itself"
+            " breaks without them, and it overrides everything below it. The"
+            " working tree section is fact about this machine rather than"
+            " policy -- nothing below can make it untrue."
+        )
+        tail = (
+            " Below those, this repository's own instructions come first, and"
+            " ClaudeLoop's definition of done is only a fallback for what they"
+            " do not say. Where layers conflict, follow the higher one and say"
+            " so in your summary."
+        )
+        self.assertEqual(precedence(has_operator=False), base + tail)
+        self.assertEqual(
+            precedence(has_operator=True),
+            base + " The operator instructions outrank this repository's own"
+            " instructions." + tail,
+        )
+
+    def test_precedence_does_not_restate_the_repo_pointer(self):
+        # compose()'s definition-of-done header already says this, word for
+        # word, in the only case where a repository has instructions to rank.
+        for text in (precedence(has_operator=True), precedence(has_operator=False)):
+            self.assertNotIn("decide how work is done here", text)
+            self.assertNotIn("when it is finished and where it lands", text)
 
     def test_precedence_states_the_facts_layer_cannot_be_overridden(self):
         for text in (precedence(has_operator=True), precedence(has_operator=False)):
@@ -334,9 +373,23 @@ class WorkingTreeSectionTest(unittest.TestCase):
         self.assertIn("git checkout main", text)
         self.assertIn("already used by worktree", text)
 
-    def test_it_leaves_the_choice_to_the_repository(self):
+    def test_it_states_mechanics_and_no_policy_at_all(self):
+        # precedence() says nothing below this section can make it untrue, so
+        # a paragraph inside it that hands a decision downward outranked the
+        # layer it deferred to. The choice between the two commands is policy
+        # and lives in the definition of done; what is left here is fact.
         text = compose(self.cfg(), self.tree, default_branch="main")
-        self.assertIn("this repository's decision, not ClaudeLoop's", text)
+        self.assertNotIn("this repository's decision, not ClaudeLoop's", text)
+        self.assertIn("# to land your work on main", text)
+        self.assertIn("# to publish this branch, for a pull request", text)
+
+    def test_the_definition_of_done_still_makes_that_choice(self):
+        # Deleting the paragraph above only holds if the layer it deferred to
+        # actually says it.
+        self.assertIn("as this repository's instructions direct",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("pushed as this branch with a pull request open",
+                      BUILTIN_DEFINITION_OF_DONE)
 
     def test_it_is_present_whether_or_not_the_repo_documents_itself(self):
         (self.tree / "CLAUDE.md").write_text("# fully documented\n")
