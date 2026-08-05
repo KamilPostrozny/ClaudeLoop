@@ -26,7 +26,8 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S10** | The repository's instructions come first | merged |
 | **S11** | Backlog defects | merged, pagination + comment read still unchecked live |
 | **S12** | A stranded task can come back | merged |
-| **S13** | Prompt audit | implemented, smoke test run and its finding fixed; not merged |
+| **S13** | Prompt audit | merged |
+| **S14** | The base branch is configurable | merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -1116,11 +1117,59 @@ not say why, which the wording asks for. Its `origin` is a local bare
 repository, where there is no pull request to open — worth re-checking on a
 run whose remote is a real forge.
 
+### S14 — The base branch is configurable
+
+One optional config key, `base_branch`. Unset — the default — nothing changes:
+`worktree.default_branch` resolves `origin/HEAD`, then a local `main` or
+`master`. Set, it names the branch every task's worktree is cut from, and
+`origin/HEAD` is not consulted.
+
+The case that forced it: a repository whose live work is not on its default
+branch. Port22 keeps a long-lived `xtool` branch that is never pushed, and a
+task cut from `main` is written against the wrong tree — the first one landed
+a call to a member `main` has and `xtool` does not, and the operator ported it
+by hand. The workaround until now was to lie to git, pointing
+`refs/remotes/origin/HEAD` at a remote-tracking ref that does not exist. It
+works, and it writes the lie into the operator's own repository where every
+later reader inherits it.
+
+**The override is applied inside `default_branch`, not at its call sites.**
+Four places ask which branch to cut from — `probe`, `ensure`, `run_task`'s
+prompt composition, and the startup prompt audit — and threading it through
+each separately is four chances to miss one. The audit is where a missed one
+would be silent: it would size and print a prompt naming `main` while every
+task was cut from elsewhere.
+
+**An override that does not resolve returns `None`, never a fall-through.**
+That makes `probe`'s existing check the check for this too, so a typo is a
+startup failure rather than a loop that quietly cuts from `main` while its
+config says otherwise. The message names the key, because "cannot determine
+the default branch" is a lie when the operator named one and misspelled it.
+Verification lives in `probe` rather than in a `SCHEMA` check because a `repo`
+given as a URL has no local refs at load time — it has not been cloned yet.
+
+The live smoke test found nothing wrong, which is worth stating precisely
+given how rarely that happens here. It ran two haiku tasks against a scratch
+repository whose default branch was `main` and whose work was on `sidetrack`,
+with `sidetrack` checked out in the operator's own tree. Both task branches
+were cut from `sidetrack` and carried its marker file; the second was not
+chained onto the first; `git worktree add` did not trip `already used by
+worktree` against the checked-out base; the operator's tree was untouched; the
+composed prompt named `sidetrack` in all three of `WORKING_TREE`'s sentences;
+and a typo'd `base_branch` refused to start with the message naming the key.
+About nine cents.
+
+One hole is known and left standing: the setup wizard validates `repo` by
+probing it with no base, so a repository whose only branch is non-standard is
+rejected there even though `base_branch` would name it. Hand-editing
+`config.toml` gets past it, and the loop's own probe accepts it. See the spec.
+
 ---
 
 ## Next
 
-No slice is scheduled. Three things are outstanding:
+No slice is scheduled. S13 and S14 are merged; the three things below are
+outstanding:
 
 1. **Two of S11's Jira changes are still unverified live.** S12's smoke run
    used a real board (`assimo.atlassian.net`, project `SAM1`, a scratch

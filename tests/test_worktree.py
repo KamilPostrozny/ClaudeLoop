@@ -8,6 +8,21 @@ from claudeloop import worktree
 from .gitrepo import commit_to_remote, make_repo, make_repo_with_remote
 
 
+def branch(repo: Path, name: str, file: str | None = None) -> None:
+    """A second branch in `repo`, left checked out -- which is the shape the
+    override is written for: the operator's own tree sits on the branch tasks
+    are cut from."""
+    subprocess.run(["git", "checkout", "-q", "-b", name], cwd=repo, check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
+    if file is None:
+        return
+    (repo / file).write_text("only here\n")
+    subprocess.run(["git", "add", file], cwd=repo, check=True,
+                   capture_output=True, stdin=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-q", "-m", f"add {file}"], cwd=repo,
+                   check=True, capture_output=True, stdin=subprocess.DEVNULL)
+
+
 def branch_of(path: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -61,6 +76,36 @@ class WorktreeTest(unittest.TestCase):
         self.assertTrue((path / "from-elsewhere.txt").exists(),
                         "the task's branch must come from the remote's default"
                         " branch, not from a stale local ref")
+
+    def test_the_branch_is_cut_from_the_configured_base_branch(self):
+        # A repository whose live work is not on its default branch: Port22's
+        # `xtool`, which carries an overlay `main` must never get and is never
+        # pushed. Cutting from `main` writes the task against the wrong tree.
+        branch(self.repo, "side", "only-on-side.txt")
+
+        path = worktree.ensure(self.repo, self.root, "abc123", base="side")
+
+        self.assertTrue((path / "only-on-side.txt").exists(),
+                        "the task's branch must come from base_branch")
+        self.assertEqual(branch_of(path), "claudeloop/abc123")
+
+    def test_the_base_branch_may_be_the_one_that_is_checked_out(self):
+        # git refuses a second *checkout* of one branch -- `already used by
+        # worktree` -- but cutting a new branch from it is fine, and the
+        # operator's own tree sitting on it is the normal case here.
+        branch(self.repo, "side", "only-on-side.txt")
+        self.assertEqual(branch_of(self.repo), "side")
+
+        path = worktree.ensure(self.repo, self.root, "abc123", base="side")
+
+        self.assertTrue((path / "only-on-side.txt").exists())
+
+    def test_a_base_branch_that_does_not_exist_raises_rather_than_cutting_from_main(self):
+        # Silently falling back to the default branch is the failure this
+        # slice exists to remove: a loop cutting from `main` while its config
+        # says otherwise looks like it is working.
+        with self.assertRaises(RuntimeError):
+            worktree.ensure(self.repo, self.root, "abc123", base="no-such-branch")
 
     def test_a_repository_with_no_remote_still_cuts_from_the_local_branch(self):
         path = worktree.ensure(self.repo, self.root, "abc123")
@@ -157,6 +202,35 @@ class WorktreeTest(unittest.TestCase):
         (path / "uncommitted.txt").write_text("do not destroy this\n")
 
         worktree.release(self.repo, path)  # must not raise
+
+
+class DefaultBranchTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = make_repo(self.tmp / "repo")
+
+    def test_an_override_names_the_branch_tasks_are_cut_from(self):
+        branch(self.repo, "side")
+
+        self.assertEqual(worktree.default_branch(self.repo, "side"), "side")
+
+    def test_no_override_still_resolves_the_repositorys_own_default(self):
+        branch(self.repo, "side")
+
+        self.assertEqual(worktree.default_branch(self.repo), "main")
+
+    def test_an_override_that_does_not_exist_is_none_not_a_guess(self):
+        # Falling through to `main` here is the whole defect: the loop would
+        # run every task against a branch its config says it is not using.
+        self.assertIsNone(worktree.default_branch(self.repo, "typo"))
+
+    def test_an_override_is_not_matched_against_a_tag_or_a_remote_ref(self):
+        # `rev-parse --verify` on a bare name would resolve a tag of the same
+        # name; refs/heads/ is what `worktree add -b` needs.
+        subprocess.run(["git", "tag", "release"], cwd=self.repo, check=True,
+                       capture_output=True, stdin=subprocess.DEVNULL)
+
+        self.assertIsNone(worktree.default_branch(self.repo, "release"))
 
 
 class UnregisteredLeftoverTest(unittest.TestCase):
@@ -279,6 +353,21 @@ class UnregisteredLeftoverTest(unittest.TestCase):
 
         self.assertIsNotNone(message)
         self.assertIn("default branch", message)
+
+    def test_probe_accepts_a_base_branch_the_repository_has(self):
+        branch(self.repo, "side")
+
+        self.assertIsNone(worktree.probe(self.repo, "side"))
+
+    def test_probe_rejects_a_base_branch_the_repository_does_not_have(self):
+        message = worktree.probe(self.repo, "xtoool")
+
+        self.assertIsNotNone(message)
+        # The key, so an operator who typo'd it is told which one to fix
+        # rather than that a repository with a perfectly good `main` has no
+        # default branch.
+        self.assertIn("base_branch", message)
+        self.assertIn("xtoool", message)
 
 
 if __name__ == "__main__":

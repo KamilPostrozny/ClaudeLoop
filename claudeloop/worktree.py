@@ -79,16 +79,32 @@ def _try_git(
         return None
 
 
-def default_branch(repo: Path) -> str | None:
-    """The repository's default branch, without guessing.
+def default_branch(repo: Path, override: str | None = None) -> str | None:
+    """The branch a task's worktree is cut from, without guessing.
 
-    `git symbolic-ref refs/remotes/origin/HEAD` is authoritative when there
-    is a remote (set by a clone, or `git remote set-head origin -a`). Most
-    repositories driven by an unattended loop have none, so this falls back
-    to whichever of the two common initial-branch names actually exists
-    locally. If neither does, this gives up rather than guess -- the caller
-    then leaves the working tree exactly as it found it.
+    `override` is `base_branch` from the config, and when it is set nothing
+    else is consulted: the operator has answered the question this function
+    otherwise infers. It is still verified to exist as a local branch, and
+    `None` comes back when it does not -- never a fall-through to the
+    repository's own default, which would run every task against a branch the
+    config says is not in use, and look like it was working.
+
+    Without one, `git symbolic-ref refs/remotes/origin/HEAD` is authoritative
+    when there is a remote (set by a clone, or `git remote set-head origin
+    -a`). Most repositories driven by an unattended loop have none, so this
+    falls back to whichever of the two common initial-branch names actually
+    exists locally. If neither does, this gives up rather than guess -- the
+    caller then leaves the working tree exactly as it found it.
     """
+    if override:
+        # refs/heads/, not the bare name: `rev-parse --verify` on one would
+        # resolve a tag or a remote-tracking ref of the same name, and
+        # `worktree add -b` needs a branch.
+        exists = _try_git(repo, "rev-parse", "-q", "--verify",
+                          f"refs/heads/{override}")
+        if exists is None or exists.returncode != 0:
+            return None
+        return override
     origin_head = _try_git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
     if origin_head is None:
         return None
@@ -169,7 +185,7 @@ def reachable(url: str) -> str | None:
     return None
 
 
-def probe(repo: Path) -> str | None:
+def probe(repo: Path, base: str | None = None) -> str | None:
     """Whether this box can run tasks in worktrees at all. An error message
     written for a human, or None.
 
@@ -189,7 +205,16 @@ def probe(repo: Path) -> str | None:
             f"cannot use git worktrees in {repo}: {detail}. ClaudeLoop runs every"
             " task in its own worktree, so this must work before it can start."
         )
-    if default_branch(repo) is None:
+    if default_branch(repo, base) is None:
+        # Two different mistakes, and telling them apart is the whole value of
+        # the message: a repository with a perfectly good `main` and a typo'd
+        # key must not be told it has no default branch.
+        if base:
+            return (
+                f"base_branch is {base!r}, but {repo} has no local branch of that"
+                " name. ClaudeLoop cuts each task's branch from it, so it must"
+                " exist before the loop can start."
+            )
         return (
             f"cannot determine the default branch of {repo}. ClaudeLoop cuts each"
             " task's branch from it, so it needs a local `main` or `master`, or an"
@@ -276,7 +301,7 @@ def _move_aside(path: Path) -> None:
     )
 
 
-def ensure(repo: Path, root: Path, task_id: str) -> Path:
+def ensure(repo: Path, root: Path, task_id: str, base: str | None = None) -> Path:
     """The task's worktree, created or reused. Raises RuntimeError if git
     cannot produce one -- the caller fails that task and moves on.
 
@@ -295,16 +320,19 @@ def ensure(repo: Path, root: Path, task_id: str) -> Path:
     # Past the reuse check with a directory still sitting there: it is a
     # leftover git will neither reuse nor overwrite. See _move_aside.
     _move_aside(path)
-    base = default_branch(repo)
-    if base is None:
-        raise RuntimeError(f"no default branch to cut {branch} from in {repo}")
+    cut_from = default_branch(repo, base)
+    if cut_from is None:
+        raise RuntimeError(
+            f"base_branch {base!r} is not a branch in {repo}" if base
+            else f"no default branch to cut {branch} from in {repo}"
+        )
     # Creation only. A reused tree -- a parked task coming back with its
     # answer, an interrupted one resuming -- is never refetched and never
     # rebased: it holds uncommitted work, and moving it under an unattended
     # session is worse than a stale base.
     try:
         result = _git(repo, "worktree", "add", "-b", branch, str(path),
-                      base_ref(repo, base))
+                      base_ref(repo, cut_from))
         if result.returncode != 0 and _branch_exists(repo, branch):
             result = _git(repo, "worktree", "add", str(path), branch)
     except (OSError, subprocess.SubprocessError) as error:

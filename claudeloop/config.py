@@ -343,6 +343,14 @@ SCHEMA: tuple[Field, ...] = (
                " once into ~/.claudeloop/clones/ and worked in from there."
                " Each task gets its own worktree cut from the default branch;"
                " your own checkout is never moved."),
+    Field("base_branch", step="repository", default="", label="Base branch",
+          help="The branch every task's worktree is cut from. Leave empty for"
+               " the repository's own default branch (origin's HEAD, or a"
+               " local main or master). Set it when the work lives somewhere"
+               " else -- a long-lived branch that is never pushed, say. It"
+               " must exist as a local branch, which is checked at startup"
+               " rather than here, since a repo given as a URL has not been"
+               " cloned yet."),
     Field("model", step="repository", default="opus",
           label="Model",
           help="Which Claude model each session runs on, e.g. opus, sonnet,"
@@ -557,6 +565,9 @@ class Config:
     """Always local: the clone directory when `repo_url` is set."""
     repo_url: str = ""
     """The remote to clone, when config.toml gave a URL rather than a path."""
+    base_branch: str = ""
+    """The branch tasks are cut from. Empty means the repository's own default
+    branch, which is what `worktree.default_branch` works out for itself."""
     tasks_file: Path | None = None
     model: str = "opus"
     max_resumes: int = 20
@@ -618,6 +629,7 @@ def load_config(path: Path = DEFAULT_CONFIG, home: Path = HOME) -> Config:
     return Config(
         repo=repo_path(values["repo"], home),
         repo_url=values["repo"] if is_url(values["repo"]) else "",
+        base_branch=values["base_branch"],
         tasks_file=values["tasks_file"],
         model=values["model"],
         max_resumes=values["max_resumes"],

@@ -453,7 +453,8 @@ async def run_task(
     # environment fault an operator clears (delete the directory); recorded
     # in ROADMAP.md's open issues so it is not a surprise.
     tree = await asyncio.to_thread(
-        worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id
+        worktree.ensure, cfg.repo, cfg.home / "worktrees", task.id,
+        cfg.base_branch or None,
     )
     # The prompt states the default branch as fact because the session cannot
     # discover it safely: it is checked out in the repository rather than in
@@ -464,7 +465,9 @@ async def run_task(
     # than inventing a branch name. One cheap local git call, on the same
     # thread hop as ensure() for the same reason: it must not block the event
     # loop the heartbeat and the dashboard share.
-    default = await asyncio.to_thread(worktree.default_branch, cfg.repo)
+    default = await asyncio.to_thread(
+        worktree.default_branch, cfg.repo, cfg.base_branch or None
+    )
     if resume_with is None and not interrupted:
         # source.start would re-fire transition_start against an issue
         # already in that status; reopen() covers the source-side state
@@ -856,7 +859,7 @@ def main(argv: list[str] | None = None) -> None:
     # Before anything starts listening or runs: a box whose git cannot make
     # worktrees would otherwise fail every task in turn, one paid session at
     # a time, instead of saying so once.
-    problem = worktree.probe(cfg.repo)
+    problem = worktree.probe(cfg.repo, cfg.base_branch or None)
     if problem:
         raise SystemExit(problem)
     # Same treatment, same reason: a marketplace the repository names but
@@ -874,7 +877,10 @@ def main(argv: list[str] | None = None) -> None:
     # bulk is the operator's own instructions, and this is where an oversized
     # one gets named once instead of failing execve on every task.
     problem = prompt.oversized(
-        prompt.compose(cfg, cfg.repo, worktree.default_branch(cfg.repo) or "main")
+        prompt.compose(
+            cfg, cfg.repo,
+            worktree.default_branch(cfg.repo, cfg.base_branch or None) or "main",
+        )
     )
     if problem:
         raise SystemExit(f"{DEFAULT_CONFIG}: {problem}")
