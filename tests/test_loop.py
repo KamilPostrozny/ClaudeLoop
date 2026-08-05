@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from claudeloop import loop, status
+from claudeloop import loop, prompt, status
 from claudeloop.config import Config, JiraConfig
 from claudeloop.jira import SEARCH_PATH, JiraSource
 from claudeloop.loop import (
@@ -178,9 +178,28 @@ class ResumePromptTest(unittest.TestCase):
 
     def test_the_fresh_answer_prompt_says_the_earlier_attempts_commits_are_here(self):
         text = loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR")
-        self.assertIn("any commits an earlier attempt made", text)
+        self.assertIn(loop.BRANCH_NOTE, text)
         self.assertNotIn("may have left a branch", text)
         self.assertNotIn("on the branch that attempt used", text)
+
+    def test_the_branch_note_only_claims_commits_conditionally(self):
+        # worktree.ensure reuses claudeloop/<task.id> when it exists, and cuts
+        # a fresh one from the default when it does not -- a task from before
+        # S6, or one whose session renamed its branch. The old wording ("any
+        # commits an earlier attempt made are on it") asserted the first case
+        # outright and was false in the second.
+        self.assertIn("if an earlier attempt committed anything", loop.BRANCH_NOTE)
+        self.assertNotIn("and any commits an earlier attempt made are on it",
+                         loop.BRANCH_NOTE)
+
+    def test_both_fresh_prompts_share_one_branch_sentence(self):
+        # Written once because it is the sentence hardest to keep true; two
+        # copies is how one of them goes stale.
+        for text in (
+            loop.FRESH_ANSWER_PROMPT.format(task="do a thing", answer="use EUR"),
+            loop.FRESH_INTERRUPTED_PROMPT.format(task="do a thing"),
+        ):
+            self.assertIn(loop.BRANCH_NOTE, text)
 
     def test_the_answer_prompt_still_demands_the_result_file(self):
         rendered = loop.ANSWER_PROMPT.format(answer="use EUR")
@@ -227,7 +246,7 @@ class ResumePromptTest(unittest.TestCase):
         rendered = loop.FRESH_INTERRUPTED_PROMPT.format(task="do a thing")
 
         self.assertIn("do a thing", rendered)
-        self.assertIn("any commits an earlier attempt made", rendered)
+        self.assertIn(loop.BRANCH_NOTE, rendered)
         self.assertIn("look before you redo work that is already done", rendered)
 
     def test_the_fresh_interrupted_prompt_still_demands_the_result_file(self):
@@ -744,6 +763,58 @@ class MainConfigErrorTest(unittest.TestCase):
                 loop.main([])
 
         self.assertIn("cannot use git worktrees", str(raised.exception))
+        serve.assert_not_called()
+
+
+class MainOversizedPromptTest(unittest.TestCase):
+    """The startup size check must measure the prompt a session gets.
+
+    It composed with no worktree and no default branch, which drops the
+    working-tree section -- ~1 KB present in every real invocation. So an
+    operator whose instructions file sat in that 1 KB band passed startup and
+    then failed execve on every task, with an errno the CLI reports as
+    something unrelated.
+    """
+
+    def setUp(self):
+        real_default = loop.DEFAULT_CONFIG
+        self.addCleanup(lambda: setattr(loop, "DEFAULT_CONFIG", real_default))
+        loop.DEFAULT_CONFIG = Path(__file__)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def cfg_in_the_band(self) -> Config:
+        """A config whose prompt fits without the working-tree section and
+        does not fit with it."""
+        instructions = self.tmp / "mine.md"
+        instructions.write_text("x")
+        cfg = Config(repo=self.repo, tasks_file=self.tmp / "tasks.md",
+                     home=self.tmp / "home", instructions_file=instructions)
+        bare = len(prompt.compose(cfg).encode())
+        full = len(prompt.compose(cfg, self.repo, "main").encode())
+        self.assertGreater(full, bare, "the working tree section adds nothing")
+        # Lands bare exactly on the limit, so only the section pushes it past.
+        instructions.write_text("x" * (prompt.MAX_ARG_BYTES - bare + 1))
+        self.assertIsNone(prompt.oversized(prompt.compose(cfg)))
+        self.assertIsNotNone(prompt.oversized(prompt.compose(cfg, self.repo, "main")))
+        return cfg
+
+    def test_a_prompt_only_oversized_with_the_working_tree_section_is_caught(self):
+        cfg = self.cfg_in_the_band()
+        with mock.patch.object(loop, "load_config", return_value=cfg), \
+             mock.patch.object(loop.worktree, "probe", return_value=None), \
+             mock.patch.object(loop.worktree, "default_branch", return_value="main"), \
+             mock.patch.object(loop.plugins, "register_marketplaces", return_value=None), \
+             mock.patch.object(loop, "_serve_dashboard") as serve, \
+             mock.patch.object(
+                 loop.asyncio, "run",
+                 side_effect=AssertionError("startup let an oversized prompt through"),
+             ):
+            with self.assertRaises(SystemExit) as raised:
+                loop.main([])
+
+        self.assertIn("--append-system-prompt", str(raised.exception))
         serve.assert_not_called()
 
 

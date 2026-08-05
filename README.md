@@ -323,8 +323,9 @@ touches them, and `settings_file` is still passed through as `--settings`.
 Each task runs in its own `git worktree` at
 `~/.claudeloop/worktrees/<task-id>`, checked out on a branch ClaudeLoop
 creates for it, `claudeloop/<task-id>`, cut from your repository's default
-branch. The session commits there; it may rename that branch to something
-descriptive. Your own working copy of `repo` is never checked out, reset or
+branch. The session commits there, and is told not to rename that branch:
+ClaudeLoop finds an interrupted or answered task's earlier commits by looking
+the name up. Your own working copy of `repo` is never checked out, reset or
 otherwise moved — ClaudeLoop only uses it to create the worktree and to cut
 the branch, and the finished commits land in it like any other local branch.
 

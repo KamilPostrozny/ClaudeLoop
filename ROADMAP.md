@@ -26,6 +26,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S10** | The repository's instructions come first | merged |
 | **S11** | Backlog defects | merged, pagination + comment read still unchecked live |
 | **S12** | A stranded task can come back | merged |
+| **S13** | Prompt audit | implemented, smoke test run and its finding fixed; not merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -170,7 +171,8 @@ Creating the branch is the point. The built-in definition of done had told
 sessions to branch before their first commit since S1, at about 50%
 compliance; a session cannot fail to comply with an instruction it is not
 given. Three prompt strings changed with it: the definition of done now
-states the session is already on its branch, may rename it, and must never
+states the session is already on its branch, may rename it (S13 reversed
+that: a rename hides the branch from `ensure`), and must never
 check out the default branch and commit there; `ANSWER_PROMPT`'s
 branch-checkout clause is gone, replaced with the opposite assurance; and
 `FRESH_ANSWER_PROMPT` stops claiming commits that a pre-S6 parked task never
@@ -214,7 +216,8 @@ both branches in place.
 
 Two things it confirmed rather than caught: no session tried to check out the
 default branch (which under a worktree fails with `already checked out at`),
-and none renamed its branch, though the prompt now allows it. It also
+and none renamed its branch, though the prompt allowed it at the time (S13
+withdrew that). It also
 surfaced one pre-existing accounting bug, recorded in the open issues below:
 a task that parks and is answered reports only the cost of its resume.
 
@@ -1007,6 +1010,111 @@ knowing for the next run — symlink the credentials into the scratch home.
 
 Spec: `docs/superpowers/specs/2026-08-04-claudeloop-stranded-task-recovery-design.md`
 Plan: `docs/superpowers/plans/2026-08-04-stranded-task-recovery.md`
+
+### S13 — Prompt audit
+
+Every string a headless session receives, read end to end in one pass and
+compared against the code it describes: the six system-prompt layers
+`prompt.compose` assembles, and the six opening prompts `loop.opening_prompt`
+selects between. No new feature. Six findings, all fixed; nothing here changes
+what the loop does, only what it says and what it measures.
+
+**One dead layer.** `PROTOCOL` ended with 90 words forbidding a session to
+`git add`, stash or revert ClaudeLoop's task file "if one lives in this
+repository". One cannot: `config._outside_repo` refuses any `tasks_file` that
+resolves inside `repo`, symlinks and `..` segments included, and the Jira
+source has no task file at all. Deleted. The covering test asserts both halves
+together — the prompt no longer carries the guard, *and* `validate()` still
+rejects an in-repo `tasks_file` — so relaxing the config check breaks a test
+rather than silently reopening the hole.
+
+**One contradiction of rank.** `precedence()` says the working-tree section is
+"fact about this machine rather than policy -- nothing below can make it
+untrue", while that section's last paragraph handed a decision downward
+("Which of the two is right is this repository's decision"). A section that
+outranks everything below it cannot also defer to it. The paragraph is
+deleted; the choice between `git push origin HEAD:<default>` and `git push -u
+origin HEAD` is policy and already stated in the definition of done, and the
+two commands carry comments saying which does which. `WORKING_TREE` is now
+mechanics only.
+
+**One licence with a cost and no benefit.** The definition of done said a
+session "may rename the one you are on with `git branch -m` if you like".
+`worktree.ensure` finds an earlier attempt's commits only by looking up
+`claudeloop/<task-id>`, so a rename makes that lookup miss and a fresh branch
+gets cut from the default. Reversed into an explicit ban, with the reason
+stated.
+
+**One claim that was sometimes false.** Both fresh-start prompts told a
+session "you are on this task's branch, and any commits an earlier attempt
+made are on it" — true when `ensure` reused the branch, false when it cut a
+new one, which is exactly the pre-S6 and post-rename cases those prompts exist
+for. `FRESH_ANSWER_PROMPT`'s own docstring defended the wording by claiming it
+promised only the branch and not what is on it, which it did not. Now one
+shared `loop.BRANCH_NOTE`, conditional and true either way: "if an earlier
+attempt committed anything, those commits are on it".
+
+**One duplication.** `precedence()`'s closing paragraph and `compose()`'s
+definition-of-done header stated the same ranking in the same words.
+`precedence()` keeps the ranking and the conflict rule and nothing else; both
+of its shapes are now pinned by whole-string equality rather than substrings,
+which is the assertion style S7's live failure walked straight through.
+
+**One measurement that measured the wrong thing.** `main()` checked
+`prompt.oversized(prompt.compose(cfg))` — no worktree, no default branch, so
+the working-tree section was absent from the ~4.5 KB it measured but present
+in every real session. An operator whose instructions file landed in that
+~1 KB band passed startup and then failed `execve` on every task, with an
+errno the CLI reports as something unrelated. It now composes with `cfg.repo`
+standing in for the worktree and the real default branch. The test builds a
+config in precisely that band; against the old line it hangs in `main_loop`
+rather than failing, so it also patches `asyncio.run`.
+
+Net: ~230 words off every session's system prompt, two false statements gone,
+one duplicated ranking gone.
+
+**Live smoke test — four tasks on haiku across four scratch repositories,
+$0.16, and it found a defect older than the slice.** Two scenarios, because
+the deleted working-tree paragraph covered two cases and every previous run
+had exercised only one.
+
+*Scenario one, a repository whose CLAUDE.md demands a push to `main`, two
+tasks.* Both ran `git push origin HEAD:main` — the mapping survives the
+paragraph's deletion, because the two commands carry comments saying which
+does which. Both staged by name (`git add greet.py`), with `PROTOCOL`'s guard
+gone. Neither renamed its branch. Both commits stacked on the bare remote, so
+task two branched from task one's work; both worktrees were released, both
+`claudeloop/<task-id>` branches remain, the scratch repository never left
+`main` and was never dirtied, `tasks.md` came back `- [x] - [x]`, and neither
+task needed a nudge or a wait.
+
+*Scenario two, a repository with a working `origin`, `gh` on `PATH` and no
+CLAUDE.md — the built-in definition of done alone.* **The session wrote the
+file, committed, and wrote status `done` with nothing pushed.** Reproduced
+against the pre-S13 wording as a control, so S13 did not cause it: the hole
+has been open since S10, and S10's own smoke test missed it because it only
+ever tested a repository that *did* say where work lands.
+
+The cause is grammatical. "The work is published -- pushed as this
+repository's instructions direct, or, if they do not say, pushed as this
+branch with a pull request open" describes a property of a finished task, and
+the nearest imperative was the escape hatch's "Commit, then write status
+`done`" — which is exactly what the session did. The escape hatch also bundled
+"push credentials **or** a forge CLI ... are not available" into one condition,
+so a box with no `gh` could read the entire publishing requirement as waived.
+
+Fixed in `BUILTIN_DEFINITION_OF_DONE`: publishing is a step to carry out
+after committing rather than a state to be in ("a commit that has never left
+this worktree has published nothing"), the fallback push is a literal
+`git push -u origin HEAD`, and opening the pull request is separated from
+pushing — a missing forge CLI waives the pull request and nothing else. The
+same scenario re-run against the fixed wording pushed the branch and named it
+in the summary.
+
+One thing left alone: that fourth session did not open a pull request and did
+not say why, which the wording asks for. Its `origin` is a local bare
+repository, where there is no pull request to open — worth re-checking on a
+run whose remote is a real forge.
 
 ---
 

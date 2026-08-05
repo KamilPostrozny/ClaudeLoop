@@ -35,21 +35,17 @@ PROTOCOL = (
     "and could not finish, \"blocked\" means a human must decide something "
     "before you can), \"summary\" (one paragraph on what you did), and, when "
     "blocked, \"question\" (the one thing a human must answer). Writing that "
-    "file is what ends the task; do not stop without it. One last thing is "
-    "ClaudeLoop's own bookkeeping rather than part of the work, and holds "
-    "whatever this repository's own instructions say: never git add, stage, "
-    "commit, stash or revert ClaudeLoop's task-tracking file if one lives in "
-    "this repository. ClaudeLoop rewrites that file itself once you finish, "
-    "and a broad `git add -A`, or a branch cleanup like `git checkout -- .` "
-    "or `git stash`, can silently make already-finished work look pending "
-    "again. Prefer staging files by name."
+    "file is what ends the task; do not stop without it."
 )
-"""The task-file guard lives here, not in the definition of done, because
-`compose` drops the built-in definition of done whenever the repository's own
-CLAUDE.md says when work is finished -- so the better a repository documented
-itself, the fewer of ClaudeLoop's own guards reached the session at all. This
-is not a definition of done; it is the one rule ClaudeLoop's own bookkeeping
-cannot survive a session breaking."""
+"""This used to end with a task-file guard -- never `git add`, stash or revert
+ClaudeLoop's own task list, because a broad `git add -A` followed by a later
+`git checkout -- .` can revert a `- [x]` mark and make finished work look
+pending. It named a state that cannot happen: `config._outside_repo` refuses
+any `tasks_file` that resolves inside `repo`, symlinks and `..` segments
+included, and the Jira source has no task file at all. So the guard was 90
+words of every session's prompt describing a file that is never there, and
+`tests/test_prompt.py` ties its absence to that config check -- relax the
+check and the test says to put the guard back."""
 
 WORKING_TREE = """## Your working tree
 
@@ -64,11 +60,7 @@ which does not carry your commits: it reports "Everything up-to-date", exits 0,
 and ships nothing. Name HEAD explicitly instead:
 
     git push origin HEAD:{default}   # to land your work on {default}
-    git push -u origin HEAD          # to publish this branch, for a pull request
-
-Which of the two is right is this repository's decision, not ClaudeLoop's. If
-its own instructions say work lands on {default}, use the first. If they say
-nothing about it, or ask for a pull request, use the second."""
+    git push -u origin HEAD          # to publish this branch, for a pull request"""
 """Fact about the machine, not policy, so it is composed for every task
 whatever the repository documents about itself.
 
@@ -76,18 +68,31 @@ The literal command lines are deliberate. "Push HEAD rather than the branch
 name" is exactly the kind of instruction a literal-minded session satisfies by
 guessing, and the guess it already made -- `git push origin main`, which git
 answers with "Everything up-to-date" and a zero exit -- is what made a
-finished, committed task report success without shipping anything."""
+finished, committed task report success without shipping anything.
+
+It used to close with a paragraph deferring the choice between those two
+commands to the repository. `precedence()` says nothing below this section can
+make it untrue, so a section that itself hands a decision downward ranked its
+own deferral above the layer it deferred to. The choice is policy and already
+lives in the definition of done, which says work is published as the
+repository's instructions direct and, failing that, as a pull request. What is
+left here is only mechanics; the two comments say which command does which."""
 
 BUILTIN_DEFINITION_OF_DONE = (
     "Done means: the change is implemented; the repository's own tests and "
     "checks, if it has any, pass; the work is committed on the branch you are "
-    "already on; and the work is published -- pushed as this repository's "
-    "instructions direct, or, if they do not say, pushed as this branch with "
-    "a pull request open. You do not need to create a branch, and you may "
-    "rename the one you are on with `git branch -m` if you like. If the "
+    "already on; and the work is published. Publishing is a step you carry "
+    "out after committing, not a box that ticks itself once you have "
+    "committed: a commit that has never left this worktree has published "
+    "nothing. Push as this repository's instructions direct; if they do not "
+    "say, run `git push -u origin HEAD` and open a pull request for it. "
+    "Pushing and opening the pull request are separate steps -- if no forge "
+    "CLI (gh, glab, or similar) is available to open one, push anyway and say "
+    "so in your summary. You do not need to create a branch, and do not "
+    "rename the one you are on: ClaudeLoop finds this task's work again by "
+    "that branch's name. If the "
     "repository has no remote configured, "
-    "or a remote is configured but push credentials or a forge CLI (gh, "
-    "glab, or similar) to open a pull request with are not available, that "
+    "or a remote is configured but push credentials are not available, that "
     "is not blocked: supplying a remote or push credentials is not a "
     "decision anyone can hand you mid-run, so there is nothing to wait on, "
     "and the work itself is finished. Commit, then write status \"done\" "
@@ -107,7 +112,27 @@ S10 took the rest of the branch mechanics out. "Never check out the default
 branch" is now stated by WORKING_TREE as the mechanical impossibility it is,
 and *where* work is published is deferred to the repository, which is the
 layer that knows -- the wording here only covers a repository that says
-nothing. The task-file guard moved to PROTOCOL, which is always present."""
+nothing. The task-file guard moved to PROTOCOL, which is always present.
+
+S13's live smoke test found the publishing requirement being skipped outright.
+Against a repository with a working `origin`, `gh` on PATH and no CLAUDE.md,
+haiku wrote the file, committed, and wrote status "done" with nothing pushed
+-- twice, and once more against the pre-S13 wording, so this is not something
+S13 broke. "The work is published -- pushed as ... instructions direct, or ...
+pushed as this branch with a pull request open" states a property of a
+finished task, and the only imperative near it was the escape hatch's
+"Commit, then write status \"done\"", which is exactly what the session did.
+Publishing is now an instruction to carry out rather than a state to be in,
+the push is named as a literal command, and opening the pull request is
+separated from pushing -- the old sentence let a session that could not do the
+second skip the first, and that reading is now closed off.
+
+The rename permission ("you may rename the one you are on with `git branch -m`
+if you like") was a licence with a cost and no benefit. `worktree.ensure`
+finds an earlier attempt's commits only by looking up `claudeloop/<task.id>`,
+so a renamed branch makes that lookup miss, a fresh branch gets cut from the
+default, and the fresh-start prompts' claim about the earlier attempt's
+commits goes from true to false."""
 
 CLAUDE_MD_NAMES = ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")
 
@@ -187,6 +212,13 @@ def precedence(has_operator: bool) -> str:
     repository decides how work is done here; what is left above it is the
     handful of rules ClaudeLoop itself breaks without, and facts about the
     machine that no instruction can make untrue.
+
+    The last paragraph is deliberately thin. It used to spell out that the
+    repository's instructions "decide how work is done here, including when it
+    is finished and where it lands" -- which is word for word what compose()'s
+    definition-of-done header says a few hundred bytes later, in the one case
+    where a repository has instructions to rank. What is unique here is the
+    ranking itself and the conflict rule, and that is all that is left.
     """
     parts = [
         "These instructions are layered. The ClaudeLoop protocol above is a "
@@ -201,11 +233,10 @@ def precedence(has_operator: bool) -> str:
             "instructions."
         )
     parts.append(
-        "Below those, this repository's own instructions come first: they "
-        "decide how work is done here, including when it is finished and "
-        "where it lands. ClaudeLoop's definition of done is only a fallback "
-        "for what they do not say. Where layers conflict, follow the higher "
-        "one and say so in your summary."
+        "Below those, this repository's own instructions come first, and "
+        "ClaudeLoop's definition of done is only a fallback for what they do "
+        "not say. Where layers conflict, follow the higher one and say so in "
+        "your summary."
     )
     return " ".join(parts)
 
