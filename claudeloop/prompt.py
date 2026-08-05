@@ -81,14 +81,18 @@ left here is only mechanics; the two comments say which command does which."""
 BUILTIN_DEFINITION_OF_DONE = (
     "Done means: the change is implemented; the repository's own tests and "
     "checks, if it has any, pass; the work is committed on the branch you are "
-    "already on; and the work is published -- pushed as this repository's "
-    "instructions direct, or, if they do not say, pushed as this branch with "
-    "a pull request open. You do not need to create a branch, and do not "
+    "already on; and the work is published. Publishing is a step you carry "
+    "out after committing, not a box that ticks itself once you have "
+    "committed: a commit that has never left this worktree has published "
+    "nothing. Push as this repository's instructions direct; if they do not "
+    "say, run `git push -u origin HEAD` and open a pull request for it. "
+    "Pushing and opening the pull request are separate steps -- if no forge "
+    "CLI (gh, glab, or similar) is available to open one, push anyway and say "
+    "so in your summary. You do not need to create a branch, and do not "
     "rename the one you are on: ClaudeLoop finds this task's work again by "
     "that branch's name. If the "
     "repository has no remote configured, "
-    "or a remote is configured but push credentials or a forge CLI (gh, "
-    "glab, or similar) to open a pull request with are not available, that "
+    "or a remote is configured but push credentials are not available, that "
     "is not blocked: supplying a remote or push credentials is not a "
     "decision anyone can hand you mid-run, so there is nothing to wait on, "
     "and the work itself is finished. Commit, then write status \"done\" "
@@ -109,6 +113,19 @@ branch" is now stated by WORKING_TREE as the mechanical impossibility it is,
 and *where* work is published is deferred to the repository, which is the
 layer that knows -- the wording here only covers a repository that says
 nothing. The task-file guard moved to PROTOCOL, which is always present.
+
+S13's live smoke test found the publishing requirement being skipped outright.
+Against a repository with a working `origin`, `gh` on PATH and no CLAUDE.md,
+haiku wrote the file, committed, and wrote status "done" with nothing pushed
+-- twice, and once more against the pre-S13 wording, so this is not something
+S13 broke. "The work is published -- pushed as ... instructions direct, or ...
+pushed as this branch with a pull request open" states a property of a
+finished task, and the only imperative near it was the escape hatch's
+"Commit, then write status \"done\"", which is exactly what the session did.
+Publishing is now an instruction to carry out rather than a state to be in,
+the push is named as a literal command, and opening the pull request is
+separated from pushing -- the old sentence let a session that could not do the
+second skip the first, and that reading is now closed off.
 
 The rename permission ("you may rename the one you are on with `git branch -m`
 if you like") was a licence with a cost and no benefit. `worktree.ensure`

@@ -26,7 +26,7 @@ and are not rewritten as things change. This file records what is true *now*.
 | **S10** | The repository's instructions come first | merged |
 | **S11** | Backlog defects | merged, pagination + comment read still unchecked live |
 | **S12** | A stranded task can come back | merged |
-| **S13** | Prompt audit | implemented, **live smoke test not yet run** |
+| **S13** | Prompt audit | implemented, smoke test run and its finding fixed; not merged |
 
 Two orderings were deliberate. **S3 preceded S2b** so the answer channel was
 designed against two task sources at once, rather than built for the web and
@@ -1073,10 +1073,48 @@ rather than failing, so it also patches `asyncio.run`.
 Net: ~230 words off every session's system prompt, two false statements gone,
 one duplicated ranking gone.
 
-**The live smoke test has not been run.** This slice changes prompt text,
-which is the category this repository has been burned on most, and text fixes
-are exactly the kind that come back differently broken. Two tasks, `haiku`,
-scratch repository, before merge.
+**Live smoke test — four tasks on haiku across four scratch repositories,
+$0.16, and it found a defect older than the slice.** Two scenarios, because
+the deleted working-tree paragraph covered two cases and every previous run
+had exercised only one.
+
+*Scenario one, a repository whose CLAUDE.md demands a push to `main`, two
+tasks.* Both ran `git push origin HEAD:main` — the mapping survives the
+paragraph's deletion, because the two commands carry comments saying which
+does which. Both staged by name (`git add greet.py`), with `PROTOCOL`'s guard
+gone. Neither renamed its branch. Both commits stacked on the bare remote, so
+task two branched from task one's work; both worktrees were released, both
+`claudeloop/<task-id>` branches remain, the scratch repository never left
+`main` and was never dirtied, `tasks.md` came back `- [x] - [x]`, and neither
+task needed a nudge or a wait.
+
+*Scenario two, a repository with a working `origin`, `gh` on `PATH` and no
+CLAUDE.md — the built-in definition of done alone.* **The session wrote the
+file, committed, and wrote status `done` with nothing pushed.** Reproduced
+against the pre-S13 wording as a control, so S13 did not cause it: the hole
+has been open since S10, and S10's own smoke test missed it because it only
+ever tested a repository that *did* say where work lands.
+
+The cause is grammatical. "The work is published -- pushed as this
+repository's instructions direct, or, if they do not say, pushed as this
+branch with a pull request open" describes a property of a finished task, and
+the nearest imperative was the escape hatch's "Commit, then write status
+`done`" — which is exactly what the session did. The escape hatch also bundled
+"push credentials **or** a forge CLI ... are not available" into one condition,
+so a box with no `gh` could read the entire publishing requirement as waived.
+
+Fixed in `BUILTIN_DEFINITION_OF_DONE`: publishing is a step to carry out
+after committing rather than a state to be in ("a commit that has never left
+this worktree has published nothing"), the fallback push is a literal
+`git push -u origin HEAD`, and opening the pull request is separated from
+pushing — a missing forge CLI waives the pull request and nothing else. The
+same scenario re-run against the fixed wording pushed the branch and named it
+in the summary.
+
+One thing left alone: that fourth session did not open a pull request and did
+not say why, which the wording asks for. Its `origin` is a local bare
+repository, where there is no pull request to open — worth re-checking on a
+run whose remote is a real forge.
 
 ---
 

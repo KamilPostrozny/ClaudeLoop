@@ -183,6 +183,35 @@ class PromptTest(unittest.TestCase):
                       BUILTIN_DEFINITION_OF_DONE)
         self.assertNotIn("git branch -m", BUILTIN_DEFINITION_OF_DONE)
 
+    def test_publishing_is_an_instruction_not_a_property(self):
+        # S13's smoke test: a repository with a working origin, gh on PATH and
+        # no CLAUDE.md got a session that wrote the file, committed, and wrote
+        # "done" with nothing pushed -- three times, including once against
+        # the pre-S13 wording. "The work is published" described a finished
+        # task; the only imperative nearby was the escape hatch's "Commit,
+        # then write status done", which is what the session followed.
+        self.assertIn("Publishing is a step you carry out after committing",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("has never left this worktree has published nothing",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("run `git push -u origin HEAD`", BUILTIN_DEFINITION_OF_DONE)
+
+    def test_a_missing_forge_cli_does_not_excuse_the_push(self):
+        # The old escape hatch put "push credentials or a forge CLI ... are
+        # not available" in one condition, so a session with no gh could read
+        # the whole publishing requirement as waived. The push and the pull
+        # request are now separate steps, and only the push survives a missing
+        # forge CLI.
+        self.assertIn("Pushing and opening the pull request are separate steps",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertIn("push anyway and say so in your summary",
+                      BUILTIN_DEFINITION_OF_DONE)
+        self.assertNotIn(
+            "push credentials or a forge CLI (gh, glab, or similar) to open a"
+            " pull request with are not available",
+            BUILTIN_DEFINITION_OF_DONE,
+        )
+
     def test_the_builtin_qualifies_the_tests_requirement(self):
         # The target case for this feature -- a scratch repo -- very likely
         # has no test suite at all; a literal "the tests pass" sends the
@@ -386,9 +415,9 @@ class WorkingTreeSectionTest(unittest.TestCase):
     def test_the_definition_of_done_still_makes_that_choice(self):
         # Deleting the paragraph above only holds if the layer it deferred to
         # actually says it.
-        self.assertIn("as this repository's instructions direct",
+        self.assertIn("Push as this repository's instructions direct",
                       BUILTIN_DEFINITION_OF_DONE)
-        self.assertIn("pushed as this branch with a pull request open",
+        self.assertIn("run `git push -u origin HEAD` and open a pull request",
                       BUILTIN_DEFINITION_OF_DONE)
 
     def test_it_is_present_whether_or_not_the_repo_documents_itself(self):
