@@ -44,6 +44,30 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.max_waits, 200)
         self.assertEqual(cfg.session_timeout_s, 4 * 3600)
         self.assertEqual(cfg.home, self.tmp / "home")
+        self.assertEqual(cfg.base_branch, "",
+                         "unset must mean the repository's own default branch")
+
+    def test_base_branch_is_read(self):
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            'base_branch = "xtool"\n'
+        )
+
+        self.assertEqual(load_config(path, home=self.tmp / "home").base_branch,
+                         "xtool")
+
+    def test_a_base_branch_is_not_verified_at_load(self):
+        # It cannot be: a repo given as a URL has not been cloned yet, so
+        # there are no local refs to check against. worktree.probe does it at
+        # startup, after the clone, for both kinds of repo.
+        path = self.write(
+            f'repo = "{self.repo}"\n'
+            f'tasks_file = "{self.tmp}/tasks.md"\n'
+            'base_branch = "no-such-branch"\n'
+        )
+
+        load_config(path, home=self.tmp / "home")  # must not raise
 
     def test_overrides_defaults(self):
         path = self.write(

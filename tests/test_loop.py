@@ -766,6 +766,53 @@ class MainConfigErrorTest(unittest.TestCase):
         serve.assert_not_called()
 
 
+class BaseBranchStartupTest(unittest.TestCase):
+    """`base_branch` has to reach every place the loop asks which branch a
+    task is cut from. The startup prompt audit is the one that would fail
+    silently: it would print, and size, a prompt naming `main` while every
+    task was cut from somewhere else."""
+
+    def setUp(self):
+        real_default = loop.DEFAULT_CONFIG
+        self.addCleanup(lambda: setattr(loop, "DEFAULT_CONFIG", real_default))
+        loop.DEFAULT_CONFIG = Path(__file__)
+
+    def test_startup_probes_and_composes_with_the_configured_base_branch(self):
+        cfg = Config(repo=Path("/repo"), tasks_file=Path("/tmp/tasks.md"),
+                     home=Path("/tmp/home"), base_branch="xtool")
+        with mock.patch.object(loop, "load_config", return_value=cfg), \
+             mock.patch.object(loop.worktree, "probe",
+                               return_value=None) as probe, \
+             mock.patch.object(loop.worktree, "default_branch",
+                               return_value="xtool") as default_branch, \
+             mock.patch.object(loop.plugins, "register_marketplaces",
+                               return_value=None), \
+             mock.patch.object(loop, "_serve_dashboard"), \
+             mock.patch.object(loop.asyncio, "run"):
+            loop.main([])
+
+        probe.assert_called_once_with(Path("/repo"), "xtool")
+        default_branch.assert_called_once_with(Path("/repo"), "xtool")
+
+    def test_an_unset_base_branch_reaches_git_as_none_not_an_empty_string(self):
+        # "" would send `rev-parse --verify refs/heads/` at git, which
+        # resolves nothing -- turning "work it out" into "no such branch".
+        cfg = Config(repo=Path("/repo"), tasks_file=Path("/tmp/tasks.md"),
+                     home=Path("/tmp/home"))
+        with mock.patch.object(loop, "load_config", return_value=cfg), \
+             mock.patch.object(loop.worktree, "probe",
+                               return_value=None) as probe, \
+             mock.patch.object(loop.worktree, "default_branch",
+                               return_value="main"), \
+             mock.patch.object(loop.plugins, "register_marketplaces",
+                               return_value=None), \
+             mock.patch.object(loop, "_serve_dashboard"), \
+             mock.patch.object(loop.asyncio, "run"):
+            loop.main([])
+
+        probe.assert_called_once_with(Path("/repo"), None)
+
+
 class MainOversizedPromptTest(unittest.TestCase):
     """The startup size check must measure the prompt a session gets.
 
@@ -1187,7 +1234,7 @@ class ResumeWithAnswerTest(unittest.TestCase):
 
         calls = []
         with mock.patch.object(loop.worktree, "ensure",
-                               side_effect=lambda repo, root, task_id: (
+                               side_effect=lambda repo, root, task_id, base=None: (
                                    calls.append((repo, root, task_id)) or tree)), \
              mock.patch.object(loop.worktree, "release"):
             asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task,
@@ -1201,7 +1248,7 @@ class ResumeWithAnswerTest(unittest.TestCase):
         tree = self.cfg.home / "worktrees" / self.task.id
         tree.mkdir(parents=True, exist_ok=True)
         with mock.patch.object(loop.worktree, "ensure",
-                               side_effect=lambda repo, root, task_id: tree), \
+                               side_effect=lambda repo, root, task_id, base=None: tree), \
              mock.patch.object(loop.worktree, "release",
                                side_effect=lambda repo, path: released.append(path)):
             # fake_claude.sh writes a done result.
@@ -1423,9 +1470,9 @@ class ResumeInterruptedTest(unittest.TestCase):
         calls = []
         real = loop.worktree.ensure
 
-        def spy(repo, root, task_id):
+        def spy(repo, root, task_id, base=None):
             calls.append(task_id)
-            return real(repo, root, task_id)
+            return real(repo, root, task_id, base)
 
         with mock.patch.object(loop.worktree, "ensure", side_effect=spy):
             asyncio.run(loop.run_task(self.cfg, self.state, self.source, self.task))

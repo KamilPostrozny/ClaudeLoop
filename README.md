@@ -59,6 +59,7 @@ at 3am that the service is "up" and doing nothing.
 ```toml
 repo                     = "/home/you/Projects/yourrepo"  # or a URL -- see below
 tasks_file               = "/home/you/claudeloop-tasks/yourrepo.md"  # outside repo -- see Tasks below
+base_branch              = ""       # optional, default "" -- the branch tasks are cut from; empty means the repository's own default
 model                    = "opus"   # optional, default "opus"
 max_resumes              = 20       # optional, default 20 -- bounds plain nudges
 max_waits                = 200      # optional, default 200 -- bounds quota waits, separately
@@ -328,6 +329,21 @@ ClaudeLoop finds an interrupted or answered task's earlier commits by looking
 the name up. Your own working copy of `repo` is never checked out, reset or
 otherwise moved — ClaudeLoop only uses it to create the worktree and to cut
 the branch, and the finished commits land in it like any other local branch.
+
+**`base_branch` changes which branch that is.** Left empty — the default —
+ClaudeLoop works it out: `origin`'s HEAD when there is one, otherwise a local
+`main` or `master`. Set it when the work does not live there:
+
+```toml
+base_branch = "xtool"
+```
+
+It must exist as a local branch in `repo`, and the loop refuses to start if it
+does not, naming the key rather than claiming the repository has no default
+branch. It may be the branch you have checked out yourself — a new branch is
+cut from it, which git allows; only checking it out a second time is what
+fails. Nothing else changes: the session is told it is on a branch cut from
+that branch, and where to push to land work there.
 
 If `repo` has an `origin`, the branch is cut from `origin/<default branch>`
 after a fetch, not from your local ref. That matters when the repository's own
